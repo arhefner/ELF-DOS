@@ -32,8 +32,6 @@
             extrn   fat_cache
             extrn   bpb_fat_lba
 
-.link       .align  page
-
 ; ----------------------------------------------------------------
 ; fat_init: reset cache state at boot
 ; Called by kernel_main after bpb_init.

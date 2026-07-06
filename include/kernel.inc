@@ -10,6 +10,21 @@
 ; ----------------------------------------------------------------
 PROG_BASE:      equ     $2000       ; user programs load here
 
+; Fixed, well-known address for the loader to pass mem_base/mem_top to
+; a loaded program: word 0 = mem_base, word 1 = mem_top. Fixed (rather
+; than the kernel's own mem_base/mem_top symbols) so a separately
+; assembled program can read it without knowing the kernel's layout,
+; which shifts across builds. Consulted anytime during a program's
+; run (e.g. by a heap allocator), unlike the command line below,
+; which is only needed once at entry -- so it's passed in a register
+; instead (RA at program entry; see include/kernel_api.inc).
+;
+; NOTE: PROG_BASE and LOADER_ARGS are restated (not #included) in
+; kernel_api.inc, which is deliberately kept independent of this
+; file's internal kernel structures -- keep both definitions in sync
+; if this ever changes.
+LOADER_ARGS:    equ     PROG_BASE-4
+
 ; ----------------------------------------------------------------
 ; Disk geometry
 ; ----------------------------------------------------------------

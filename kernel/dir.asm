@@ -62,8 +62,6 @@
             extrn   _dir_chksum
             extrn   _lfn_extract
 
-.link       .align  page
-
 ;==================================================================
 ; Directory iterator state
 ;==================================================================
@@ -207,6 +205,8 @@ drd_check_entry:
             lbnz    drd_use83           ; mismatch: fall back to 8.3 name
 
             ; LFN is valid: copy dir_lfn to result[DIRENT_NAME]
+            ; (confirmed: f_strcpy only touches RF/RD/D, so ra/r9
+            ; need no protection here)
             mov     rf, dir_lfn         ; RF = LFN source
             mov     rd, r9              ; RD = result buffer (name at offset 0)
             call    f_strcpy
@@ -219,11 +219,24 @@ drd_use83:  ; format 8.3 name into result[DIRENT_NAME]
 
 drd_got_name:
             ; write attribute to result[DIRENT_ATTR]
+            ;
+            ; BUG FIX: "mov rf, r9" and "add16 rf, CONST" both clobber D
+            ; as a side effect of their own internal arithmetic (mov's
+            ; final GLO leaves D = source.lo; add16's carry-propagating
+            ; ADCI leaves D = the computed address's final high byte) --
+            ; so the attribute byte read below did NOT survive across
+            ; them, and this was silently storing a byte derived from
+            ; dir_result's own address instead of the real attribute.
+            ; The cluster/size writes just below don't have this bug:
+            ; they stash the value in RD/RB/RC and explicitly reload it
+            ; after the address computation, which this now also does.
             mov     rf, ra
             add16   rf, DE_ATTR
             ldn     rf                  ; D = attribute byte
+            plo     rc                  ; stash it (see BUG FIX note)
             mov     rf, r9
             add16   rf, DIRENT_ATTR
+            glo     rc                  ; D = attribute byte (reloaded)
             str     rf                  ; result[DIRENT_ATTR] = attr
 
             ; write first cluster to result[DIRENT_CLUST] (big-endian)
@@ -729,10 +742,22 @@ fmt83_null:
 
             ; --- First LFN entry seen (0x40 flag present) ---
             ; save checksum
+            ;
+            ; BUG FIX: same class of bug as drd_got_name's attribute
+            ; write (see project memory) -- "mov rf, dir_lfn_chk" itself
+            ; clobbers D (its own final LDI leaves D = dir_lfn_chk's low
+            ; address byte), so by the time "str rf" ran, D no longer
+            ; held the checksum at all. This meant dir_lfn_chk always
+            ; ended up holding a byte derived from its own address,
+            ; never matching the real computed checksum, so the LFN
+            ; long name was never used -- always fell back to the 8.3
+            ; short name. Now stashed in RB.0 across the mov.
             mov     rf, ra
             add16   rf, LFN_CHKSUM
             ldn     rf                  ; D = checksum byte
+            plo     rb                  ; stash it (see BUG FIX note)
             mov     rf, dir_lfn_chk
+            glo     rb                  ; D = checksum byte (reloaded)
             str     rf
 
             ; mark LFN as being assembled
@@ -877,11 +902,17 @@ lfe_done_ok:
 ;
 ; Args:   RF = pointer to 11-byte short name field
 ; Returns: D = checksum
-; Modifies: RC.0, RF
+; Modifies: RC.0, RF, RB.0
 ;
 ; Algorithm: for each of the 11 bytes:
 ;   checksum = rotate_right(checksum) + byte
 ; where rotate_right is: (checksum >> 1) | ((checksum & 1) << 7)
+;
+; BUG FIX: the loop used to test the counter via "glo rc", which
+; clobbers D -- but D is where the running checksum lives between
+; iterations, so it was being discarded every time, and the function
+; always returned 0 (the counter's final value) instead of the real
+; checksum. Now stashed in RB.0 around the counter check instead.
 ;==================================================================
 
             endp
@@ -901,9 +932,15 @@ dcs_add:
             str     r2                  ; [R2] = rotated checksum
             lda     rf                  ; D = next name byte
             add                         ; D = name byte + rotated checksum
+            plo     rb                  ; stash running checksum (see BUG FIX note)
             dec     rc
             glo     rc
-            lbnz    dcs_loop
-            rtn                         ; D = final checksum
+            lbz     dcs_done            ; counter reached 0: stop
+            glo     rb                  ; D = running checksum (restored)
+            lbr     dcs_loop
+
+dcs_done:
+            glo     rb                  ; D = final checksum
+            rtn
 
             endp

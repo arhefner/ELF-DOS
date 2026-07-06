@@ -51,8 +51,6 @@
             extrn   fat_csec
             extrn   fat_cache
 
-.link       .align  page
-
             proc    bpb_init
 
 ;------------------------------------------------------------------
@@ -82,7 +80,18 @@
 ;   disk byte 2 = LBA bits 23-16 -> R8.0
 ;   disk byte 3 = LBA bits 31-24 -> (ignored)
 ;------------------------------------------------------------------
-            mov     rf, fat_cache+PT_OFFSET+PT_LBA_OFF
+            ; NOTE: "mov rf, fat_cache+CONST" is broken under Asm/02 --
+            ; the linker's fixup for a symbol+constant expression drops
+            ; the symbol's resolved base address, keeping only the
+            ; constant (confirmed by inspecting the linked binary).
+            ; Work around it by loading the base separately and adding
+            ; the constant with add16, which uses no symbol fixup.
+            mov     rf, fat_cache
+            ldi     $01                 ; hi(PT_OFFSET+PT_LBA_OFF) = hi($01C6)
+            phi     rd
+            ldi     $c6                 ; lo(PT_OFFSET+PT_LBA_OFF) = lo($01C6)
+            plo     rd
+            add16   rf, rd              ; RF = fat_cache + PT_OFFSET + PT_LBA_OFF
             lda     rf                  ; D = LBA bits  7-0  (LE byte 0)
             plo     r7
             lda     rf                  ; D = LBA bits 15-8  (LE byte 1)
@@ -123,7 +132,13 @@
 ;   spc=4  -> shift 2 times -> spc_shift=2
 ;   spc=64 -> shift 6 times -> spc_shift=6
 ;------------------------------------------------------------------
-            mov     rf, fat_cache+BPB_SPC
+            ; see Asm/02 symbol+constant fixup note above
+            mov     rf, fat_cache
+            ldi     0
+            phi     rd
+            ldi     BPB_SPC
+            plo     rd
+            add16   rf, rd              ; RF = fat_cache + BPB_SPC
             ldn     rf                  ; D = sectors_per_cluster
             plo     r9                  ; save in R9.0 (survives f_mul16)
 
@@ -136,9 +151,9 @@
             glo     r9                  ; D = spc
 
 spc_loop:   shr                         ; shift D right; DF = old bit 0
-            bdf     spc_done            ; 1-bit reached DF, we have the count
+            lbdf    spc_done            ; 1-bit reached DF, we have the count
             inc     rc                  ; one more shift needed
-            br      spc_loop
+            lbr     spc_loop
 
 spc_done:   mov     rf, bpb_spc_shift
             glo     rc
@@ -155,7 +170,13 @@ spc_done:   mov     rf, bpb_spc_shift
 ; 24-bit LBA add: add16 adds RD to R7 (low 16 bits), then
 ; 'adci 0' propagates any carry into R8.0 (bits 23-16).
 ;------------------------------------------------------------------
-            mov     rf, fat_cache+BPB_RSVD
+            ; see Asm/02 symbol+constant fixup note above
+            mov     rf, fat_cache
+            ldi     0
+            phi     rd
+            ldi     BPB_RSVD
+            plo     rd
+            add16   rf, rd              ; RF = fat_cache + BPB_RSVD
             lda     rf                  ; D = reserved_sectors low byte
             plo     rd
             ldn     rf                  ; D = reserved_sectors high byte
@@ -195,11 +216,22 @@ spc_done:   mov     rf, bpb_spc_shift
 ; Call f_mul16 (RF * RD -> RB); reload fat_lba after the call
 ; since f_mul16 may modify R7/R8.
 ;------------------------------------------------------------------
-            mov     rf, fat_cache+BPB_NFAT
+            ; see Asm/02 symbol+constant fixup note above
+            mov     rf, fat_cache
+            ldi     0
+            phi     rd
+            ldi     BPB_NFAT
+            plo     rd
+            add16   rf, rd              ; RF = fat_cache + BPB_NFAT
             ldn     rf                  ; D = num_fats
             phi     r9                  ; save in R9.1 (survives f_mul16)
 
-            mov     rf, fat_cache+BPB_SPF
+            mov     rf, fat_cache
+            ldi     0
+            phi     rd
+            ldi     BPB_SPF
+            plo     rd
+            add16   rf, rd              ; RF = fat_cache + BPB_SPF
             lda     rf                  ; D = sectors_per_fat low byte
             plo     rd
             ldn     rf                  ; D = sectors_per_fat high byte
@@ -250,7 +282,13 @@ spc_done:   mov     rf, bpb_spc_shift
 ; Extract root_entry_count (LE word at BPB_ROOTENT=$11), store
 ; in bpb_root_ents, then shift right 4 to get the sector count.
 ;------------------------------------------------------------------
-            mov     rf, fat_cache+BPB_ROOTENT
+            ; see Asm/02 symbol+constant fixup note above
+            mov     rf, fat_cache
+            ldi     0
+            phi     rd
+            ldi     BPB_ROOTENT
+            plo     rd
+            add16   rf, rd              ; RF = fat_cache + BPB_ROOTENT
             lda     rf                  ; D = root_entry_count low byte
             plo     rd
             ldn     rf                  ; D = root_entry_count high byte

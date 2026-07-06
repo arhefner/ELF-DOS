@@ -6,10 +6,17 @@
 #   mbr        build mbr.bin only
 #   install    build everything and write to disk (MBR + kernel)
 #   update     build and write kernel only (MBR already installed)
+#   progs      build every progs/*.asm into a loadable progs/*.exe
 #   clean      remove all generated files
 #
 # Override DEV on the command line to target a specific device:
 #   make install DEV=/dev/sdb
+#
+# Program binaries (progs/*.exe) aren't installed by this Makefile --
+# copy them onto the FAT16 partition yourself, e.g. with mtools:
+#   mcopy -i /dev/sdb@@1M progs/type.exe ::TYPE.EXE
+# (offset/partition number depend on your card's layout; see the
+# partition table read out earlier in this project's history.)
 #
 
 ASM         = asm02
@@ -40,7 +47,12 @@ INCS =  include/bios.inc    \
         include/opcodes.def \
         include/kernel.inc
 
-.PHONY: all mbr install update clean
+# ---- User programs (progs/ subdir) ----
+# template.asm is a starting point, not a program -- excluded here.
+PROG_SRCS = $(filter-out progs/template.asm, $(wildcard progs/*.asm))
+PROG_EXES = $(PROG_SRCS:.asm=.exe)
+
+.PHONY: all mbr install update progs clean
 
 all: $(FULL_BIN)
 
@@ -77,6 +89,14 @@ kernel/loader.prg: kernel/loader.asm $(INCS)
 
 kernel/shell.prg: kernel/shell.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) shell.asm
+
+# Programs are single-file: each progs/X.asm assembles and links on
+# its own (no multi-module link order to worry about, unlike KOBJ).
+progs/%.prg: progs/%.asm include/kernel_api.inc include/bios.inc include/opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) $*.asm
+
+progs/%.exe: progs/%.prg
+	$(LINK) $(LFLAGS) -o progs/$*.exe progs/$*.prg
 
 #------------------------------------------------------------------
 # Link rules
@@ -121,7 +141,13 @@ install: $(FULL_BIN) $(MBR_BIN)
 update: $(FULL_BIN)
 	$(SYS) -k $(FULL_BIN) $(DEV)
 
+# Build every progs/*.asm into a loadable progs/*.exe. Not installed
+# by this Makefile -- see the note near the top of this file for
+# getting a binary onto the FAT16 partition.
+progs: $(PROG_EXES)
+
 clean:
 	rm -f boot/*.prg boot/*.lst \
 	      kernel/*.prg kernel/*.lst \
+	      progs/*.prg progs/*.lst progs/*.exe progs/*.build progs/*.lkb \
 	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)

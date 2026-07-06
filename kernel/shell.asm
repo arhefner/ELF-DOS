@@ -5,27 +5,19 @@
 ;   shell_main   -- prints banner, falls through to shell_prompt
 ;   shell_prompt -- prompt/read/dispatch loop (never returns)
 ;
-; Built-in commands:
-;   VER  -- print OS version
-;   DIR  -- list current directory
+; No built-in commands -- every command line is resolved as an
+; external .EXE via prog_load/prog_exec. See include/kernel_api.inc
+; for the K_GETCURDIR/K_SETCURDIR/K_GETVERSION/K_DIR_OPEN/K_DIR_READ
+; calls those programs use instead of reaching into kernel internals.
 ;
 
 #include    include/opcodes.def
 #include    include/bios.inc
-#include    include/kernel.inc
 
 ; cross-file references
-            extrn   dir_open
-            extrn   dir_read
-            extrn   cur_dir
             extrn   line_buf
-
-; same-file proc references (required even in the same file)
-            extrn   cmd_ver
-            extrn   cmd_dir
-            extrn   dir_result
-
-.link       .align  page
+            extrn   prog_load
+            extrn   prog_exec
 
 ;==================================================================
 ; shell_main: print banner, then fall through to shell_prompt
@@ -34,7 +26,7 @@
             proc    shell_main
 
             call    f_inmsg
-            db      "Type VER or DIR.",13,10,0
+            db      "Type a command.",13,10,0
 
             ; fall through into shell_prompt
 
@@ -68,107 +60,51 @@ shell_prompt:
             ; each f_strcmp call (f_strcmp advances both RF and RD)
             mov     ra, rf              ; RA = saved input pointer
 
-            ; --- VER ---
-            mov     rd, ra
-            mov     rf, cmd_ver
-            call    f_strcmp
-            lbz     do_ver
+            ; try to load and run it as a program -- RA holds the start
+            ; of the trimmed input line.
+            ; find the end of the program name (first space or NUL)
+            mov     rf, ra
+cmd_name_scan:
+            ldn     rf
+            lbz     cmd_name_end
+            xri     ' '
+            lbz     cmd_name_end
+            inc     rf
+            lbr     cmd_name_scan
+cmd_name_end:
+            ; RF -> the space or NUL right after the program name
+            ldn     rf
+            lbz     cmd_have_tail       ; NUL: no arguments, RF already there (empty tail)
 
-            ; --- DIR ---
-            mov     rd, ra              ; RESTORE input pointer
-            mov     rf, cmd_dir
-            call    f_strcmp
-            lbz     do_dir
+            ; there's a space: null-terminate the program name in place
+            ; (line_buf is scratch for this one command line anyway) and
+            ; advance past it to the argument text
+            ldi     0
+            str     rf
+            inc     rf
+            call    f_ltrim             ; RF = start of the trimmed command tail
 
-            ; unknown command
+cmd_have_tail:
+            ; RF = pointer to the command tail (possibly an empty string).
+            ; Save it across prog_load, which clobbers RF/RA and other
+            ; registers internally (via dir_read's directory search) --
+            ; it gets loaded into RA right before prog_exec, which
+            ; passes it through to the program untouched (see
+            ; include/kernel_api.inc: RA at entry = command tail).
+            push    rf
+
+            mov     rf, ra              ; RF = program name, now null-terminated
+            call    prog_load
+            lbdf    cmd_load_failed     ; not found / bad magic / no free FCB slot
+
+            pop     ra                  ; RA = command tail, for the program
+            call    prog_exec           ; run it; D = exit code (unused for now)
+            lbr     shell_prompt
+
+cmd_load_failed:
+            pop     rf                  ; discard the saved tail pointer
             call    f_inmsg
             db      "Bad command.",13,10,0
             lbr     shell_prompt
-
-;------------------------------------------------------------------
-; VER: print version string
-;------------------------------------------------------------------
-do_ver:
-            call    f_inmsg
-            db      "ELF-DOS v0.1",13,10,0
-            lbr     shell_prompt
-
-;------------------------------------------------------------------
-; DIR: list current directory
-;
-; Each entry is printed as:
-;   "  <DIR>  name"   for subdirectories
-;   "XXXXXXXX name"   for files (8 hex digits = 32-bit size)
-;------------------------------------------------------------------
-do_dir:
-            ; open current directory cluster
-            mov     rf, cur_dir
-            lda     rf                  ; D = cur_dir high byte
-            phi     rd
-            ldn     rf                  ; D = cur_dir low byte
-            plo     rd                  ; RD = current directory cluster
-            call    dir_open
-
-dir_loop:
-            mov     rf, dir_result      ; RF = result buffer
-            call    dir_read
-            lbdf    dir_done            ; DF=1 = end of directory
-
-            ; check ATTR_DIR bit
-            mov     rf, dir_result
-            add16   rf, DIRENT_ATTR
-            ldn     rf                  ; D = attribute byte
-            ani     ATTR_DIR
-            lbnz    dir_is_dir
-
-            ; ---- file: print 8 hex digit size ----
-            mov     rf, dir_result
-            add16   rf, DIRENT_SIZE
-            lda     rf                  ; D = size byte 3 (MSB)
-            phi     rd
-            lda     rf                  ; D = size byte 2
-            plo     rd
-            call    f_hexout4           ; print high word as 4 hex digits
-
-            lda     rf                  ; D = size byte 1
-            phi     rd
-            ldn     rf                  ; D = size byte 0 (LSB)
-            plo     rd
-            call    f_hexout4           ; print low word as 4 hex digits
-
-            call    f_inmsg
-            db      " ",0
-            lbr     dir_print_name
-
-            ; ---- directory: print label ----
-dir_is_dir:
-            call    f_inmsg
-            db      "  <DIR>  ",0
-
-dir_print_name:
-            mov     rf, dir_result      ; RF = DIRENT_NAME (at offset 0)
-            call    f_msg
-            call    f_inmsg
-            db      13,10,0
-            lbr     dir_loop
-
-dir_done:
-            lbr     shell_prompt
-
-            endp
-
-;------------------------------------------------------------------
-; Command strings and static dir result buffer
-;------------------------------------------------------------------
-
-            proc    _shell_data
-
-cmd_ver:    db      "VER",0
-cmd_dir:    db      "DIR",0
-dir_result: ds      DIRENT_LEN          ; 135-byte result buffer for dir_read
-
-            public  cmd_ver
-            public  cmd_dir
-            public  dir_result
 
             endp
