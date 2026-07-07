@@ -48,6 +48,9 @@
             extrn   bpb_root_lba
             extrn   bpb_data_lba
             extrn   bpb_root_ents
+            extrn   bpb_num_fats
+            extrn   bpb_spf
+            extrn   bpb_max_clust
             extrn   fat_csec
             extrn   fat_cache
 
@@ -226,6 +229,10 @@ spc_done:   mov     rf, bpb_spc_shift
             ldn     rf                  ; D = num_fats
             phi     r9                  ; save in R9.1 (survives f_mul16)
 
+            mov     rf, bpb_num_fats
+            ghi     r9
+            str     rf                  ; bpb_num_fats stored
+
             mov     rf, fat_cache
             ldi     0
             phi     rd
@@ -236,6 +243,37 @@ spc_done:   mov     rf, bpb_spc_shift
             plo     rd
             ldn     rf                  ; D = sectors_per_fat high byte
             phi     rd                  ; RD = sectors_per_fat
+
+            mov     rf, bpb_spf
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; bpb_spf stored (big-endian)
+
+            ; max_clust = sectors_per_fat * 256 - 1, i.e. new_hi =
+            ; spf.lo - 1, new_lo = $FF. Assumes spf < 256 (spf.hi==0),
+            ; true for any realistic FAT16 volume -- FAT16 caps at
+            ; 65536 total clusters = 256 entries/sector * 256 sectors,
+            ; so sectors_per_fat can't meaningfully exceed ~256 without
+            ; exceeding FAT16's own addressing range. A known,
+            ; documented simplification rather than reading the BPB's
+            ; total-sector field and computing the true data cluster
+            ; count -- see kernel.asm's bpb_max_clust comment.
+            mov     rf, bpb_spf
+            inc     rf                  ; RF -> spf's low byte
+            ldn     rf                  ; D = spf.lo
+            smi     1                   ; D = spf.lo - 1
+            phi     rb
+            ldi     $FF
+            plo     rb                  ; RB = new bpb_max_clust value
+
+            mov     rf, bpb_max_clust
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf                  ; bpb_max_clust stored
 
             ; f_mul16: RF * RD -> RB (low word)
             mov     rf, rd              ; RF = sectors_per_fat

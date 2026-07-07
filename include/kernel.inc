@@ -8,7 +8,15 @@
 ; ----------------------------------------------------------------
 ; Memory layout
 ; ----------------------------------------------------------------
-PROG_BASE:      equ     $2000       ; user programs load here
+; $3000 rather than $2000: the kernel itself now extends past $2000
+; (grew to $2073 once FAT write support was added), which silently
+; corrupted the tail of the running kernel every time a program was
+; loaded -- confirmed as the cause of "DIR"/etc. crashing partway
+; through on a freshly-formatted test card. $3000 gives ~4KB of
+; headroom; check the kernel's actual "Highest address" from a build
+; against this any time it grows substantially, and move this again
+; (keeping kernel_api.inc's copy in sync) well before it gets close.
+PROG_BASE:      equ     $3000       ; user programs load here
 
 ; Fixed, well-known address for the loader to pass mem_base/mem_top to
 ; a loaded program: word 0 = mem_base, word 1 = mem_top. Fixed (rather
@@ -100,12 +108,28 @@ FCB_CSECT:      equ     5           ; sector index within current cluster (1 byt
 FCB_BOFF:       equ     6           ; byte offset within current sector (2 bytes)
 FCB_FSIZE:      equ     8           ; file size in bytes (4 bytes, big-endian)
 FCB_FPOS:       equ     12          ; current file position (4 bytes, big-endian)
-FCB_LEN:        equ     16          ; total FCB size
+FCB_ELBA:       equ     16          ; directory entry's sector LBA (3 bytes,
+                                    ; big-endian) -- see dir.asm's
+                                    ; dir_cur_lba/dir_last_off, populated
+                                    ; by file_open from the same values
+FCB_EOFF:       equ     19          ; entry's byte offset within that
+                                    ; sector (2 bytes, big-endian, 0-511)
+FCB_LEN:        equ     32          ; total FCB size (padded from the 21
+                                    ; bytes actually used up to the next
+                                    ; power of 2, so index*FCB_LEN can
+                                    ; stay a simple 5-shift multiply --
+                                    ; see file.asm)
 
 ; FCB flag bits
 FCB_F_OPEN:     equ     $01         ; slot is in use
 FCB_F_WRITE:    equ     $02         ; opened for writing
 FCB_F_DIRTY:    equ     $04         ; io_buf holds data not yet written to disk
+                                    ; (reserved for a future write-back
+                                    ; optimization -- file_write currently
+                                    ; writes through immediately instead)
+FCB_F_SIZECHG:  equ     $08         ; FCB_FSIZE grew since open; the
+                                    ; directory entry's size field needs
+                                    ; rewriting at file_close (see FCB_ELBA)
 
 ; Number of simultaneous open files
 FCB_COUNT:      equ     3

@@ -55,6 +55,8 @@
             extrn   dir_lfn
             extrn   dir_lfn_chk
             extrn   dir_lfn_ok
+            extrn   dir_cur_lba
+            extrn   dir_last_off
             extrn   _dir_next_sector
             extrn   _cluster_to_lba
             extrn   _dir_fmt83
@@ -76,6 +78,18 @@ dir_lfn:        ds      LFN_BUFLEN  ; assembled LFN name buffer
 dir_lfn_chk:    db      0           ; checksum from LFN entries
 dir_lfn_ok:     db      0           ; non-zero if a valid LFN is ready
 
+; dir_cur_lba/dir_last_off: on-disk location of the entry most
+; recently returned by dir_read, for callers (file_open) that need
+; to find their way back to it later (e.g. to rewrite its size
+; after file_write extends a file). dir_cur_lba is the absolute LBA
+; of the currently-loaded sector (set by _dir_next_sector each time
+; it loads one -- stable across multiple dir_read calls returning
+; entries from the same sector). dir_last_off is the entry's byte
+; offset within that sector (0/32/.../480), set fresh by dir_read
+; every time it returns a valid entry.
+dir_cur_lba:    ds      LBA_SIZE
+dir_last_off:   dw      0
+
                 public  dir_clust
                 public  dir_sect
                 public  dir_eptr
@@ -83,6 +97,8 @@ dir_lfn_ok:     db      0           ; non-zero if a valid LFN is ready
                 public  dir_lfn
                 public  dir_lfn_chk
                 public  dir_lfn_ok
+                public  dir_cur_lba
+                public  dir_last_off
 
                 endp
 
@@ -285,6 +301,28 @@ drd_got_name:
             mov     rf, dir_lfn_ok
             ldi     0
             str     rf
+
+            ; record this entry's byte offset within the current
+            ; sector (dir_cur_lba), before RA advances past it --
+            ; see dir_last_off's comment in _dir_data
+            mov     rf, dir_buf
+            glo     rf
+            str     r2
+            glo     ra
+            sm                          ; D = ra.lo - dir_buf.lo, DF=1 if no borrow
+            plo     rb                  ; RB.0 = offset low byte
+            ghi     rf
+            str     r2
+            ghi     ra
+            smb                         ; D = ra.hi - dir_buf.hi - borrow
+            phi     rb                  ; RB = byte offset within dir_buf
+
+            mov     rf, dir_last_off
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf                  ; dir_last_off stored
 
             ; advance entry pointer past this entry
             add16   ra, DIR_ENT_SIZE    ; RA += 32
@@ -496,6 +534,19 @@ dns_in_cluster:
             plo     r8
 
 dns_read:
+            ; record the LBA we're about to load, so dir_read can
+            ; tell callers exactly where an entry in this sector
+            ; lives on disk (see dir_cur_lba's comment in _dir_data)
+            mov     rf, dir_cur_lba
+            glo     r8
+            str     rf
+            inc     rf
+            ghi     r7
+            str     rf
+            inc     rf
+            glo     r7
+            str     rf                  ; dir_cur_lba stored
+
             ; read the sector into dir_buf
             mov     rf, dir_buf
             call    f_ideread

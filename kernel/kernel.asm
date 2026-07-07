@@ -205,6 +205,20 @@ bpb_spc:        db      0               ; sectors per cluster (power of 2)
 bpb_spc_shift:  db      0               ; log2(spc) -- use shifts instead of multiply
 bpb_root_ents:  dw      0               ; root directory entry count (big-endian)
 
+bpb_num_fats:   db      0               ; number of FAT copies (e.g. 2)
+bpb_spf:        dw      0               ; sectors per FAT (big-endian) --
+                                        ; needed to locate FAT copy 2, 3, ...
+bpb_max_clust:  dw      0               ; highest valid cluster number
+                                        ; (big-endian) -- bounds fat_alloc's
+                                        ; scan; derived as spf*256-1 rather
+                                        ; than from the BPB's total-sector
+                                        ; field, so it's a slight
+                                        ; over-estimate if the FAT was
+                                        ; sized looser than the true data
+                                        ; area (rare in practice, but a
+                                        ; known simplification -- see
+                                        ; bpb.asm)
+
                 public  part1_lba
                 public  bpb_fat_lba
                 public  bpb_root_lba
@@ -213,7 +227,10 @@ bpb_root_ents:  dw      0               ; root directory entry count (big-endian
                 public  bpb_spc
                 public  bpb_spc_shift
                 public  bpb_root_ents
-                
+                public  bpb_num_fats
+                public  bpb_spf
+                public  bpb_max_clust
+
 ; ----------------------------------------------------------------
 ; FAT sector cache -- one 512-byte FAT sector held in RAM
 ;

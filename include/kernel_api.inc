@@ -42,7 +42,7 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $2000       ; user programs load here (see kernel.inc)
+PROG_BASE:      equ     $3000       ; user programs load here (see kernel.inc)
 LOADER_ARGS:    equ     PROG_BASE-4 ; word 0 = mem_base, word 1 = mem_top
 
 K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
