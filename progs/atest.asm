@@ -1,19 +1,23 @@
 ;
-; wtest.asm - write-support test utility
+; atest.asm - append-mode write-support test utility
 ;
-; Usage: WTEST <filename>
+; Usage: ATEST <filename>
 ;
-; Writes REPEAT_COUNT copies of a fixed test line, starting from the
-; beginning (mode 1 -- overwrite-and-extend, not append; see ATEST
-; for append-mode testing). If <filename> doesn't already exist,
-; file_open now creates it (see kernel/file.asm's fopen_notfound/
-; _file_create); if it does, this overwrites its content from
-; position 0, same as before file creation existed. Enough total
-; bytes are written to span several clusters on a small-cluster test
-; filesystem, exercising fat_alloc's chain-extension path end to
-; end. Verify afterward with TYPE (content should read back with no
-; gaps or corruption across cluster boundaries) and DIR (size should
-; equal REPEAT_COUNT * 11).
+; Opens <filename> in append mode (K_FILE_OPEN mode 2) and writes
+; REPEAT_COUNT copies of a fixed test line. Creates the file if it
+; doesn't exist (same as WTEST's mode 1); if it already exists, the
+; new content is appended after whatever's already there, rather
+; than overwriting from position 0 -- see kernel/file.asm's
+; file_open mode-2 positioning logic.
+;
+; Run ATEST twice in a row against the same (new or existing) file
+; and check with TYPE/DIR: the second run's output should be the
+; first run's content followed immediately by a second copy, with
+; the final size doubling -- not overwritten, and no gap or overlap
+; at the point where the second run's writes begin (which may or may
+; not land on a cluster boundary, depending on the first run's final
+; size, so this also exercises the append-position math across that
+; boundary).
 ;
 
 #include    include/opcodes.def
@@ -37,20 +41,20 @@ start:
             lbnz    have_name
 
             call    K_INMSG
-            db      "Usage: WTEST <filename>",13,10,0
+            db      "Usage: ATEST <filename>",13,10,0
             ldi     1                   ; exit code 1 = error
             rtn
 
 have_name:
             mov     rf, ra              ; RF = filename
-            ldi     1                   ; mode = read/write
+            ldi     2                   ; mode = append
             call    K_FILE_OPEN         ; D = FCB index, DF=0/1
             lbdf    not_found
 
             plo     rd                  ; stash FCB index (mov below clobbers D)
-            mov     rf, wtest_fcb
+            mov     rf, atest_fcb
             glo     rd
-            str     rf                  ; wtest_fcb = FCB index
+            str     rf                  ; atest_fcb = FCB index
 
             mov     rf, remaining
             ldi     REPEAT_COUNT
@@ -67,12 +71,9 @@ write_loop:
             ldi     0
             phi     rc                  ; RC = byte count
 
-            ; BUG FIX (see progs/type.asm): file_write needs RF
-            ; pointed at the source buffer (test_line, set above) AND
-            ; D = FCB index at the same time -- fetching the index
-            ; via "mov rf, wtest_fcb" would clobber RF away from
-            ; test_line, so RD is used instead.
-            mov     rd, wtest_fcb
+            ; see progs/wtest.asm's own note: RD (not RF) is used to
+            ; fetch the FCB index so RF stays pointed at test_line
+            mov     rd, atest_fcb
             ldn     rd                  ; D = FCB index, RF untouched
             call    K_FILE_WRITE        ; RC = bytes written, DF=0/1
             lbdf    write_error
@@ -85,16 +86,16 @@ write_loop:
             lbr     write_loop
 
 write_done:
-            mov     rd, wtest_fcb
+            mov     rd, atest_fcb
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
-            db      "Write test complete.",13,10,0
+            db      "Append test complete.",13,10,0
             ldi     0                   ; exit code 0 = success
             rtn
 
 write_error:
-            mov     rd, wtest_fcb
+            mov     rd, atest_fcb
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -108,8 +109,8 @@ not_found:
             ldi     1
             rtn
 
-test_line:      db      "0123456789",10
-wtest_fcb:      db      0
+test_line:      db      "abcdefghij",10
+atest_fcb:      db      0
 remaining:      db      0
 
             end     start

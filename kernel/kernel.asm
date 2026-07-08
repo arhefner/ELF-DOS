@@ -32,6 +32,7 @@
             extrn   file_seek
             extrn   dir_open
             extrn   dir_read
+            extrn   path_resolve
             extrn   prog_load
             extrn   prog_exec
 
@@ -98,7 +99,8 @@ k_tty:          lbr     f_tty               ; $013C (BIOS passthrough)
 k_setbd:        lbr     f_setbd             ; $013F (BIOS passthrough)
 k_getcurdir:    lbr     kernel_getcurdir    ; $0142
 k_setcurdir:    lbr     kernel_setcurdir    ; $0145
-                ; next free address: $0148
+k_path_resolve: lbr     path_resolve        ; $0148
+                ; next free address: $014B
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
@@ -290,10 +292,13 @@ mem_base:       dw      0
 ; Shell state
 ; ----------------------------------------------------------------
 cur_dir:        dw      0               ; current directory cluster (0 = root)
-line_buf:       ds      128             ; shell command input buffer
+                                        ; (line_buf moved to the fixed
+                                        ; address LINE_BUF in kernel.inc,
+                                        ; reusing the dead ROM boot stack
+                                        ; at $0080-$00FF instead of
+                                        ; reserving space here)
 
                 public  cur_dir
-                public  line_buf
 
                 endp
 

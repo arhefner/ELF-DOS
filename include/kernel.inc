@@ -8,15 +8,33 @@
 ; ----------------------------------------------------------------
 ; Memory layout
 ; ----------------------------------------------------------------
-; $3000 rather than $2000: the kernel itself now extends past $2000
-; (grew to $2073 once FAT write support was added), which silently
-; corrupted the tail of the running kernel every time a program was
-; loaded -- confirmed as the cause of "DIR"/etc. crashing partway
-; through on a freshly-formatted test card. $3000 gives ~4KB of
-; headroom; check the kernel's actual "Highest address" from a build
-; against this any time it grows substantially, and move this again
-; (keeping kernel_api.inc's copy in sync) well before it gets close.
-PROG_BASE:      equ     $3000       ; user programs load here
+; Moved $2000 -> $3000 -> $4000 over time as the kernel has grown.
+; The first move (to $3000) was forced reactively: the kernel had
+; already grown past $2000 (to $2073) and was silently corrupting its
+; own tail on every prog_load -- confirmed as the cause of "DIR"/etc.
+; crashing partway through on a freshly-formatted test card. The
+; second move (to $4000) was preemptive, made right after adding file
+; creation/append/LFN-writing support pushed the kernel from $2245 to
+; $2a27 in one session -- the biggest single jump since the first
+; move -- rather than waiting for headroom to get uncomfortably thin
+; again. $4000 gives ~5.5KB of headroom; check the kernel's actual
+; "Highest address" from a build against this any time it grows
+; substantially, and move this again (keeping kernel_api.inc's copy
+; in sync) well before it gets close. Note this trades directly
+; against RAM available to programs (mem_base..mem_top) -- there's a
+; planned future pass to shrink the kernel itself once file
+; create/append/LFN support is confirmed working on hardware, which
+; may claw some of this back rather than needing yet another bump.
+PROG_BASE:      equ     $4000       ; user programs load here
+
+; $0080-$00FF: the ROM's small boot-time stack lives here (see
+; boot/mbr.asm) but is dead once the kernel sets up its own stack at
+; himem during boot, so it's free scratch RAM for the kernel's own
+; use afterward. Used for the shell's line buffer instead of
+; reserving 128 bytes in the kernel's own data area -- kernel-only
+; (not restated in kernel_api.inc; no program has a reason to touch
+; the shell's input buffer).
+LINE_BUF:       equ     $0080       ; shell command input buffer (128 bytes)
 
 ; Fixed, well-known address for the loader to pass mem_base/mem_top to
 ; a loaded program: word 0 = mem_base, word 1 = mem_top. Fixed (rather

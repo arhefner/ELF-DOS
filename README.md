@@ -12,22 +12,25 @@ Actively in development. Currently working, confirmed on real hardware:
 
 - Boot chain: MBR -> `krnboot` -> kernel init (BPB/partition parsing).
 - FAT16 directory listing, including long file names (LFN).
-- File open/read/close, and seek (rewind-to-start only).
-- File **write**: extending or overwriting the content of an
-  already-existing file, including growing its cluster chain across
-  multiple clusters (`fat_alloc`/`fat_set`/`fat_flush`) and rewriting the
-  directory entry's size field on close.
-- A handful of shell utilities: `VER`, `DIR`, `CD`, `TYPE`, plus `WTEST`
-  (a write-support test/exercise tool).
+- File open/read/close/write, including creating a brand-new file (with
+  full long file name (LFN) generation for names that aren't already
+  clean 8.3 short names) and append mode -- extending or overwriting an
+  existing file, growing its cluster chain across multiple clusters via
+  `fat_alloc`/`fat_set`/`fat_flush`, and rewriting the directory entry's
+  size/cluster fields on close -- confirmed on hardware.
+- Multi-component and absolute paths (e.g. `TYPE /cfg/env.dat`), via
+  `K_PATH_RESOLVE` (`kernel/path.asm`), used by `file_open`, `CD`, and
+  `DIR` (which can now list a directory without changing into it) --
+  confirmed on hardware.
+- `PWD`: prints the current directory's full path from root, by walking
+  up via each level's `..` entry and recovering its own name from its
+  parent's listing (the reverse of path resolution).
+- A handful of shell utilities: `VER`, `DIR`, `CD`, `TYPE`, `PWD`, plus
+  `WTEST`/`ATEST` (write/append-mode test/exercise tools).
 
 Not yet supported (see `CLAUDE.md` for the fuller running notes):
 
-- Creating a brand-new file (no existing directory entry) or true
-  appending (seeking to end-of-file) — today, opening a file for write
-  always starts from position 0 and overwrites-and-extends.
-- Multi-component / absolute paths (e.g. `TYPE /cfg/env.dat`) — file and
-  directory lookups currently only resolve a single name within the
-  current directory.
+- File/directory timestamps.
 - Multiple partitions / drive letters (`C:`, `D:`, ...).
 - More shell utilities: `DEL`, `REN`, `MD`, `RD`, `COPY`, `MEM`, etc.
 
@@ -60,7 +63,7 @@ kernel/     Kernel proper: BPB/partition init, FAT, directory, file I/O,
             program loader, shell
 include/    Shared headers: BIOS calls, kernel-internal structures,
             the kernel API jump-table contract, opcode macros
-progs/      Shell command programs (VER, DIR, CD, TYPE, WTEST, ...)
+progs/      Shell command programs (VER, DIR, CD, TYPE, PWD, WTEST, ...)
 sys/        Host-side tool for writing images to a target device
 ```
 

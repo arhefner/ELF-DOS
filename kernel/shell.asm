@@ -13,9 +13,9 @@
 
 #include    include/opcodes.def
 #include    include/bios.inc
+#include    include/kernel.inc
 
 ; cross-file references
-            extrn   line_buf
             extrn   prog_load
             extrn   prog_exec
 
@@ -38,7 +38,7 @@ shell_prompt:
             call    f_inmsg
             db      "C:/> ",0
 
-            mov     rf, line_buf
+            mov     rf, LINE_BUF
             ldi     127
             plo     rc
             ldi     0
@@ -49,7 +49,7 @@ shell_prompt:
             db      13,10,0
 
             ; skip leading whitespace
-            mov     rf, line_buf
+            mov     rf, LINE_BUF
             call    f_ltrim             ; RF = first non-space char
 
             ; empty line?
@@ -77,7 +77,7 @@ cmd_name_end:
             lbz     cmd_have_tail       ; NUL: no arguments, RF already there (empty tail)
 
             ; there's a space: null-terminate the program name in place
-            ; (line_buf is scratch for this one command line anyway) and
+            ; (LINE_BUF is scratch for this one command line anyway) and
             ; advance past it to the argument text
             ldi     0
             str     rf

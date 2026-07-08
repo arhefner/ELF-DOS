@@ -42,7 +42,7 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $3000       ; user programs load here (see kernel.inc)
+PROG_BASE:      equ     $4000       ; user programs load here (see kernel.inc)
 LOADER_ARGS:    equ     PROG_BASE-4 ; word 0 = mem_base, word 1 = mem_top
 
 K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
@@ -59,6 +59,31 @@ K_PROG_LOAD:    equ     $011E
 K_PROG_EXEC:    equ     $0121
 K_GETCURDIR:    equ     $0142       ; RD = current directory cluster (no args)
 K_SETCURDIR:    equ     $0145       ; args: RD = new current directory cluster
+
+; K_PATH_RESOLVE: resolve a '/'-separated path to (parent directory
+; cluster, final path component). A leading '/' resolves from the
+; FAT16 root; otherwise resolution starts from RD (get the current
+; directory via K_GETCURDIR first). Every component except the last
+; is looked up as a directory ('.' and '..' work automatically --
+; real FAT entries, no special-casing needed); the last component is
+; NOT looked up here -- the caller decides what to do with it (e.g.
+; search for a file vs. a directory).
+;
+; Args:    RF = pointer to null-terminated path string (not modified)
+;          RD = base cluster for relative paths (ignored if the path
+;               has a leading '/')
+; Returns: RD = resolved parent directory cluster
+;          RF = pointer to the final path component, null-terminated.
+;               Points into kernel scratch memory -- same convention
+;               as the command-tail pointer in RA at program entry,
+;               valid until the next K_PATH_RESOLVE call reuses it.
+;               Empty string if the path was empty, "/", or ended in
+;               a separator (the resolved RD cluster IS the target
+;               in that case -- e.g. CD should skip straight to
+;               K_SETCURDIR rather than searching for an empty name).
+;          DF = 0 on success, DF = 1 if an intermediate component
+;               was not found, or was found but is not a directory
+K_PATH_RESOLVE: equ     $0148
 
 ; ---- Kernel version (read directly, no call needed) ----
 ; $0100's 6-byte header layout is a stable, never-shifting contract
@@ -91,4 +116,4 @@ K_BOOT:         equ     $0139       ; -> f_boot
 K_TTY:          equ     $013C       ; -> f_tty
 K_SETBD:        equ     $013F       ; -> f_setbd
 
-; next free slot address: $0148
+; next free slot address: $014B

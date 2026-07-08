@@ -38,6 +38,7 @@ KOBJ =  kernel/kernel.prg  \
         kernel/bpb.prg     \
         kernel/fat.prg     \
         kernel/dir.prg     \
+        kernel/path.prg    \
         kernel/file.prg    \
         kernel/loader.prg  \
         kernel/shell.prg
@@ -80,6 +81,9 @@ kernel/fat.prg: kernel/fat.asm $(INCS)
 
 kernel/dir.prg: kernel/dir.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) dir.asm
+
+kernel/path.prg: kernel/path.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) path.asm
 
 kernel/file.prg: kernel/file.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) file.asm

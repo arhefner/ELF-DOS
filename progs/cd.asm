@@ -1,10 +1,19 @@
 ;
 ; cd.asm - change the current directory
 ;
-; Usage: CD <name>
-;        CD ..   -- parent directory (the '..' entry already stores
-;                    the correct parent cluster, 0 for the FAT16
-;                    root, so no special-casing needed)
+; Usage: CD <path>
+;        CD ..            -- parent directory (the '..' entry already
+;                             stores the correct parent cluster, 0 for
+;                             the FAT16 root, so no special-casing needed)
+;        CD /cfg/sub       -- absolute, multi-component path
+;        CD cfg/sub        -- relative, multi-component path
+;        CD /               -- root
+;
+; Path resolution (leading '/' = absolute, '.'/'..' handled as real
+; directory entries, multi-component walking) is done by
+; K_PATH_RESOLVE -- see include/kernel_api.inc. CD only has to search
+; the resolved parent directory for the final component and confirm
+; it's a directory, exactly as before path support existed.
 ;
 
 #include    include/opcodes.def
@@ -21,7 +30,7 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = command tail = the directory name argument
+            ; RA = command tail = the path argument
             ldn     ra
             lbnz    have_arg
 
@@ -31,19 +40,35 @@ start:
             rtn
 
 have_arg:
-            ; the argument pointer must be stashed in memory, not a
-            ; register: K_DIR_READ uses R9/RA/RB/RC/RD/RF internally
+            call    K_GETCURDIR         ; RD = current directory cluster
+            mov     rf, ra              ; RF = path argument
+            call    K_PATH_RESOLVE      ; RD = parent cluster, RF = final
+                                        ; component, DF = 0/1
+            lbdf    not_found           ; bad intermediate component
+
+            ; an empty final component means the path itself named
+            ; the target directory ("/", "cfg/", ...) -- the resolved
+            ; parent cluster IS the target, no further lookup needed
+            ldn     rf
+            lbnz    have_component
+            call    K_SETCURDIR         ; RD unchanged since K_PATH_RESOLVE
+            ldi     0
+            rtn
+
+have_component:
+            ; save the final-component pointer in memory (not a
+            ; register): K_DIR_READ uses R9/RA/RB/RC/RD/RF internally
             ; (see kernel/dir.asm), so nothing in a register would
             ; survive the search loop below.
-            mov     rd, ra
-            mov     rf, arg_ptr
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; arg_ptr = argument pointer
+            mov     rb, arg_ptr
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; arg_ptr = final component pointer
 
-            call    K_GETCURDIR         ; RD = current directory cluster
+            ; RD is still the resolved parent cluster from
+            ; K_PATH_RESOLVE (untouched by the arg_ptr store above)
             call    K_DIR_OPEN
 
 cd_loop:
