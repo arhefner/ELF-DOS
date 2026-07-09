@@ -82,6 +82,7 @@
             extrn   fcrw_slot
             extrn   _fclose_rewrite_size
             extrn   _file_create
+            extrn   _delete_located_entry
             extrn   fc_elba
             extrn   fc_eoff
             extrn   fc_shortname
@@ -104,6 +105,10 @@
             extrn   dcr_parent
             extrn   dcr_new_clust
             extrn   dcr_sect_lba
+            extrn   drm_parent
+            extrn   drm_saved_clust
+            extrn   drm_saved_off
+            extrn   drm_saved_lba
 
 ; ----------------------------------------------------------------
 ; file_init: mark all FCB slots as free
@@ -2162,6 +2167,36 @@ fdel_loop:
             ldn     rf                  ; D = cluster low byte
             plo     r9                  ; R9 = first cluster (0 = none)
 
+            call    _delete_located_entry
+            rtn
+
+fdel_err:
+            stc                         ; DF = 1, error
+            rtn
+
+; ----------------------------------------------------------------
+; _delete_located_entry: shared tail for file_delete (DEL) and
+; dir_remove (RD) -- marks the already-located directory entry (and
+; any preceding LFN entries) deleted on disk, then frees its cluster
+; chain. Factored out so dir_remove's own empty-check scan (which
+; needs to dir_open/dir_read the TARGET directory, clobbering dir.asm's
+; live scan state) can run and be undone BEFORE this logic sees
+; dir_last_off/dir_cur_lba/dir_buf, without touching file_delete's own
+; already-hardware-confirmed code path at all -- file_delete's normal
+; case never does anything between locating the entry and calling here,
+; so it needs no save/restore of its own.
+;
+; Args:    R9 = target's first cluster (0 = none)
+;          dir_last_off/dir_cur_lba/dir_buf = the located entry's
+;          parent-directory sector (dir.asm's live scan state, same
+;          convention _file_create itself relies on)
+; Returns: DF = 0 on success, DF = 1 on I/O error
+; Modifies: R7, R8, R9, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    _delete_located_entry
+
             ; stash it in memory, not just R9 -- f_idewrite below is only
             ; confirmed to preserve RA/RC/RD (see CLAUDE.md gotcha #10),
             ; not R9, so a register alone isn't safe across that call
@@ -2229,13 +2264,13 @@ fdel_loop:
                                         ; (reloaded fresh -- _dir_chksum's
                                         ; effect on RC isn't documented)
 
-fdel_lfn_loop:
+dle_lfn_loop:
             ghi     rc
-            lbnz    fdel_lfn_step_back
+            lbnz    dle_lfn_step_back
             glo     rc
-            lbz     fdel_mark_short     ; cursor == 0: start of the
+            lbz     dle_mark_short     ; cursor == 0: start of the
                                         ; sector, nothing precedes it
-fdel_lfn_step_back:
+dle_lfn_step_back:
             sub16   rc, DIR_ENT_SIZE    ; RC = previous entry's offset
 
             mov     rf, dir_buf
@@ -2243,7 +2278,7 @@ fdel_lfn_step_back:
             add16   rf, DE_ATTR
             ldn     rf                  ; D = candidate's attribute byte
             xri     ATTR_LFN
-            lbnz    fdel_mark_short     ; not an LFN entry: this
+            lbnz    dle_mark_short     ; not an LFN entry: this
                                         ; file's run ends here, stop
 
             mov     rf, dir_buf
@@ -2257,7 +2292,7 @@ fdel_lfn_step_back:
             mov     rf, fdel_chksum
             ldn     rf                  ; D = this file's checksum
             sm                          ; D = fdel_chksum - candidate
-            lbnz    fdel_mark_short     ; mismatch: a different file's
+            lbnz    dle_mark_short     ; mismatch: a different file's
                                         ; LFN run, stop walking
 
             mov     rf, dir_buf
@@ -2265,9 +2300,9 @@ fdel_lfn_step_back:
             ldi     $E5
             str     rf                  ; mark this LFN entry deleted
 
-            lbr     fdel_lfn_loop       ; keep walking backward
+            lbr     dle_lfn_loop       ; keep walking backward
 
-fdel_mark_short:
+dle_mark_short:
             mov     rf, dir_buf
             add16   rf, rd              ; RF = short entry base (RD is
                                         ; untouched by the walk above)
@@ -2286,7 +2321,7 @@ fdel_mark_short:
 
             mov     rf, dir_buf
             call    f_idewrite
-            lbdf    fdel_err
+            lbdf    dle_err
 
             ; --- free the cluster chain, now that the entry is safely
             ; marked deleted -- reload from memory, not the R9 we set
@@ -2299,12 +2334,12 @@ fdel_mark_short:
             plo     r9                  ; R9 = first cluster (reloaded)
 
             ghi     r9
-            lbnz    fdel_free_loop
+            lbnz    dle_free_loop
             glo     r9
-            lbz     fdel_flush          ; first cluster == 0: nothing
+            lbz     dle_flush          ; first cluster == 0: nothing
                                         ; to free
 
-fdel_free_loop:
+dle_free_loop:
             mov     rd, r9              ; RD = current cluster
             push    rd                  ; save it across fat_get, which
                                         ; overwrites RD with the NEXT
@@ -2320,14 +2355,14 @@ fdel_free_loop:
                                         ; register -- fat_set below may
                                         ; clobber almost anything)
             pop     rd                  ; RD = current cluster (restored)
-            lbdf    fdel_err            ; I/O error (stack already
+            lbdf    dle_err            ; I/O error (stack already
                                         ; balanced by the pop above)
 
             ldi     0
             phi     rb
             plo     rb                  ; RB = 0 (FAT_FREE)
             call    fat_set             ; marks the current cluster free
-            lbdf    fdel_err
+            lbdf    dle_err
 
             ; is the next cluster end-of-chain? reload fresh from
             ; memory into R9 (fat_set may have clobbered any register)
@@ -2339,19 +2374,19 @@ fdel_free_loop:
 
             ghi     r9
             smi     $FF
-            lbnf    fdel_free_loop      ; hi < $FF: valid, keep freeing
+            lbnf    dle_free_loop      ; hi < $FF: valid, keep freeing
             glo     r9
             smi     $F8
-            lbnf    fdel_free_loop      ; < $FFF8: still valid, keep going
+            lbnf    dle_free_loop      ; < $FFF8: still valid, keep going
 
-fdel_flush:
+dle_flush:
             call    fat_flush
-            lbdf    fdel_err
+            lbdf    dle_err
 
             clc                         ; DF = 0, success
             rtn
 
-fdel_err:
+dle_err:
             stc                         ; DF = 1, error
             rtn
 
@@ -2787,6 +2822,278 @@ dcr_err:
 ; terminated via rtn, so control flow never falls through into them
 dcr_dot:        db      ".",0
 dcr_dotdot:     db      "..",0
+
+; ----------------------------------------------------------------
+; dir_remove: remove an EMPTY subdirectory (RD)
+;
+; Locates the entry in its parent (must be a directory, must not be
+; "." or ".." or the root), scans the TARGET directory itself to
+; confirm it holds nothing but "." and ".." (refusing non-empty
+; directories, matching classic DOS RD -- no recursive delete), then
+; calls the same _delete_located_entry tail file_delete (DEL) uses to
+; mark the parent's entry deleted (and clean up its LFN run) and free
+; the target's cluster chain.
+;
+; The empty-check scan needs its own dir_open/dir_read pass over the
+; TARGET directory, which clobbers dir.asm's live scan state
+; (dir_last_off/dir_cur_lba/dir_buf) -- state _delete_located_entry
+; depends on to still describe the PARENT's located entry. That state
+; is saved into dedicated scratch fields before the empty-check scan
+; and restored (dir_buf via a fresh re-read, since dir_cur_lba alone
+; isn't the sector's actual content) right before calling
+; _delete_located_entry, so that already-hardware-confirmed shared
+; tail sees exactly what it always expects -- zero changes needed to
+; file_delete's own code path.
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success, DF = 1 on error (not found, not a
+;          directory, not empty, is "."/".."/root, or an intermediate
+;          path component is invalid)
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    dir_remove
+
+            mov     rd, rf              ; RD = path pointer
+            mov     rf, fo_name
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fo_name = path pointer
+
+            ; --- resolve the (possibly multi-component) path ---
+            mov     rf, cur_dir
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = current directory cluster
+
+            mov     ra, fo_name
+            lda     ra
+            phi     rf
+            ldn     ra
+            plo     rf                  ; RF = path pointer
+            call    path_resolve        ; RD = parent cluster, RF = final
+                                        ; component
+            lbdf    drm_err             ; bad intermediate component
+
+            ; save BOTH return values into memory immediately, using RB
+            ; (untouched by path_resolve) as the destination pointer for
+            ; each -- the "." / ".." guard below calls f_strcmp, which
+            ; clobbers RD (confirmed the hard way during dir_create's
+            ; own bug hunt -- see its header comment), so both must be
+            ; safely in memory, not left in RD/RF, before that runs.
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; fo_name = final component ptr
+
+            mov     rb, drm_parent
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; drm_parent = parent cluster
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = final component pointer
+            ldn     rd
+            lbz     drm_err             ; empty final component: no
+                                        ; name given
+
+            ; reject "." and ".." as the target -- these aren't real,
+            ; independently removable entries
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, drm_dot
+            call    f_strcmp
+            lbz     drm_err
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, drm_dotdot
+            call    f_strcmp
+            lbz     drm_err
+
+            mov     rf, drm_parent
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = parent cluster (reloaded
+                                        ; fresh)
+            call    dir_open
+
+drm_loop:
+            mov     rf, file_dirent
+            call    dir_read
+            lbdf    drm_err             ; end of directory: not found
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = saved name pointer
+            mov     rf, file_dirent     ; RF = entry name
+            call    f_strcmp
+            lbnz    drm_loop            ; no match: keep looking
+
+            ; must BE a directory
+            mov     rf, file_dirent
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_DIR
+            lbz     drm_err             ; not a directory: reject
+
+            ; capture the target's first cluster now, from file_dirent
+            ; (a copy, independent of dir_buf) -- safe to read even
+            ; after the empty-check scan below overwrites dir_buf
+            mov     rf, file_dirent
+            add16   rf, DIRENT_CLUST
+            lda     rf                  ; D = cluster high byte
+            phi     r9
+            ldn     rf                  ; D = cluster low byte
+            plo     r9                  ; R9 = target's first cluster
+
+            ; cluster 0 is the root sentinel, never a real allocated
+            ; cluster a target could legitimately be -- refuse it
+            ; defensively (root has no directory entry of its own to
+            ; remove in the first place)
+            ghi     r9
+            lbnz    drm_have_target
+            glo     r9
+            lbz     drm_err
+drm_have_target:
+
+            ; --- save the parent's located-entry position before the
+            ; empty-check scan below clobbers dir.asm's live state ---
+            mov     rf, drm_saved_clust
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+
+            mov     rf, dir_last_off
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, drm_saved_off
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, dir_cur_lba
+            mov     rb, drm_saved_lba
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+
+            ; --- confirm the target directory is empty (only '.' and
+            ; '..') before removing it ---
+            mov     rd, r9              ; RD = target's cluster
+            call    dir_open
+
+drm_empty_loop:
+            mov     rf, file_dirent
+            call    dir_read
+            lbdf    drm_restore         ; end of directory: empty,
+                                        ; proceed with removal
+
+            mov     rd, file_dirent
+            mov     rf, drm_dot
+            call    f_strcmp
+            lbz     drm_empty_loop      ; matches "."
+
+            mov     rd, file_dirent
+            mov     rf, drm_dotdot
+            call    f_strcmp
+            lbz     drm_empty_loop      ; matches ".."
+
+            ; anything else: not empty
+            lbr     drm_err
+
+drm_restore:
+            ; --- restore dir.asm's live state to describe the
+            ; PARENT's located entry again, exactly as
+            ; _delete_located_entry expects ---
+            mov     rf, drm_saved_off
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, dir_last_off
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, drm_saved_lba
+            mov     rb, dir_cur_lba
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+
+            mov     rf, dir_cur_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+
+            mov     rf, dir_buf
+            call    f_ideread           ; dir_buf = parent's sector
+                                        ; content again
+            lbdf    drm_err
+
+            mov     rf, drm_saved_clust
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = target's first cluster
+                                        ; (reloaded fresh)
+
+            call    _delete_located_entry
+            rtn                         ; DF passed straight through
+
+drm_err:
+            stc                         ; DF = 1, error
+            rtn
+
+; local literal strings for the "." / ".." checks above -- placed
+; here, after every reachable code path in this proc already
+; terminated via rtn, so control flow never falls through into them
+drm_dot:        db      ".",0
+drm_dotdot:     db      "..",0
 
 ; ----------------------------------------------------------------
 ; file_read: read bytes from an open file into a buffer
@@ -3953,6 +4260,18 @@ dcr_new_clust:      dw      0           ; newly allocated cluster
 dcr_sect_lba:       ds      LBA_SIZE    ; current sector's LBA while
                                         ; zeroing the new cluster
 
+; drm_*: scratch for dir_remove (RD) -- the empty-check scan (its own
+; dir_open/dir_read pass over the TARGET directory) clobbers dir.asm's
+; live scan state, so the PARENT's located-entry position is saved
+; here first and restored afterward, before _delete_located_entry
+; (shared with DEL) runs. Kept in memory, not registers, across that
+; scan for the same reasoning as fdel_next_clust/dcr_*.
+drm_parent:         dw      0           ; resolved parent cluster
+drm_saved_clust:    dw      0           ; target directory's own first
+                                        ; cluster
+drm_saved_off:      dw      0           ; parent's dir_last_off, saved
+drm_saved_lba:      ds      LBA_SIZE    ; parent's dir_cur_lba, saved
+
                 public  io_owner
                 public  file_dirent
                 public  fo_name
@@ -3981,5 +4300,9 @@ dcr_sect_lba:       ds      LBA_SIZE    ; current sector's LBA while
                 public  dcr_parent
                 public  dcr_new_clust
                 public  dcr_sect_lba
+                public  drm_parent
+                public  drm_saved_clust
+                public  drm_saved_off
+                public  drm_saved_lba
 
             endp

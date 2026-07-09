@@ -43,6 +43,11 @@ Actively in development. Currently working, confirmed on real hardware:
   cluster leak rather than a live entry pointing at freed clusters, and
   cleans up the file's LFN entries alongside its short entry. Confirmed
   on hardware.
+- `MD <path>`: creates an empty subdirectory (single-level only -- the
+  parent must already exist). Confirmed on hardware.
+- `RD <path>`: removes an empty subdirectory (refuses non-empty
+  directories, `.`/`..`, and the root). Implemented, not yet
+  hardware-tested.
 - `MD <path>`: creates a new, empty subdirectory (single-level only --
   the parent must already exist) via the new `K_DIR_CREATE` kernel call
   (`kernel/file.asm`'s `dir_create`), which allocates and zeros a cluster,

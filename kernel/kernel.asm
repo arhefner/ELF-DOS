@@ -32,6 +32,7 @@
             extrn   file_seek
             extrn   file_delete
             extrn   dir_create
+            extrn   dir_remove
             extrn   dir_open
             extrn   dir_read
             extrn   path_resolve
@@ -104,7 +105,8 @@ k_setcurdir:    lbr     kernel_setcurdir    ; $0145
 k_path_resolve: lbr     path_resolve        ; $0148
 k_file_delete:  lbr     file_delete         ; $014B
 k_dir_create:   lbr     dir_create          ; $014E
-                ; next free address: $0151
+k_dir_remove:   lbr     dir_remove          ; $0151
+                ; next free address: $0154
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

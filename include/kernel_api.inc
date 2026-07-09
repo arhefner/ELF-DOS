@@ -105,6 +105,15 @@ K_FILE_DELETE:  equ     $014B
 ;          intermediate path component is invalid, or disk full)
 K_DIR_CREATE:   equ     $014E
 
+; K_DIR_REMOVE: remove an EMPTY subdirectory (RD). Refuses non-empty
+; directories (no recursive delete), "."/".."  and the root itself.
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success, DF = 1 on error (not found, not a
+;          directory, not empty, is "."/".."/root, or an intermediate
+;          path component is invalid)
+K_DIR_REMOVE:   equ     $0151
+
 ; ---- Kernel version (read directly, no call needed) ----
 ; $0100's 6-byte header layout is a stable, never-shifting contract
 ; (same reasoning as PROG_BASE/LOADER_ARGS above), so the version
@@ -142,4 +151,4 @@ K_BOOT:         equ     $0139       ; -> f_boot
 K_TTY:          equ     $013C       ; -> f_tty
 K_SETBD:        equ     $013F       ; -> f_setbd
 
-; next free slot address: $0151
+; next free slot address: $0154
