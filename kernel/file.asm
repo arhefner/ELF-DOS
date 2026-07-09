@@ -220,6 +220,18 @@ fopen_found:
             db      13,10,"DIAG fopen chose idx=",0
             mov     rf, fopen_diag_char
             call    f_msg
+
+            mov     rf, fo_mode
+            ldn     rf
+            adi     '0'
+            plo     rb
+            mov     rf, fopen_diag_char
+            glo     rb
+            str     rf
+            call    f_inmsg
+            db      " mode=",0
+            mov     rf, fopen_diag_char
+            call    f_msg
             call    f_inmsg
             db      13,10,0
             pop     rf
