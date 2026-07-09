@@ -99,7 +99,6 @@
             extrn   fa_sector_in_clust
             extrn   fdel_next_clust
             extrn   fdel_chksum
-            extrn   fopen_diag_char
 
 ; ----------------------------------------------------------------
 ; file_init: mark all FCB slots as free
@@ -160,25 +159,6 @@ finit_pad:  inc     rf
             glo     rc
             str     rf                  ; fo_mode = mode
 
-            ; TEMPORARY DIAGNOSTIC: print slot 0's raw FCB_FLAGS byte
-            ; at the very top of every file_open call, before the scan
-            ; runs -- to tell apart "the scan has a bug" from
-            ; "something cleared FCB_FLAGS between the two COPY opens"
-            mov     rf, fcb_table
-            ldn     rf
-            adi     '0'
-            plo     rb
-            mov     rf, fopen_diag_char
-            glo     rb
-            str     rf
-            call    f_inmsg
-            db      13,10,"DIAG fopen entry slot0 flags=",0
-            mov     rf, fopen_diag_char
-            call    f_msg
-            call    f_inmsg
-            db      13,10,0
-            ; END TEMPORARY DIAGNOSTIC
-
             ; --- find a free FCB slot ---
             ldi     0
             plo     rc                  ; RC.0 = index = 0
@@ -203,41 +183,6 @@ fopen_no_slot:
             rtn
 
 fopen_found:
-            ; TEMPORARY DIAGNOSTIC: print which FCB index this open
-            ; call chose as free -- investigating why two sequential
-            ; file_open calls (COPY's src then dst) both got index 0.
-            ; RC (index) and RF (slot base, needed right after this
-            ; block) are protected across the calls.
-            push    rc
-            push    rf
-            glo     rc
-            adi     '0'
-            plo     rb                  ; stash digit
-            mov     rf, fopen_diag_char
-            glo     rb
-            str     rf
-            call    f_inmsg
-            db      13,10,"DIAG fopen chose idx=",0
-            mov     rf, fopen_diag_char
-            call    f_msg
-
-            mov     rf, fo_mode
-            ldn     rf
-            adi     '0'
-            plo     rb
-            mov     rf, fopen_diag_char
-            glo     rb
-            str     rf
-            call    f_inmsg
-            db      " mode=",0
-            mov     rf, fopen_diag_char
-            call    f_msg
-            call    f_inmsg
-            db      13,10,0
-            pop     rf
-            pop     rc
-            ; END TEMPORARY DIAGNOSTIC
-
             ; RF = base address of the free slot, RC.0 = its index
             mov     rd, rf
             mov     rf, fo_fcb
@@ -347,11 +292,30 @@ fopen_loop:
             ldn     rf                  ; D = fcb slot address low byte
             plo     rb                  ; RB = fcb slot base pointer
 
-            ldi     FCB_F_OPEN
+            ; BUG FIX: the old sequence was "ldi FCB_F_OPEN" then
+            ; "mov rf, fo_mode" -- but that mov itself clobbers D
+            ; (gotcha #4), and the following "ldn rf" overwrites D
+            ; again with the raw MODE value, not FCB_F_OPEN. For mode 1
+            ; this self-corrected by coincidence (mode value 1 happens
+            ; to equal FCB_F_OPEN's own bit, and ORing FCB_F_WRITE onto
+            ; it lands on the right answer), which is exactly why this
+            ; went unnoticed through WTEST/ATEST. Mode 0 has no such
+            ; luck: it branched straight to the store with D = 0, so
+            ; every mode-0 open of an already-existing file left
+            ; FCB_FLAGS = 0 -- the slot looked instantly free again,
+            ; even while still legitimately open. Invisible with a
+            ; single FCB in flight (TYPE), but COPY's second (mode 1)
+            ; open then reused that "free" slot for the destination,
+            ; silently aliasing both files onto one FCB. Fixed by
+            ; computing the final flags value fresh via "ldi" in each
+            ; branch, with no mov in between to clobber it.
             mov     rf, fo_mode
             ldn     rf
-            lbz     fopen_flags_done    ; mode 0 = read-only
-            ori     FCB_F_WRITE
+            lbz     fopen_mode_read     ; mode 0 = read-only
+            ldi     FCB_F_OPEN | FCB_F_WRITE
+            lbr     fopen_flags_done
+fopen_mode_read:
+            ldi     FCB_F_OPEN
 fopen_flags_done:
             str     rb                  ; FCB_FLAGS
             inc     rb
@@ -1838,34 +1802,11 @@ fclose_no_invalidate:
             ani     FCB_F_SIZECHG
             lbz     fclose_no_rewrite
 
-            ; TEMPORARY DIAGNOSTIC: confirm close sees SIZECHG and
-            ; calls the rewrite
-            push    rd
-            call    f_inmsg
-            db      13,10,"DIAG fclose: REWRITE-CALLED",13,10,0
-            pop     rd
-            ; END TEMPORARY DIAGNOSTIC
-
             push    rd                  ; save slot base across the rewrite
                                         ; (_fclose_rewrite_size's own
                                         ; header documents RD as one of
                                         ; the registers it clobbers)
             call    _fclose_rewrite_size
-
-            ; TEMPORARY DIAGNOSTIC: report the rewrite's own result.
-            ; DF (the carry flag) is untouched by push/pop/call on this
-            ; CPU -- only arithmetic/shift ops affect it -- so it still
-            ; holds _fclose_rewrite_size's return value here.
-            lbdf    fclose_diag_failed
-            call    f_inmsg
-            db      "DIAG fclose: REWRITE-OK",13,10,0
-            lbr     fclose_diag_done
-fclose_diag_failed:
-            call    f_inmsg
-            db      "DIAG fclose: REWRITE-FAILED",13,10,0
-fclose_diag_done:
-            ; END TEMPORARY DIAGNOSTIC
-
             pop     rd
             ; rewrite errors are ignored here -- there's nothing more
             ; to do at close time, and the slot is released either way
@@ -3132,17 +3073,6 @@ fwrite_copy_done:
             ori     FCB_F_SIZECHG
             str     rf                  ; FCB_FLAGS |= FCB_F_SIZECHG
 
-            ; TEMPORARY DIAGNOSTIC: confirm the growth branch fires
-            push    r7
-            push    rb
-            push    rc
-            call    f_inmsg
-            db      13,10,"DIAG fwrite: SIZECHG-SET",13,10,0
-            pop     rc
-            pop     rb
-            pop     r7
-            ; END TEMPORARY DIAGNOSTIC
-
 fwrite_no_grow:
             ; RC -= chunk
             glo     r7
@@ -3529,9 +3459,6 @@ fdel_next_clust:    dw      0
 ; effect on any other register isn't documented beyond its own args.
 fdel_chksum:        db      0
 
-; TEMPORARY DIAGNOSTIC scratch for file_open's free-slot-scan investigation
-fopen_diag_char:    db      0,0
-
                 public  io_owner
                 public  file_dirent
                 public  fo_name
@@ -3555,6 +3482,5 @@ fopen_diag_char:    db      0,0
                 public  fa_sector_in_clust
                 public  fdel_next_clust
                 public  fdel_chksum
-                public  fopen_diag_char
 
             endp

@@ -115,36 +115,6 @@ have_dst:
             glo     rd
             str     rf                  ; dst_fcb = FCB index
 
-            ; TEMPORARY DIAGNOSTIC: print the actual FCB slot indices
-            ; assigned to src/dst, to rule out them aliasing to the
-            ; same slot. BUG-FIX-STYLE CARE: "mov rf, diag_char" itself
-            ; clobbers D (gotcha #4), so the digit computed via "adi"
-            ; must be stashed in a spare register (RB) before that mov,
-            ; not carried in D across it.
-            call    K_INMSG
-            db      13,10,"DIAG srcfcb=",0
-            mov     rf, src_fcb
-            ldn     rf
-            adi     '0'
-            plo     rb                  ; stash digit
-            mov     rf, diag_char
-            glo     rb                  ; D = digit (reloaded)
-            str     rf
-            call    K_MSG
-            call    K_INMSG
-            db      13,10,"DIAG dstfcb=",0
-            mov     rf, dst_fcb
-            ldn     rf
-            adi     '0'
-            plo     rb                  ; stash digit
-            mov     rf, diag_char
-            glo     rb                  ; D = digit (reloaded)
-            str     rf
-            call    K_MSG
-            call    K_INMSG
-            db      13,10,0
-            ; END TEMPORARY DIAGNOSTIC
-
 ;------------------------------------------------------------------
 ; Copy loop: read a chunk from source, write the same chunk (exact
 ; byte count K_FILE_READ actually returned) to destination.
@@ -165,16 +135,6 @@ copy_loop:
             ghi     rc
             lbz     copy_done           ; 0 bytes read: source EOF
 have_bytes:
-            ; TEMPORARY DIAGNOSTIC: confirm this branch is ever reached
-            ; (RC holds the real byte count and must survive -- protect
-            ; it across the call since K_INMSG's preservation of RC is
-            ; unconfirmed, only R9 is documented safe)
-            push    rc
-            call    K_INMSG
-            db      13,10,"DIAG have_bytes",13,10,0
-            pop     rc
-            ; END TEMPORARY DIAGNOSTIC
-
             mov     rf, copy_buf        ; RF = source buffer (RC still
                                         ; holds the byte count from
                                         ; K_FILE_READ -- mov only
@@ -247,7 +207,6 @@ src_ptr:    dw      0
 dst_ptr:    dw      0
 src_fcb:    db      0
 dst_fcb:    db      0
-diag_char:  db      0,0                 ; TEMPORARY DIAGNOSTIC scratch
 copy_buf:   ds      COPY_CHUNK_LEN
 
             end     start
