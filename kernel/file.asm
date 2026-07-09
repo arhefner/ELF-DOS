@@ -159,61 +159,6 @@ finit_pad:  inc     rf
             glo     rc
             str     rf                  ; fo_mode = mode
 
-            ; TEMPORARY DIAGNOSTIC: cur_dir zero/nonzero + each FCB
-            ; slot's free/busy state, at every file_open entry --
-            ; investigating cur_dir seemingly not surviving prog_load's
-            ; root-fallback path once file_open's FCB_FLAGS fix landed.
-            ; No register values printed (only branch-taken markers),
-            ; so this can't itself introduce a mov-clobbers-D bug.
-            mov     rf, cur_dir
-            lda     rf
-            lbnz    diag_cd_nonzero
-            ldn     rf
-            lbnz    diag_cd_nonzero
-            call    f_inmsg
-            db      13,10,"DIAG fopen curdir=Z slots=",0
-            lbr     diag_cd_done
-diag_cd_nonzero:
-            call    f_inmsg
-            db      13,10,"DIAG fopen curdir=N slots=",0
-diag_cd_done:
-            mov     rf, fcb_table
-            ldn     rf
-            lbz     diag_s0free
-            call    f_inmsg
-            db      "X",0
-            lbr     diag_s0done
-diag_s0free:
-            call    f_inmsg
-            db      "0",0
-diag_s0done:
-            mov     rf, fcb_table
-            add16   rf, FCB_LEN
-            ldn     rf
-            lbz     diag_s1free
-            call    f_inmsg
-            db      "X",0
-            lbr     diag_s1done
-diag_s1free:
-            call    f_inmsg
-            db      "0",0
-diag_s1done:
-            mov     rf, fcb_table
-            add16   rf, FCB_LEN
-            add16   rf, FCB_LEN
-            ldn     rf
-            lbz     diag_s2free
-            call    f_inmsg
-            db      "X",0
-            lbr     diag_s2done
-diag_s2free:
-            call    f_inmsg
-            db      "0",0
-diag_s2done:
-            call    f_inmsg
-            db      13,10,0
-            ; END TEMPORARY DIAGNOSTIC
-
             ; --- find a free FCB slot ---
             ldi     0
             plo     rc                  ; RC.0 = index = 0

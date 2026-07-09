@@ -34,8 +34,8 @@ Actively in development. Currently working, confirmed on real hardware:
 - `COPY <source> <destination>`: single file to single file (no
   wildcards/trees), composed entirely from existing `file_open`/
   `file_read`/`file_write`/`file_close` -- no new kernel primitive needed.
-  A real `file_open` bug (see `CLAUDE.md`) was found and fixed via this
-  command -- fix not yet re-confirmed on hardware.
+  Confirmed on hardware (surfaced and led to fixing three real `file_open`/
+  `prog_load` bugs -- see `CLAUDE.md`).
 - `DEL <filename>`: deletes a file (refuses directories) via the new
   `K_FILE_DELETE` kernel call (`kernel/file.asm`'s `file_delete`), which
   marks the directory entry deleted on disk *before* freeing its cluster
