@@ -209,7 +209,28 @@ pload_restore_dir:
             glo     r9                  ; D = FCB index
 
 pload_opened:
+            ; BUG FIX: "mov rf, prog_fcb" itself clobbers D (gotcha #4),
+            ; so the real FCB index just returned by file_open (in D,
+            ; either straight from the fast-path "lbnf pload_opened"
+            ; above or via "glo r9" just above for the root-fallback
+            ; path) would not survive to "str rf" below without this
+            ; stash. This left prog_fcb permanently holding a garbage
+            ; constant (part of its own address, $92) instead of the
+            ; real index -- invisible before the file_open FCB_FLAGS
+            ; fix, since every open always landed on slot 0 anyway
+            ; (the old bug made every slot look free regardless), but
+            ; now that slots are tracked correctly, every subsequent
+            ; file_read/file_close call using this garbage index
+            ; either hits file_close's bounds check (silently doing
+            ; nothing, leaking the real FCB every load) or corrupts
+            ; unrelated memory via file_read's unchecked index math.
+            plo     r9                  ; stash FCB index (R9 is free
+                                        ; here -- its only other use,
+                                        ; carrying the index across the
+                                        ; cur_dir restore, is already
+                                        ; consumed by the "glo r9" above)
             mov     rf, prog_fcb
+            glo     r9                  ; D = FCB index (reloaded)
             str     rf                  ; prog_fcb = FCB index
 
             ; count = mem_top - PROG_BASE ($2000: hi=$20, lo=$00)
@@ -230,9 +251,22 @@ pload_opened:
             smb                         ; D = mem_top.hi - $20 - borrow
             phi     rc                  ; RC = available space (mem_top - PROG_BASE)
 
+            ; BUG FIX: the old comment here claimed "D unaffected" by
+            ; "mov rf, PROG_BASE", but mov always clobbers D (gotcha
+            ; #4) -- it left D = PROG_BASE's own low byte ($00, since
+            ; PROG_BASE=$4000), not the real FCB index just loaded on
+            ; the line above. file_read has therefore always effectively
+            ; been called with a hardcoded index of 0 -- invisible only
+            ; because slot 0 has always happened to be the one actually
+            ; in use (sequential single-program loading naturally keeps
+            ; reusing it once closed properly). Fixed by stashing the
+            ; real index in R9 (free here) across the mov, same pattern
+            ; as pload_opened's fix above.
             mov     rf, prog_fcb
             ldn     rf                  ; D = FCB index
-            mov     rf, PROG_BASE       ; RF = destination (D unaffected)
+            plo     r9                  ; stash it
+            mov     rf, PROG_BASE       ; RF = destination
+            glo     r9                  ; D = FCB index (reloaded, correct)
             call    file_read           ; RC = bytes read, DF=0/1
             lbdf    pload_read_err
 

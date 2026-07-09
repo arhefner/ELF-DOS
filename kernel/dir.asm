@@ -132,7 +132,15 @@ dir_last_off:   dw      0
             str     rf
 
             ; clear LFN state
+            ; BUG FIX: this was missing "ldi 0" before the str -- "mov
+            ; rf, dir_lfn_ok" itself clobbers D (gotcha #4), so this
+            ; stored dir_lfn_ok's own address low byte ($49, confirmed
+            ; nonzero via the linked symbol table) instead of 0, every
+            ; time dir_open ran. Every other write to dir_lfn_ok in
+            ; this file correctly reloads D fresh right before the str
+            ; (see lines below) -- this one was an isolated slip.
             mov     rf, dir_lfn_ok
+            ldi     0
             str     rf
 
             rtn
