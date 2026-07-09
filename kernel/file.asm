@@ -99,6 +99,7 @@
             extrn   fa_sector_in_clust
             extrn   fdel_next_clust
             extrn   fdel_chksum
+            extrn   fopen_diag_char
 
 ; ----------------------------------------------------------------
 ; file_init: mark all FCB slots as free
@@ -159,6 +160,25 @@ finit_pad:  inc     rf
             glo     rc
             str     rf                  ; fo_mode = mode
 
+            ; TEMPORARY DIAGNOSTIC: print slot 0's raw FCB_FLAGS byte
+            ; at the very top of every file_open call, before the scan
+            ; runs -- to tell apart "the scan has a bug" from
+            ; "something cleared FCB_FLAGS between the two COPY opens"
+            mov     rf, fcb_table
+            ldn     rf
+            adi     '0'
+            plo     rb
+            mov     rf, fopen_diag_char
+            glo     rb
+            str     rf
+            call    f_inmsg
+            db      13,10,"DIAG fopen entry slot0 flags=",0
+            mov     rf, fopen_diag_char
+            call    f_msg
+            call    f_inmsg
+            db      13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
             ; --- find a free FCB slot ---
             ldi     0
             plo     rc                  ; RC.0 = index = 0
@@ -183,6 +203,29 @@ fopen_no_slot:
             rtn
 
 fopen_found:
+            ; TEMPORARY DIAGNOSTIC: print which FCB index this open
+            ; call chose as free -- investigating why two sequential
+            ; file_open calls (COPY's src then dst) both got index 0.
+            ; RC (index) and RF (slot base, needed right after this
+            ; block) are protected across the calls.
+            push    rc
+            push    rf
+            glo     rc
+            adi     '0'
+            plo     rb                  ; stash digit
+            mov     rf, fopen_diag_char
+            glo     rb
+            str     rf
+            call    f_inmsg
+            db      13,10,"DIAG fopen chose idx=",0
+            mov     rf, fopen_diag_char
+            call    f_msg
+            call    f_inmsg
+            db      13,10,0
+            pop     rf
+            pop     rc
+            ; END TEMPORARY DIAGNOSTIC
+
             ; RF = base address of the free slot, RC.0 = its index
             mov     rd, rf
             mov     rf, fo_fcb
@@ -3474,6 +3517,9 @@ fdel_next_clust:    dw      0
 ; effect on any other register isn't documented beyond its own args.
 fdel_chksum:        db      0
 
+; TEMPORARY DIAGNOSTIC scratch for file_open's free-slot-scan investigation
+fopen_diag_char:    db      0,0
+
                 public  io_owner
                 public  file_dirent
                 public  fo_name
@@ -3497,5 +3543,6 @@ fdel_chksum:        db      0
                 public  fa_sector_in_clust
                 public  fdel_next_clust
                 public  fdel_chksum
+                public  fopen_diag_char
 
             endp
