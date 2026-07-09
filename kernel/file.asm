@@ -2154,7 +2154,21 @@ fdel_loop:
                                         ; what _dir_chksum wants)
             call    _dir_chksum         ; D = checksum (clobbers
                                         ; RC.0/RF/RB.0)
+            plo     rb                  ; stash checksum in RB.0 -- BUG
+                                        ; FIX: "mov rf, fdel_chksum"
+                                        ; itself clobbers D (its own
+                                        ; final side effect leaves D =
+                                        ; fdel_chksum's own address low
+                                        ; byte, per gotcha #4), so the
+                                        ; real checksum just returned in
+                                        ; D would not survive to "str
+                                        ; rf" below without this stash.
+                                        ; _dir_chksum already documents
+                                        ; RB.0 as one of its own clobber
+                                        ; targets, so reusing it here
+                                        ; costs nothing extra.
             mov     rf, fdel_chksum
+            glo     rb                  ; D = checksum (reloaded, safe)
             str     rf                  ; fdel_chksum = checksum byte
 
             ; --- walk backward through this file's LFN entries,
