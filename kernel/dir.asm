@@ -11,10 +11,12 @@
 ; LFN is present.
 ;
 ; Result buffer layout (DIRENT_LEN bytes, caller-provided):
-;   [DIRENT_NAME]  null-terminated filename (up to 127 chars)
-;   [DIRENT_ATTR]  FAT attribute byte
-;   [DIRENT_CLUST] first cluster, 2 bytes, big-endian
-;   [DIRENT_SIZE]  file size, 4 bytes, big-endian
+;   [DIRENT_NAME]    null-terminated filename (up to 127 chars)
+;   [DIRENT_ATTR]    FAT attribute byte
+;   [DIRENT_CLUST]   first cluster, 2 bytes, big-endian
+;   [DIRENT_SIZE]    file size, 4 bytes, big-endian
+;   [DIRENT_WRTTIME] last-write time, 2 bytes, big-endian, packed FAT format
+;   [DIRENT_WRTDATE] last-write date, 2 bytes, big-endian, packed FAT format
 ;
 ; dir_read skips:
 ;   deleted entries (first byte = $E5)
@@ -296,6 +298,38 @@ drd_got_name:
             inc     rf
             glo     rb
             str     rf                  ; LSB last
+
+            ; write last-write time to result[DIRENT_WRTTIME] (big-endian)
+            ; time is 2 bytes little-endian at DE_WRTTIME (offset 22)
+            mov     rf, ra
+            add16   rf, DE_WRTTIME
+            lda     rf                  ; D = time low byte (LE byte 0)
+            plo     rd
+            ldn     rf                  ; D = time high byte (LE byte 1)
+            phi     rd
+            mov     rf, r9
+            add16   rf, DIRENT_WRTTIME
+            ghi     rd
+            str     rf                  ; result[DIRENT_WRTTIME]   = high
+            inc     rf
+            glo     rd
+            str     rf                  ; result[DIRENT_WRTTIME+1] = low
+
+            ; write last-write date to result[DIRENT_WRTDATE] (big-endian)
+            ; date is 2 bytes little-endian at DE_WRTDATE (offset 24)
+            mov     rf, ra
+            add16   rf, DE_WRTDATE
+            lda     rf                  ; D = date low byte (LE byte 0)
+            plo     rd
+            ldn     rf                  ; D = date high byte (LE byte 1)
+            phi     rd
+            mov     rf, r9
+            add16   rf, DIRENT_WRTDATE
+            ghi     rd
+            str     rf                  ; result[DIRENT_WRTDATE]   = high
+            inc     rf
+            glo     rd
+            str     rf                  ; result[DIRENT_WRTDATE+1] = low
 
             ; clear LFN state
             mov     rf, dir_lfn_ok

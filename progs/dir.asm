@@ -17,7 +17,10 @@
 ;                  see kernel/file.asm's own FCB_FSIZE/FCB_FPOS
 ;                  ceiling
 ;   columns 6-12:  " <DIR> " for subdirectories, blank for files
-;   columns 13+:   the file/directory name
+;   columns 13-31: last-write date/time, "MM/DD/YYYY HH:MM  "
+;                  (unpacked from DIRENT_WRTDATE/DIRENT_WRTTIME's
+;                  packed FAT bit fields -- see kernel/rtc.asm)
+;   columns 32+:   the file/directory name
 ;
 
 #include    include/opcodes.def
@@ -152,7 +155,7 @@ count_done:
 
             mov     rf, tag_blank       ; blank 7-column directory tag
             call    K_MSG
-            lbr     dir_print_name
+            lbr     dir_print_datetime
 
             ; ---- directory: blank size + " <DIR> " tag ----
 dir_is_dir:
@@ -160,6 +163,139 @@ dir_is_dir:
             call    K_MSG
             mov     rf, dir_tag
             call    K_MSG
+
+dir_print_datetime:
+            ; ---- unpack last-write date into day/month/year ----
+            mov     rf, dir_result
+            add16   rf, DIRENT_WRTDATE
+            lda     rf                  ; D = date high byte
+            phi     rd
+            ldn     rf                  ; D = date low byte
+            plo     rd                  ; RD = packed date
+
+            ; BUG FIX: "mov rf, wr_day" itself clobbers D (its own
+            ; final LDI leaves D = wr_day's low address byte), so the
+            ; masked day value just computed in D would not survive
+            ; to "str rf" below unless the mov happens first, with D
+            ; recomputed fresh right before the store -- the same
+            ; class of bug this project has hit repeatedly (see
+            ; CLAUDE.md gotcha #4). Confirmed on hardware: every
+            ; entry showed the identical (wrong) "122/00 ... 125:126"
+            ; -- wr_day/wr_month/wr_hour/wr_minute's own low address
+            ; bytes, constant regardless of the real per-entry value,
+            ; since only wr_year's store happened to reload D (via
+            ; ghi/glo) after its own mov and so wasn't affected.
+            mov     rf, wr_day
+            glo     rd
+            ani     $1F                 ; day = bits 4-0
+            str     rf
+
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd                  ; RD = packed_date >> 5
+            mov     rf, wr_month
+            glo     rd
+            ani     $0F                 ; month = bits 8-5 (now bits 3-0)
+            str     rf
+
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd                  ; RD = packed_date >> 9 (year-1980)
+            add16   rd, 1980
+            mov     rf, wr_year
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            ; ---- unpack last-write time into hour/minute ----
+            mov     rf, dir_result
+            add16   rf, DIRENT_WRTTIME
+            lda     rf                  ; D = time high byte
+            phi     rd
+            ldn     rf                  ; D = time low byte
+            plo     rd                  ; RD = packed time
+
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd                  ; RD = packed_time >> 5
+            mov     rf, wr_minute
+            glo     rd
+            ani     $3F                 ; minute = bits 10-5 (now bits 5-0)
+            str     rf
+
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd                  ; RD = packed_time >> 11 (hour)
+            mov     rf, wr_hour
+            glo     rd
+            str     rf
+
+            ; ---- print "MM/DD/YYYY HH:MM  " ----
+            mov     rf, wr_month
+            ldn     rf
+            plo     rd
+            ldi     0
+            phi     rd
+            call    print2digit
+
+            call    K_INMSG
+            db      "/",0
+
+            mov     rf, wr_day
+            ldn     rf
+            plo     rd
+            ldi     0
+            phi     rd
+            call    print2digit
+
+            call    K_INMSG
+            db      "/",0
+
+            mov     rf, wr_year
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, size_buf        ; reuse size_buf -- this entry's
+                                        ; size has already been printed
+            call    f_uintout
+            ldi     0
+            str     rf
+            mov     rf, size_buf
+            call    K_MSG
+
+            call    K_INMSG
+            db      " ",0
+
+            mov     rf, wr_hour
+            ldn     rf
+            plo     rd
+            ldi     0
+            phi     rd
+            call    print2digit
+
+            call    K_INMSG
+            db      ":",0
+
+            mov     rf, wr_minute
+            ldn     rf
+            plo     rd
+            ldi     0
+            phi     rd
+            call    print2digit
+
+            call    K_INMSG
+            db      "  ",0
 
 dir_print_name:
             mov     rf, dir_result      ; RF = DIRENT_NAME (at offset 0)
@@ -184,6 +320,42 @@ not_dir:
             ldi     1
             rtn
 
+; ----------------------------------------------------------------
+; print2digit: print RD (0-99) as two zero-padded decimal digits
+; (e.g. 3 -> "03", 14 -> "14"). Used for month/day/hour/minute.
+; Args:   RD = value (0-99)
+; Returns: nothing
+; ----------------------------------------------------------------
+print2digit:
+            glo     rd
+            smi     10
+            lbdf    p2d_use_uintout     ; value >= 10: two digits already
+
+            glo     rd
+            adi     '0'
+            plo     rc                  ; stash the single digit's char
+            mov     rf, digit_buf
+            ldi     '0'
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf
+            lbr     p2d_print
+
+p2d_use_uintout:
+            mov     rf, digit_buf
+            call    f_uintout
+            ldi     0
+            str     rf
+
+p2d_print:
+            mov     rf, digit_buf
+            call    K_MSG
+            rtn
+
 arg_ptr:    dw      0
 dir_result: ds      DIRENT_LEN          ; 135-byte result buffer for K_DIR_READ
 size_buf:   ds      6                   ; decimal size scratch (max "65535"+null)
@@ -192,5 +364,12 @@ spaces5:    db      "     ",0           ; 5 spaces -- blank size field, and
                                         ; source for right-justifying sizes
 dir_tag:    db      " <DIR> ",0         ; 7-column directory tag
 tag_blank:  db      "       ",0        ; 7 spaces -- blank tag field for files
+digit_buf:  ds      3                   ; scratch for print2digit ("99"+null)
+
+wr_day:     db      0
+wr_month:   db      0
+wr_year:    dw      0
+wr_hour:    db      0
+wr_minute:  db      0
 
             end     start

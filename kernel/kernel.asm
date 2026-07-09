@@ -30,6 +30,7 @@
             extrn   file_read
             extrn   file_write
             extrn   file_seek
+            extrn   file_delete
             extrn   dir_open
             extrn   dir_read
             extrn   path_resolve
@@ -100,7 +101,8 @@ k_setbd:        lbr     f_setbd             ; $013F (BIOS passthrough)
 k_getcurdir:    lbr     kernel_getcurdir    ; $0142
 k_setcurdir:    lbr     kernel_setcurdir    ; $0145
 k_path_resolve: lbr     path_resolve        ; $0148
-                ; next free address: $014B
+k_file_delete:  lbr     file_delete         ; $014B
+                ; next free address: $014E
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

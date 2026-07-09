@@ -27,12 +27,27 @@ Actively in development. Currently working, confirmed on real hardware:
   parent's listing (the reverse of path resolution).
 - A handful of shell utilities: `VER`, `DIR`, `CD`, `TYPE`, `PWD`, plus
   `WTEST`/`ATEST` (write/append-mode test/exercise tools).
+- Last-write file timestamps: every file create/write records the current
+  time (from the RTC when present, via `kernel/rtc.asm`; a fixed default
+  otherwise), and `DIR` shows it as an `MM/DD/YYYY HH:MM` column --
+  confirmed on hardware.
+- `COPY <source> <destination>`: single file to single file (no
+  wildcards/trees), composed entirely from existing `file_open`/
+  `file_read`/`file_write`/`file_close` -- no new kernel primitive needed.
+- `DEL <filename>`: deletes a file (refuses directories) via the new
+  `K_FILE_DELETE` kernel call (`kernel/file.asm`'s `file_delete`), which
+  marks the directory entry deleted on disk *before* freeing its cluster
+  chain, so an interruption mid-delete leaves at worst a recoverable
+  cluster leak rather than a live entry pointing at freed clusters.
+  **Implemented, not yet confirmed on hardware** -- next thing to test.
 
 Not yet supported (see `CLAUDE.md` for the fuller running notes):
 
-- File/directory timestamps.
+- `SETTIME` (or similar) to set/correct the clock -- deliberately deferred
+  alongside the rest of the small-utility-command backlog below.
 - Multiple partitions / drive letters (`C:`, `D:`, ...).
-- More shell utilities: `DEL`, `REN`, `MD`, `RD`, `COPY`, `MEM`, etc.
+- More shell utilities: `REN`, `MD`, `RD`, `MEM`, etc.
+- Batch/script support.
 
 ## Architecture
 
@@ -60,7 +75,7 @@ codebase.
 ```
 boot/       MBR and second-stage boot loader (krnboot)
 kernel/     Kernel proper: BPB/partition init, FAT, directory, file I/O,
-            program loader, shell
+            RTC/timestamps, program loader, shell
 include/    Shared headers: BIOS calls, kernel-internal structures,
             the kernel API jump-table contract, opcode macros
 progs/      Shell command programs (VER, DIR, CD, TYPE, PWD, WTEST, ...)

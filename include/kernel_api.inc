@@ -85,6 +85,17 @@ K_SETCURDIR:    equ     $0145       ; args: RD = new current directory cluster
 ;               was not found, or was found but is not a directory
 K_PATH_RESOLVE: equ     $0148
 
+; K_FILE_DELETE: delete a file (not a directory -- rejected).
+; Crash-safe ordering: the directory entry is marked deleted on disk
+; BEFORE the cluster chain is freed, so an interruption partway
+; through leaves at worst a recoverable cluster leak (via fsck), not
+; a live entry pointing at clusters the FAT has already freed.
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success, DF = 1 on error (not found, is a
+;          directory, or an intermediate path component is invalid)
+K_FILE_DELETE:  equ     $014B
+
 ; ---- Kernel version (read directly, no call needed) ----
 ; $0100's 6-byte header layout is a stable, never-shifting contract
 ; (same reasoning as PROG_BASE/LOADER_ARGS above), so the version
@@ -98,7 +109,13 @@ DIRENT_NAME:    equ     0           ; null-terminated filename (up to 127 chars)
 DIRENT_ATTR:    equ     128         ; FAT attribute byte
 DIRENT_CLUST:   equ     129         ; first cluster, 2 bytes, big-endian
 DIRENT_SIZE:    equ     131         ; file size, 4 bytes, big-endian
-DIRENT_LEN:     equ     135         ; total result buffer size
+DIRENT_WRTTIME: equ     135         ; last-write time, 2 bytes, big-endian,
+                                    ; packed FAT format: bits 15-11=hour,
+                                    ; 10-5=minute, 4-0=seconds/2
+DIRENT_WRTDATE: equ     137         ; last-write date, 2 bytes, big-endian,
+                                    ; packed FAT format: bits 15-9=year-1980,
+                                    ; 8-5=month, 4-0=day
+DIRENT_LEN:     equ     139         ; total result buffer size
 ATTR_DIR:       equ     $10         ; DIRENT_ATTR bit set for subdirectories
 
 ; ---- BIOS passthroughs (see include/bios.inc for each one's convention) ----
@@ -116,4 +133,4 @@ K_BOOT:         equ     $0139       ; -> f_boot
 K_TTY:          equ     $013C       ; -> f_tty
 K_SETBD:        equ     $013F       ; -> f_setbd
 
-; next free slot address: $014B
+; next free slot address: $014E

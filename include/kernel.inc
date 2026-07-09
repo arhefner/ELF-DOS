@@ -165,7 +165,11 @@ DIRENT_NAME:    equ     0           ; null-terminated filename (LFN_BUFLEN bytes
 DIRENT_ATTR:    equ     128         ; FAT attribute byte
 DIRENT_CLUST:   equ     129         ; first cluster (2 bytes, big-endian)
 DIRENT_SIZE:    equ     131         ; file size (4 bytes, big-endian)
-DIRENT_LEN:     equ     135         ; total result buffer size
+DIRENT_WRTTIME: equ     135         ; last-write time (2 bytes, big-endian,
+                                    ; packed FAT format -- see DE_WRTTIME)
+DIRENT_WRTDATE: equ     137         ; last-write date (2 bytes, big-endian,
+                                    ; packed FAT format -- see DE_WRTDATE)
+DIRENT_LEN:     equ     139         ; total result buffer size
 
 ; ----------------------------------------------------------------
 ; FAT16 file attribute bits
@@ -183,6 +187,10 @@ ATTR_LFN:       equ     $0F         ; combination that marks an LFN entry
 ; ----------------------------------------------------------------
 DE_NAME:        equ     0           ; 8.3 name (11 bytes, space-padded)
 DE_ATTR:        equ     11          ; attribute byte
+DE_WRTTIME:     equ     22          ; last-write time (2 bytes, LE, packed:
+                                    ; bits 15-11=hour, 10-5=minute, 4-0=sec/2)
+DE_WRTDATE:     equ     24          ; last-write date (2 bytes, LE, packed:
+                                    ; bits 15-9=year-1980, 8-5=month, 4-0=day)
 DE_CLUSTER:     equ     26          ; first cluster low word (2 bytes, LE)
 DE_SIZE:        equ     28          ; file size (4 bytes, LE)
 

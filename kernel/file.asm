@@ -67,6 +67,8 @@
             extrn   _dir_chksum
             extrn   bpb_spc
             extrn   bpb_spc_shift
+            extrn   rtc_refresh
+            extrn   _pack_fat_datetime
 
 ; same-file data references (required even within the same file)
             extrn   io_owner
@@ -95,6 +97,8 @@
             extrn   fa_boff
             extrn   fa_cluster_idx
             extrn   fa_sector_in_clust
+            extrn   fdel_next_clust
+            extrn   fdel_chksum
 
 ; ----------------------------------------------------------------
 ; file_init: mark all FCB slots as free
@@ -1646,6 +1650,35 @@ fc_copy_shortname:
             ldi     ATTR_ARCHIVE
             str     rf
 
+            ; --- write time/date (DE_WRTTIME/DE_WRTDATE, 2+2 bytes,
+            ; little-endian) with the current time ---
+            push    r8                  ; entry base -- rtc_refresh/
+                                        ; _pack_fat_datetime clobber
+                                        ; registers freely
+            call    rtc_refresh
+            call    _pack_fat_datetime  ; RD = packed date, R8 = packed time
+            mov     r9, rd              ; R9 = packed date (stash)
+            mov     ra, r8              ; RA = packed time (stash; RA's
+                                        ; earlier use as the shortname-copy
+                                        ; cursor is long done by this point)
+            pop     r8                  ; R8 = entry base (restored)
+
+            mov     rf, r8
+            add16   rf, DE_WRTTIME
+            glo     ra                  ; D = packed time low byte
+            str     rf
+            inc     rf
+            ghi     ra                  ; D = packed time high byte
+            str     rf                  ; DE_WRTTIME (LE) written
+
+            mov     rf, r8
+            add16   rf, DE_WRTDATE
+            glo     r9                  ; D = packed date low byte
+            str     rf
+            inc     rf
+            ghi     r9                  ; D = packed date high byte
+            str     rf                  ; DE_WRTDATE (LE) written
+
             ; --- record the short entry's on-disk location ---
             mov     rf, fc_target_lba
             mov     rd, fc_elba
@@ -1750,8 +1783,34 @@ fclose_no_invalidate:
             ani     FCB_F_SIZECHG
             lbz     fclose_no_rewrite
 
+            ; TEMPORARY DIAGNOSTIC: confirm close sees SIZECHG and
+            ; calls the rewrite
+            push    rd
+            call    f_inmsg
+            db      13,10,"DIAG fclose: REWRITE-CALLED",13,10,0
+            pop     rd
+            ; END TEMPORARY DIAGNOSTIC
+
             push    rd                  ; save slot base across the rewrite
+                                        ; (_fclose_rewrite_size's own
+                                        ; header documents RD as one of
+                                        ; the registers it clobbers)
             call    _fclose_rewrite_size
+
+            ; TEMPORARY DIAGNOSTIC: report the rewrite's own result.
+            ; DF (the carry flag) is untouched by push/pop/call on this
+            ; CPU -- only arithmetic/shift ops affect it -- so it still
+            ; holds _fclose_rewrite_size's return value here.
+            lbdf    fclose_diag_failed
+            call    f_inmsg
+            db      "DIAG fclose: REWRITE-OK",13,10,0
+            lbr     fclose_diag_done
+fclose_diag_failed:
+            call    f_inmsg
+            db      "DIAG fclose: REWRITE-FAILED",13,10,0
+fclose_diag_done:
+            ; END TEMPORARY DIAGNOSTIC
+
             pop     rd
             ; rewrite errors are ignored here -- there's nothing more
             ; to do at close time, and the slot is released either way
@@ -1772,10 +1831,11 @@ fclose_bad_index:
             endp
 
 ; ----------------------------------------------------------------
-; _fclose_rewrite_size: rewrite an FCB's directory entry size AND
-; first-cluster fields on disk, copying FCB_FSIZE to DE_SIZE and
-; FCB_SCLUST to DE_CLUSTER, at the sector/offset recorded in
-; FCB_ELBA/FCB_EOFF.
+; _fclose_rewrite_size: rewrite an FCB's directory entry size,
+; first-cluster, and write-time/date fields on disk, copying
+; FCB_FSIZE to DE_SIZE, FCB_SCLUST to DE_CLUSTER, and the current
+; time (via rtc_refresh/_pack_fat_datetime) to DE_WRTTIME/DE_WRTDATE,
+; at the sector/offset recorded in FCB_ELBA/FCB_EOFF.
 ;
 ; DE_CLUSTER is rewritten unconditionally alongside DE_SIZE whenever
 ; FCB_F_SIZECHG is set, even though most of the time (a plain append/
@@ -1787,7 +1847,7 @@ fclose_bad_index:
 ;
 ; Args:    RD = FCB slot base address
 ; Returns: DF = 0 on success, DF = 1 on I/O error
-; Modifies: R7, R8, R9, RC, RD, RF
+; Modifies: R7, R8, R9, RB, RC, RD, RF
 ; ----------------------------------------------------------------
             proc    _fclose_rewrite_size
 
@@ -1890,6 +1950,46 @@ fclose_bad_index:
             glo     rc                  ; D = SCLUST high byte (reloaded)
             str     rf                  ; DE_CLUSTER high byte (LE)
 
+            ; --- also patch DE_WRTTIME/DE_WRTDATE (2+2 bytes, LE) with
+            ; the current time ---
+            call    rtc_refresh
+            call    _pack_fat_datetime  ; RD = packed date, R8 = packed time
+            mov     r9, rd              ; R9 = packed date (stash)
+            mov     rc, r8              ; RC = packed time (stash -- its
+                                        ; earlier use above as the SCLUST
+                                        ; high-byte stash is long done)
+
+            mov     rf, fcrw_slot
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = FCB slot base
+
+            mov     rf, rb
+            add16   rf, FCB_EOFF
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = FCB_EOFF value
+
+            mov     rf, dirent_patch_buf
+            add16   rf, rd
+            add16   rf, DE_WRTTIME      ; RF -> entry's WrtTime field
+                                        ; (WrtDate immediately follows)
+
+            glo     rc                  ; D = packed time low byte
+            str     rf
+            inc     rf
+            ghi     rc                  ; D = packed time high byte
+            str     rf                  ; DE_WRTTIME (LE) written
+            inc     rf                  ; RF -> DE_WRTDATE
+
+            glo     r9                  ; D = packed date low byte
+            str     rf
+            inc     rf
+            ghi     r9                  ; D = packed date high byte
+            str     rf                  ; DE_WRTDATE (LE) written
+
             ; write the patched sector back -- reload LBA fresh
             mov     rf, fcrw_slot
             lda     rf
@@ -1916,6 +2016,291 @@ fclose_bad_index:
 
 fcrw_err:
             stc                         ; DF = 1, I/O error
+            rtn
+
+; ----------------------------------------------------------------
+; file_delete: delete a file (not a directory -- rejected; see RD
+; for that, once it exists)
+;
+; Order of operations is deliberately crash-safe: the directory
+; entry is marked deleted ('$E5') and written to disk BEFORE the
+; cluster chain is freed. If interrupted between the two steps (e.g.
+; power loss), the worst case is a cluster leak (recoverable via
+; fsck) rather than a live directory entry pointing at clusters the
+; FAT has already marked free and could hand out to a different new
+; file -- the same cross-link corruption class fsck caught from the
+; append-position bug earlier this project.
+;
+; fat_flush is called explicitly at the end rather than relying on a
+; future fat operation to evict the dirty FAT cache sector -- without
+; it, freed clusters could stay marked allocated on disk indefinitely
+; if DEL happens to be the last filesystem operation before power-off
+; (a latent gap in fat_set's write-back-only design that predates
+; this routine; not fixed elsewhere since nothing forced the issue
+; until a routine -- this one -- for which "did the delete actually
+; take" matters on its own, without a subsequent operation to paper
+; over it).
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success, DF = 1 on error (not found, is a
+;          directory, or an intermediate path component is invalid)
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    file_delete
+
+            mov     rd, rf              ; RD = name/path pointer
+            mov     rf, fo_name
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fo_name = name/path pointer
+                                        ; (reusing file_open's own
+                                        ; scratch field -- file_delete
+                                        ; is never called while a
+                                        ; file_open is mid-flight)
+
+            ; --- resolve the (possibly multi-component) path ---
+            mov     rf, cur_dir
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = current directory cluster
+
+            mov     ra, fo_name
+            lda     ra
+            phi     rf
+            ldn     ra
+            plo     rf                  ; RF = name/path pointer
+            call    path_resolve        ; RD = parent cluster, RF = final
+                                        ; component
+            lbdf    fdel_err            ; bad intermediate component
+
+            ; an empty final component means the path named a
+            ; directory itself -- not a file to delete
+            ldn     rf
+            lbz     fdel_err
+
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; fo_name = final component ptr
+
+            ; RD is still the resolved parent cluster from path_resolve
+            call    dir_open
+
+fdel_loop:
+            mov     rf, file_dirent
+            call    dir_read
+            lbdf    fdel_err            ; end of directory: not found
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = saved name pointer
+            mov     rf, file_dirent     ; RF = entry name
+            call    f_strcmp
+            lbnz    fdel_loop           ; no match: keep looking
+
+            ; must NOT be a directory
+            mov     rf, file_dirent
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_DIR
+            lbnz    fdel_err            ; it's a directory: reject
+
+            ; capture the first cluster now, from file_dirent (a copy,
+            ; independent of dir_buf) -- safe to read even after
+            ; dir_buf itself gets modified below
+            mov     rf, file_dirent
+            add16   rf, DIRENT_CLUST
+            lda     rf                  ; D = cluster high byte
+            phi     r9
+            ldn     rf                  ; D = cluster low byte
+            plo     r9                  ; R9 = first cluster (0 = none)
+
+            ; stash it in memory, not just R9 -- f_idewrite below is only
+            ; confirmed to preserve RA/RC/RD (see CLAUDE.md gotcha #10),
+            ; not R9, so a register alone isn't safe across that call
+            mov     rf, fdel_next_clust
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+
+            ; --- mark the directory entry deleted, on disk, first ---
+            mov     rf, dir_last_off
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = short entry's own byte
+                                        ; offset within dir_buf
+
+            ; compute this file's LFN checksum from its still-intact
+            ; short name, before the name's first byte is overwritten
+            ; with $E5 below -- _file_create stamps this same
+            ; checksum into every LFN entry it writes (fc_checksum),
+            ; so it's how we tell this file's preceding LFN entries
+            ; apart from an unrelated adjacent file's
+            mov     rf, dir_buf
+            add16   rf, rd              ; RF = short entry base
+                                        ; (DE_NAME is offset 0 -- exactly
+                                        ; what _dir_chksum wants)
+            call    _dir_chksum         ; D = checksum (clobbers
+                                        ; RC.0/RF/RB.0)
+            mov     rf, fdel_chksum
+            str     rf                  ; fdel_chksum = checksum byte
+
+            ; --- walk backward through this file's LFN entries,
+            ; marking each $E5 too -- _file_create always writes a
+            ; file's LFN run immediately before its short entry, in
+            ; the SAME sector (see its sector-fit check before
+            ; writing), so this never crosses a sector/cluster
+            ; boundary. Without this, DEL leaves the LFN entries
+            ; behind pointing at a short entry that's now gone -- the
+            ; "Orphaned long file name part" class fsck flags. RC is
+            ; the walk cursor, kept separate from RD (which still
+            ; holds the SHORT entry's own offset, needed again below
+            ; once the walk is done, and must survive untouched).
+            mov     rf, dir_last_off
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = walk cursor, starts at
+                                        ; the short entry's own offset
+                                        ; (reloaded fresh -- _dir_chksum's
+                                        ; effect on RC isn't documented)
+
+fdel_lfn_loop:
+            ghi     rc
+            lbnz    fdel_lfn_step_back
+            glo     rc
+            lbz     fdel_mark_short     ; cursor == 0: start of the
+                                        ; sector, nothing precedes it
+fdel_lfn_step_back:
+            sub16   rc, DIR_ENT_SIZE    ; RC = previous entry's offset
+
+            mov     rf, dir_buf
+            add16   rf, rc              ; RF = candidate entry base
+            add16   rf, DE_ATTR
+            ldn     rf                  ; D = candidate's attribute byte
+            xri     ATTR_LFN
+            lbnz    fdel_mark_short     ; not an LFN entry: this
+                                        ; file's run ends here, stop
+
+            mov     rf, dir_buf
+            add16   rf, rc
+            add16   rf, LFN_CHKSUM
+            ldn     rf                  ; D = candidate's checksum byte
+            str     r2                  ; [R2] = candidate's checksum
+                                        ; (one-shot scratch slot -- same
+                                        ; idiom used by the io_owner
+                                        ; check earlier in this file)
+            mov     rf, fdel_chksum
+            ldn     rf                  ; D = this file's checksum
+            sm                          ; D = fdel_chksum - candidate
+            lbnz    fdel_mark_short     ; mismatch: a different file's
+                                        ; LFN run, stop walking
+
+            mov     rf, dir_buf
+            add16   rf, rc
+            ldi     $E5
+            str     rf                  ; mark this LFN entry deleted
+
+            lbr     fdel_lfn_loop       ; keep walking backward
+
+fdel_mark_short:
+            mov     rf, dir_buf
+            add16   rf, rd              ; RF = short entry base (RD is
+                                        ; untouched by the walk above)
+            ldi     $E5
+            str     rf                  ; mark deleted in memory
+
+            mov     rf, dir_cur_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+
+            mov     rf, dir_buf
+            call    f_idewrite
+            lbdf    fdel_err
+
+            ; --- free the cluster chain, now that the entry is safely
+            ; marked deleted -- reload from memory, not the R9 we set
+            ; before the call above, since f_idewrite's preservation of
+            ; R9 is unconfirmed
+            mov     rf, fdel_next_clust
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = first cluster (reloaded)
+
+            ghi     r9
+            lbnz    fdel_free_loop
+            glo     r9
+            lbz     fdel_flush          ; first cluster == 0: nothing
+                                        ; to free
+
+fdel_free_loop:
+            mov     rd, r9              ; RD = current cluster
+            push    rd                  ; save it across fat_get, which
+                                        ; overwrites RD with the NEXT
+                                        ; cluster
+            call    fat_get             ; RD = next cluster; DF=0/1
+            mov     rf, fdel_next_clust
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fdel_next_clust = next cluster
+                                        ; (kept in memory, not a
+                                        ; register -- fat_set below may
+                                        ; clobber almost anything)
+            pop     rd                  ; RD = current cluster (restored)
+            lbdf    fdel_err            ; I/O error (stack already
+                                        ; balanced by the pop above)
+
+            ldi     0
+            phi     rb
+            plo     rb                  ; RB = 0 (FAT_FREE)
+            call    fat_set             ; marks the current cluster free
+            lbdf    fdel_err
+
+            ; is the next cluster end-of-chain? reload fresh from
+            ; memory into R9 (fat_set may have clobbered any register)
+            mov     rf, fdel_next_clust
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = next cluster
+
+            ghi     r9
+            smi     $FF
+            lbnf    fdel_free_loop      ; hi < $FF: valid, keep freeing
+            glo     r9
+            smi     $F8
+            lbnf    fdel_free_loop      ; < $FFF8: still valid, keep going
+
+fdel_flush:
+            call    fat_flush
+            lbdf    fdel_err
+
+            clc                         ; DF = 0, success
+            rtn
+
+fdel_err:
+            stc                         ; DF = 1, error
             rtn
 
 ; ----------------------------------------------------------------
@@ -2678,6 +3063,17 @@ fwrite_copy_done:
             ori     FCB_F_SIZECHG
             str     rf                  ; FCB_FLAGS |= FCB_F_SIZECHG
 
+            ; TEMPORARY DIAGNOSTIC: confirm the growth branch fires
+            push    r7
+            push    rb
+            push    rc
+            call    f_inmsg
+            db      13,10,"DIAG fwrite: SIZECHG-SET",13,10,0
+            pop     rc
+            pop     rb
+            pop     r7
+            ; END TEMPORARY DIAGNOSTIC
+
 fwrite_no_grow:
             ; RC -= chunk
             glo     r7
@@ -3052,6 +3448,18 @@ fa_boff:            dw      0
 fa_cluster_idx:     db      0
 fa_sector_in_clust: db      0
 
+; fdel_next_clust: scratch for file_delete's cluster-freeing loop --
+; kept in memory (not a register) across the fat_set call, which may
+; clobber almost anything.
+fdel_next_clust:    dw      0
+
+; fdel_chksum: scratch for file_delete's LFN-entry cleanup walk --
+; the short entry's LFN checksum (same value _file_create stamps into
+; every LFN entry belonging to this file), computed once and kept in
+; memory since _dir_chksum's own clobber footprint (RC.0/RF/RB.0) and
+; effect on any other register isn't documented beyond its own args.
+fdel_chksum:        db      0
+
                 public  io_owner
                 public  file_dirent
                 public  fo_name
@@ -3073,5 +3481,7 @@ fa_sector_in_clust: db      0
                 public  fa_boff
                 public  fa_cluster_idx
                 public  fa_sector_in_clust
+                public  fdel_next_clust
+                public  fdel_chksum
 
             endp

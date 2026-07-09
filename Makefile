@@ -39,6 +39,7 @@ KOBJ =  kernel/kernel.prg  \
         kernel/fat.prg     \
         kernel/dir.prg     \
         kernel/path.prg    \
+        kernel/rtc.prg     \
         kernel/file.prg    \
         kernel/loader.prg  \
         kernel/shell.prg
@@ -85,6 +86,9 @@ kernel/dir.prg: kernel/dir.asm $(INCS)
 kernel/path.prg: kernel/path.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) path.asm
 
+kernel/rtc.prg: kernel/rtc.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) rtc.asm
+
 kernel/file.prg: kernel/file.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) file.asm
 
@@ -119,7 +123,7 @@ $(KERNEL_BIN): $(KOBJ)
 # Concatenate bootstrap + kernel proper into final install image.
 #
 # Layout of kernel-full.bin:
-#   Bytes    0-511:  krnboot.bin  (loads to $3000, entry at $3006)
+#   Bytes    0-511:  krnboot.bin  (loads to $3800, entry at $3806)
 #   Bytes 512+:      kernel.bin   (loads to $0100, entry at $0106)
 #
 # sys patches the sector count into bytes 4-5 of krnboot before
