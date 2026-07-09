@@ -96,6 +96,15 @@ K_PATH_RESOLVE: equ     $0148
 ;          directory, or an intermediate path component is invalid)
 K_FILE_DELETE:  equ     $014B
 
+; K_DIR_CREATE: create a new, empty subdirectory (MD). Single-level
+; only -- the parent must already exist (no implicit intermediate
+; directory creation, matching classic DOS MD).
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success, DF = 1 on error (already exists, an
+;          intermediate path component is invalid, or disk full)
+K_DIR_CREATE:   equ     $014E
+
 ; ---- Kernel version (read directly, no call needed) ----
 ; $0100's 6-byte header layout is a stable, never-shifting contract
 ; (same reasoning as PROG_BASE/LOADER_ARGS above), so the version
@@ -133,4 +142,4 @@ K_BOOT:         equ     $0139       ; -> f_boot
 K_TTY:          equ     $013C       ; -> f_tty
 K_SETBD:        equ     $013F       ; -> f_setbd
 
-; next free slot address: $014E
+; next free slot address: $0151

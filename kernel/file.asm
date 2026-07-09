@@ -91,6 +91,8 @@
             extrn   fc_checksum
             extrn   fc_target_lba
             extrn   fc_target_off
+            extrn   fc_new_attr
+            extrn   fc_new_cluster
             extrn   _gen_short_name
             extrn   _classify_char
             extrn   _lfn_fill_segment
@@ -99,6 +101,9 @@
             extrn   fa_sector_in_clust
             extrn   fdel_next_clust
             extrn   fdel_chksum
+            extrn   dcr_parent
+            extrn   dcr_new_clust
+            extrn   dcr_sect_lba
 
 ; ----------------------------------------------------------------
 ; file_init: mark all FCB slots as free
@@ -650,6 +655,21 @@ fopen_notfound:
             mov     rf, fo_mode
             ldn     rf
             lbz     fopen_err
+
+            ; _file_create writes whatever attribute/initial-cluster
+            ; fc_new_attr/fc_new_cluster hold -- file_open always wants
+            ; a plain file (ATTR_ARCHIVE, cluster 0 = lazily allocated
+            ; on first write, see file_write). dir_create (MD) reuses
+            ; the same entry-insertion machinery with ATTR_DIR and a
+            ; real, already-allocated cluster instead.
+            mov     rf, fc_new_attr
+            ldi     ATTR_ARCHIVE
+            str     rf
+            mov     rf, fc_new_cluster
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
 
             call    _file_create        ; DF = 0/1; on success,
                                         ; fc_elba/fc_eoff = the new
@@ -1666,7 +1686,29 @@ fc_copy_shortname:
 
             mov     rf, r8
             add16   rf, DE_ATTR
-            ldi     ATTR_ARCHIVE
+            mov     r9, fc_new_attr
+            ldn     r9
+            str     rf
+
+            ; --- DE_CLUSTER (2 bytes, little-endian on disk) from
+            ; fc_new_cluster (big-endian in memory, same convention as
+            ; every other scratch cluster field in this file). Files
+            ; leave this 0 (file_write lazily allocates the first
+            ; cluster on first write); dir_create (MD) sets it to the
+            ; already-allocated, already-initialized cluster. RA is
+            ; free here -- its later reuse (packed-time stash) is well
+            ; after this point. ---
+            mov     rf, r8
+            add16   rf, DE_CLUSTER
+            mov     r9, fc_new_cluster
+            lda     r9
+            phi     ra
+            ldn     r9
+            plo     ra                  ; RA = fc_new_cluster
+            glo     ra                  ; D = cluster low byte (LE first)
+            str     rf
+            inc     rf
+            ghi     ra                  ; D = cluster high byte
             str     rf
 
             ; --- write time/date (DE_WRTTIME/DE_WRTDATE, 2+2 bytes,
@@ -2312,6 +2354,439 @@ fdel_flush:
 fdel_err:
             stc                         ; DF = 1, error
             rtn
+
+; ----------------------------------------------------------------
+; dir_create: create a new, empty subdirectory (MD)
+;
+; Allocates and zeros a fresh cluster, writes '.' (self) and '..'
+; (parent -- or 0 for root, the same "root=0" sentinel this project
+; already uses everywhere else, so no special-casing is needed)
+; entries into it, flushes the FAT allocation immediately (before the
+; new cluster is ever referenced from a directory entry -- same
+; crash-safety ordering as file_delete: a half-finished MD should
+; leave at worst an orphaned allocated cluster, recoverable via fsck,
+; never a live parent entry pointing at a cluster that was never
+; actually initialized), then reuses _file_create's own
+; entry-insertion machinery (LFN generation, terminator handling,
+; sector spillover) to add the new directory's entry into the parent
+; -- parameterized via fc_new_attr/fc_new_cluster instead of
+; _file_create's usual file-creation defaults (ATTR_ARCHIVE / a lazily
+; allocated 0).
+;
+; Single-level only: the parent must already exist (no implicit
+; intermediate directory creation, matching classic DOS MD).
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success, DF = 1 on error (already exists, an
+;          intermediate path component is invalid, or disk full)
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    dir_create
+
+            mov     rd, rf
+            mov     rf, fo_name
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fo_name = path pointer (reusing
+                                        ; file_open's own scratch field
+                                        ; -- dir_create is never called
+                                        ; while a file_open/file_delete
+                                        ; is mid-flight)
+
+            ; --- resolve the (possibly multi-component) path ---
+            mov     rf, cur_dir
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = current directory cluster
+
+            mov     ra, fo_name
+            lda     ra
+            phi     rf
+            ldn     ra
+            plo     rf                  ; RF = path pointer
+            call    path_resolve        ; RD = parent cluster, RF = final
+                                        ; component
+            lbdf    dcr_err             ; bad intermediate component
+
+            ; save BOTH return values into memory immediately, using RB
+            ; (untouched by path_resolve) as the destination pointer for
+            ; each -- BUG FIX: an earlier version of this used RF/RD
+            ; themselves as the destination pointer partway through,
+            ; which destroys the very value being saved; and the "." /
+            ; ".." guard further below calls f_strcmp, which clobbers
+            ; RD, so both must be safely in memory before that runs.
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; fo_name = final component ptr
+
+            mov     rb, dcr_parent
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; dcr_parent = parent cluster
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = final component pointer
+            ldn     rd
+            lbz     dcr_err             ; empty final component: no name
+                                        ; given ("MD /", "MD foo/", ...)
+
+            ; reject creating a directory literally named "." or ".."
+            ; -- the root directory has no such entries (it's a fixed
+            ; region, not a normal cluster-chain directory), so the
+            ; collision scan below wouldn't otherwise catch this there
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, dcr_dot
+            call    f_strcmp
+            lbz     dcr_err
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, dcr_dotdot
+            call    f_strcmp
+            lbz     dcr_err
+
+            ; reload the parent cluster fresh from memory -- RD has
+            ; been clobbered several times since path_resolve returned
+            mov     rf, dcr_parent
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    dir_open
+
+dcr_loop:
+            mov     rf, file_dirent
+            call    dir_read
+            lbdf    dcr_notfound        ; end of directory: no collision
+                                        ; -- dir_eptr/dir_cur_lba/
+                                        ; dir_clust/dir_sect now describe
+                                        ; the '$00' terminator's sector,
+                                        ; reused by _file_create below
+                                        ; (same convention file_open's
+                                        ; fopen_notfound relies on)
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = saved name pointer
+            mov     rf, file_dirent     ; RF = entry name
+            call    f_strcmp
+            lbnz    dcr_loop            ; no match: keep looking
+
+            ; name already exists (file or directory): reject
+            lbr     dcr_err
+
+dcr_notfound:
+            ; --- allocate the new directory's first cluster ---
+            call    fat_alloc           ; RD = new cluster, DF=0/1
+            lbdf    dcr_err
+
+            mov     rf, dcr_new_clust
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; dcr_new_clust = new cluster
+                                        ; (kept in memory, not a
+                                        ; register -- across several
+                                        ; calls below, same reasoning as
+                                        ; file_delete's fdel_next_clust)
+
+            call    fat_flush           ; persist the allocation now
+            lbdf    dcr_err
+
+            ; --- build the first sector: '.' and '..' entries, rest
+            ; zero. dir_buf is borrowed as scratch here -- nothing else
+            ; needs its CURRENT content until it's restored below, right
+            ; before _file_create needs it back. ---
+            mov     rf, dir_buf
+            ldi     2
+            phi     rc
+            ldi     0
+            plo     rc                  ; RC = 512 (byte count)
+dcr_zero1:
+            ldi     0
+            str     rf
+            inc     rf
+            sub16   rc, 1
+            ghi     rc
+            lbnz    dcr_zero1
+            glo     rc
+            lbnz    dcr_zero1
+
+            ; '.' entry at dir_buf+0 -- DE_NAME is 11 bytes total:
+            ; 1 dot + 10 trailing spaces
+            mov     rf, dir_buf
+            ldi     '.'
+            str     rf
+            inc     rf
+            ldi     10
+            plo     r9
+dcr_dot_pad:
+            ldi     ' '
+            str     rf
+            inc     rf
+            dec     r9
+            glo     r9
+            lbnz    dcr_dot_pad
+
+            mov     rf, dir_buf
+            add16   rf, DE_ATTR
+            ldi     ATTR_DIR
+            str     rf
+
+            mov     rf, dir_buf
+            add16   rf, DE_CLUSTER
+            mov     r9, dcr_new_clust
+            lda     r9
+            phi     ra
+            ldn     r9
+            plo     ra                  ; RA = new cluster (self)
+            glo     ra
+            str     rf
+            inc     rf
+            ghi     ra
+            str     rf
+
+            ; '..' entry at dir_buf+32 -- DE_NAME is 11 bytes total:
+            ; 2 dots + 9 trailing spaces
+            mov     rf, dir_buf
+            add16   rf, DIR_ENT_SIZE
+            ldi     '.'
+            str     rf
+            inc     rf
+            ldi     '.'
+            str     rf
+            inc     rf
+            ldi     9
+            plo     r9
+dcr_dotdot_pad:
+            ldi     ' '
+            str     rf
+            inc     rf
+            dec     r9
+            glo     r9
+            lbnz    dcr_dotdot_pad
+
+            mov     rf, dir_buf
+            add16   rf, DIR_ENT_SIZE
+            add16   rf, DE_ATTR
+            ldi     ATTR_DIR
+            str     rf
+
+            mov     rf, dir_buf
+            add16   rf, DIR_ENT_SIZE
+            add16   rf, DE_CLUSTER
+            mov     r9, dcr_parent
+            lda     r9
+            phi     ra
+            ldn     r9
+            plo     ra                  ; RA = parent cluster (0 = root)
+            glo     ra
+            str     rf
+            inc     rf
+            ghi     ra
+            str     rf
+
+            ; --- write/date-stamp both entries with the current time ---
+            call    rtc_refresh
+            call    _pack_fat_datetime  ; RD = packed date, R8 = packed time
+            mov     r9, rd              ; R9 = packed date (stash)
+            mov     ra, r8              ; RA = packed time (stash)
+
+            mov     rf, dir_buf
+            add16   rf, DE_WRTTIME
+            glo     ra
+            str     rf
+            inc     rf
+            ghi     ra
+            str     rf
+            mov     rf, dir_buf
+            add16   rf, DE_WRTDATE
+            glo     r9
+            str     rf
+            inc     rf
+            ghi     r9
+            str     rf
+
+            mov     rf, dir_buf
+            add16   rf, DIR_ENT_SIZE
+            add16   rf, DE_WRTTIME
+            glo     ra
+            str     rf
+            inc     rf
+            ghi     ra
+            str     rf
+            mov     rf, dir_buf
+            add16   rf, DIR_ENT_SIZE
+            add16   rf, DE_WRTDATE
+            glo     r9
+            str     rf
+            inc     rf
+            ghi     r9
+            str     rf
+
+            ; --- write this sector to the new cluster's first sector ---
+            ; LBA memory convention (matches every other 3-byte stored
+            ; LBA in this codebase, e.g. dir_cur_lba/fdel_next_clust's
+            ; use): byte0 = bits 23-16 (R8.lo), byte1 = bits 15-8
+            ; (R7.hi), byte2 = bits 7-0 (R7.lo) -- confirmed against
+            ; _cluster_to_lba's own accumulator setup in dir.asm.
+            mov     rf, dcr_new_clust
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    _cluster_to_lba     ; R7/R8 = LBA of cluster's 1st
+                                        ; sector (clobbers R7/R8/R9/RA/
+                                        ; RB/RC/RD/RF -- nothing we still
+                                        ; need survives it unprotected)
+            mov     rf, dcr_sect_lba
+            glo     r8
+            str     rf
+            inc     rf
+            ghi     r7
+            str     rf
+            inc     rf
+            glo     r7
+            str     rf                  ; dcr_sect_lba = first sector's
+                                        ; LBA (kept in memory across the
+                                        ; write calls below)
+
+            mov     rf, dcr_sect_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+            mov     rf, dir_buf
+            call    f_idewrite
+            lbdf    dcr_err
+
+            ; --- zero any remaining sectors in the cluster ---
+            mov     rf, bpb_spc
+            ldn     rf
+            smi     1
+            lbz     dcr_restore         ; spc == 1: nothing more to do
+
+            plo     r9                  ; R9.0 = remaining sector count
+
+            mov     rf, dir_buf
+            ldi     2
+            phi     rc
+            ldi     0
+            plo     rc
+dcr_zero2:
+            ldi     0
+            str     rf
+            inc     rf
+            sub16   rc, 1
+            ghi     rc
+            lbnz    dcr_zero2
+            glo     rc
+            lbnz    dcr_zero2
+
+dcr_zero_loop:
+            ; byte2 (offset dcr_sect_lba+2) is bits 7-0 -- incrementing
+            ; just that byte is enough since bpb_spc (a single byte,
+            ; max 255) bounds how many sectors a cluster can ever have,
+            ; so sector-within-cluster addressing never needs to carry
+            ; into the higher LBA bytes
+            mov     rf, dcr_sect_lba
+            add16   rf, 2
+            ldn     rf
+            adi     1
+            str     rf                  ; dcr_sect_lba's low byte += 1
+
+            mov     rf, dcr_sect_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+            mov     rf, dir_buf
+            call    f_idewrite
+            lbdf    dcr_err
+
+            dec     r9
+            glo     r9
+            lbnz    dcr_zero_loop
+
+dcr_restore:
+            ; --- restore dir_buf: it was borrowed as scratch above,
+            ; but _file_create needs it to hold the parent directory's
+            ; terminator sector again (dir_cur_lba/dir_eptr are
+            ; untouched by any of the above, so a plain re-read puts
+            ; dir_buf back exactly where _file_create expects it) ---
+            mov     rf, dir_cur_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+            mov     rf, dir_buf
+            call    f_ideread
+            lbdf    dcr_err
+
+            mov     rf, fc_new_attr
+            ldi     ATTR_DIR
+            str     rf
+
+            mov     rf, dcr_new_clust
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, fc_new_cluster
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            call    _file_create
+            rtn                         ; DF from _file_create passed
+                                        ; straight through
+
+dcr_err:
+            stc
+            rtn
+
+; local literal strings for the "." / ".." name-collision guard above
+; -- placed here, after every reachable code path in this proc already
+; terminated via rtn, so control flow never falls through into them
+dcr_dot:        db      ".",0
+dcr_dotdot:     db      "..",0
 
 ; ----------------------------------------------------------------
 ; file_read: read bytes from an open file into a buffer
@@ -3439,6 +3914,15 @@ fc_target_off:  dw      0
 fc_elba:        ds      LBA_SIZE
 fc_eoff:        dw      0
 
+; fc_new_attr/fc_new_cluster: parameterize _file_create's short-entry
+; write -- file_open's fopen_notfound always sets ATTR_ARCHIVE/0 (a
+; plain file, first cluster lazily allocated on first write);
+; dir_create (MD) sets ATTR_DIR and an already-allocated cluster.
+; fc_new_cluster is big-endian in memory, same convention as every
+; other scratch cluster field in this file.
+fc_new_attr:    db      0
+fc_new_cluster: dw      0
+
 ; fa_*: scratch for file_open's mode-2 (append) end-of-file
 ; positioning -- see the append block in file_open. Kept in memory
 ; (not registers) across the fat_get chain-walk loop, which clobbers
@@ -3459,6 +3943,16 @@ fdel_next_clust:    dw      0
 ; effect on any other register isn't documented beyond its own args.
 fdel_chksum:        db      0
 
+; dcr_*: scratch for dir_create (MD) -- kept in memory, not registers,
+; across the several fat_alloc/fat_flush/_cluster_to_lba/f_idewrite/
+; f_ideread calls between allocating the new cluster and finally
+; handing it to _file_create (same reasoning as fdel_next_clust).
+dcr_parent:         dw      0           ; parent directory's cluster
+                                        ; (0 = root, for the '..' entry)
+dcr_new_clust:      dw      0           ; newly allocated cluster
+dcr_sect_lba:       ds      LBA_SIZE    ; current sector's LBA while
+                                        ; zeroing the new cluster
+
                 public  io_owner
                 public  file_dirent
                 public  fo_name
@@ -3476,11 +3970,16 @@ fdel_chksum:        db      0
                 public  fc_target_lba
                 public  fc_target_off
                 public  fc_elba
+                public  fc_new_attr
+                public  fc_new_cluster
                 public  fc_eoff
                 public  fa_boff
                 public  fa_cluster_idx
                 public  fa_sector_in_clust
                 public  fdel_next_clust
                 public  fdel_chksum
+                public  dcr_parent
+                public  dcr_new_clust
+                public  dcr_sect_lba
 
             endp
