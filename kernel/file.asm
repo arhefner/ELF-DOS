@@ -274,6 +274,38 @@ fopen_no_invalidate:
             glo     rf
             str     rb                  ; fo_name = final component pointer
 
+            ; TEMPORARY DIAGNOSTIC: print fo_name right after
+            ; path_resolve, before the exists-scan (dir_open/dir_read/
+            ; _dir_next_sector) runs -- bracketed against _file_create's
+            ; own entry print (fc entry name=) to narrow down whether
+            ; corruption (COPY's destination showing up as "ini "
+            ; instead of "init5.rc", ren8.txt) happens during
+            ; path_resolve's own copy, or during the exists-scan that
+            ; follows. RD (parent cluster, needed by dir_open right
+            ; after) is protected in RB across the diagnostic calls.
+            ghi     rd
+            phi     rb
+            glo     rd
+            plo     rb                  ; RB = parent cluster (stashed)
+
+            call    f_inmsg
+            db      13,10,"DIAG fopen post-resolve name='",0
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+
+            ghi     rb
+            phi     rd
+            glo     rb
+            plo     rd                  ; RD = parent cluster (restored)
+            ; END TEMPORARY DIAGNOSTIC
+
             ; RD is still the resolved parent cluster from path_resolve
             call    dir_open
 
