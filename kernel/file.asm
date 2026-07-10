@@ -86,6 +86,8 @@
             extrn   _mark_entry_deleted
             extrn   fc_elba
             extrn   fc_eoff
+            extrn   fc_diag_last_lba
+            extrn   fc_diag_last_off
             extrn   fc_shortname
             extrn   fc_needs_lfn
             extrn   fc_namelen
@@ -1533,6 +1535,92 @@ fc_full:
 ; terminator, then write the sector back.
 ;------------------------------------------------------------------
 fc_write_entries:
+            ; TEMPORARY DIAGNOSTIC: compare THIS call's target
+            ; location (fc_target_lba/fc_target_off) against the
+            ; PREVIOUS _file_create call's -- investigating whether
+            ; consecutive calls (e.g. REN's insertion followed by a
+            ; later WTEST) land at the same spot
+            mov     rf, fc_diag_last_lba
+            lda     rf
+            str     r2
+            mov     rd, fc_target_lba
+            ldn     rd
+            sm
+            lbnz    diag_fc_lba_diff
+
+            mov     rf, fc_diag_last_lba
+            inc     rf
+            ldn     rf
+            str     r2
+            mov     rd, fc_target_lba
+            inc     rd
+            ldn     rd
+            sm
+            lbnz    diag_fc_lba_diff
+
+            mov     rf, fc_diag_last_lba
+            add16   rf, 2
+            ldn     rf
+            str     r2
+            mov     rd, fc_target_lba
+            add16   rd, 2
+            ldn     rd
+            sm
+            lbnz    diag_fc_lba_diff
+
+            call    f_inmsg
+            db      13,10,"DIAG fc: lba SAME-as-last",0
+            lbr     diag_fc_lba_done
+diag_fc_lba_diff:
+            call    f_inmsg
+            db      13,10,"DIAG fc: lba diff-from-last",0
+diag_fc_lba_done:
+            mov     rf, fc_diag_last_off
+            lda     rf
+            str     r2
+            mov     rd, fc_target_off
+            ldn     rd
+            sm
+            lbnz    diag_fc_off_diff
+
+            mov     rf, fc_diag_last_off
+            inc     rf
+            ldn     rf
+            str     r2
+            mov     rd, fc_target_off
+            inc     rd
+            ldn     rd
+            sm
+            lbnz    diag_fc_off_diff
+
+            call    f_inmsg
+            db      " off SAME-as-last",13,10,0
+            lbr     diag_fc_off_done
+diag_fc_off_diff:
+            call    f_inmsg
+            db      " off diff-from-last",13,10,0
+diag_fc_off_done:
+            ; update the "last" stored values for next time
+            mov     rf, fc_target_lba
+            mov     rb, fc_diag_last_lba
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+
+            mov     rf, fc_target_off
+            mov     rb, fc_diag_last_off
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+            ; END TEMPORARY DIAGNOSTIC
+
             mov     rf, fc_shortname
             call    _dir_chksum         ; D = checksum
             ; BUG FIX: "mov rf, fc_checksum" itself clobbers D (its
@@ -3476,6 +3564,74 @@ ren_insert:
             lbdf    ren_err             ; failed: nothing destructive
                                         ; happened, safe to just report
 
+            ; TEMPORARY DIAGNOSTIC: compare where env2.dat's OLD entry
+            ; lives (ren_old_lba/ren_old_off) against where
+            ; _file_create just inserted the NEW entry
+            ; (fc_target_lba/fc_target_off) -- investigating corruption
+            ; seen after REN followed by a same-directory short-only
+            ; (no-LFN) insertion
+            mov     rf, ren_old_lba
+            lda     rf
+            str     r2
+            mov     rd, fc_target_lba
+            ldn     rd
+            sm
+            lbnz    diag_lba_diff       ; byte 0 differs
+
+            mov     rf, ren_old_lba
+            inc     rf
+            ldn     rf
+            str     r2
+            mov     rd, fc_target_lba
+            inc     rd
+            ldn     rd
+            sm
+            lbnz    diag_lba_diff       ; byte 1 differs
+
+            mov     rf, ren_old_lba
+            add16   rf, 2
+            ldn     rf
+            str     r2
+            mov     rd, fc_target_lba
+            add16   rd, 2
+            ldn     rd
+            sm
+            lbnz    diag_lba_diff       ; byte 2 differs
+
+            call    f_inmsg
+            db      13,10,"DIAG ren: lba SAME",0
+            lbr     diag_lba_done
+diag_lba_diff:
+            call    f_inmsg
+            db      13,10,"DIAG ren: lba DIFF",0
+diag_lba_done:
+            mov     rf, ren_old_off
+            lda     rf
+            str     r2
+            mov     rd, fc_target_off
+            ldn     rd
+            sm
+            lbnz    diag_off_diff
+
+            mov     rf, ren_old_off
+            inc     rf
+            ldn     rf
+            str     r2
+            mov     rd, fc_target_off
+            inc     rd
+            ldn     rd
+            sm
+            lbnz    diag_off_diff
+
+            call    f_inmsg
+            db      " off SAME",13,10,0
+            lbr     diag_off_done
+diag_off_diff:
+            call    f_inmsg
+            db      " off DIFF",13,10,0
+diag_off_done:
+            ; END TEMPORARY DIAGNOSTIC
+
             ; --- restore dir.asm's live state to the OLD entry's
             ; location, exactly as _mark_entry_deleted expects ---
             mov     rf, ren_old_off
@@ -4666,6 +4822,12 @@ fc_target_off:  dw      0
 fc_elba:        ds      LBA_SIZE
 fc_eoff:        dw      0
 
+; TEMPORARY DIAGNOSTIC scratch: last call's fc_target_lba/fc_target_off,
+; for comparing consecutive _file_create calls. Non-zero sentinel init
+; so the first call doesn't spuriously read as a match.
+fc_diag_last_lba:   db      $FF,$FF,$FF
+fc_diag_last_off:   dw      $FFFF
+
 ; fc_new_attr/fc_new_cluster/fc_new_size: parameterize _file_create's
 ; short-entry write -- file_open's fopen_notfound always sets
 ; ATTR_ARCHIVE/0/0 (a plain file, first cluster lazily allocated on
@@ -4751,6 +4913,8 @@ ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
                 public  fc_new_cluster
                 public  fc_new_size
                 public  fc_eoff
+                public  fc_diag_last_lba
+                public  fc_diag_last_off
                 public  fa_boff
                 public  fa_cluster_idx
                 public  fa_sector_in_clust
