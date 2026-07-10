@@ -179,6 +179,44 @@ finit_pad:  inc     rf
             glo     rc
             str     rf                  ; fo_mode = mode
 
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right at file_open's
+            ; very entry, before path_resolve/dir_open/the scan loop
+            ; run at all -- finer-grained bracket than the existing
+            ; pre-scan/post-match dumps, to pin down whether
+            ; corruption (ren8.txt-ren13.txt) happens during THIS
+            ; call's own path_resolve/dir_open, or happened already,
+            ; during the PREVIOUS file_open call's return/cleanup path
+            ; (ren13.txt showed attempt 1 "copy" clean throughout, but
+            ; attempt 2 "copy.EXE" already corrupted by its own
+            ; pre-scan point -- this narrows which side of that
+            ; boundary it's on). SAFE dump pattern (CLAUDE.md gotcha
+            ; #14): scratch buffer + single f_msg, no per-char BIOS
+            ; calls in a loop.
+            mov     rf, LINE_BUF
+            mov     rb, diag_lb_buf
+            ldi     24
+            plo     rc
+diag_lb0_loop:
+            lda     rf
+            lbnz    diag_lb0_have
+            ldi     '.'
+diag_lb0_have:
+            str     rb
+            inc     rb
+            dec     rc
+            glo     rc
+            lbnz    diag_lb0_loop
+            ldi     0
+            str     rb
+
+            call    f_inmsg
+            db      13,10,"DIAG linebuf entry ='",0
+            mov     rf, diag_lb_buf
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
             ; --- find a free FCB slot ---
             ldi     0
             plo     rc                  ; RC.0 = index = 0

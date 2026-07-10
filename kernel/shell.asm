@@ -60,6 +60,94 @@ shell_prompt:
             ; each f_strcmp call (f_strcmp advances both RF and RD)
             mov     ra, rf              ; RA = saved input pointer
 
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF, do a PURE CPU
+            ; busy-wait (zero disk I/O, zero file_open/dir_read
+            ; calls), dump again -- isolating whether LINE_BUF
+            ; corruption (ren8.txt-ren13.txt: COPY's second argument
+            ; silently turning into "ini " mid-command, confirmed
+            ; already present before copy.exe even starts running,
+            ; during prog_load's OWN search) happens purely from
+            ; elapsed time. If it does even here, with no file/dir
+            ; code involved at all, that points at something
+            ; BIOS/hardware-level (e.g. a periodic interrupt with a
+            ; register-save area overlapping LINE_BUF) rather than a
+            ; bug in this project's own code, which has been traced
+            ; extensively (file_open's whole "found" path, dir_open,
+            ; _gen_short_name, fcb_table's address) with no write to
+            ; LINE_BUF found anywhere. RA holds the saved input
+            ; pointer across this block -- untouched (RC/R9 used
+            ; instead). SAFE dump pattern (CLAUDE.md gotcha #14): copy
+            ; into a scratch buffer with only str/lda, print with ONE
+            ; f_msg call -- no per-character BIOS calls in a loop.
+            mov     rf, LINE_BUF
+            mov     rb, diag_shell_buf
+            ldi     24
+            plo     rc
+diag_sh1_loop:
+            lda     rf
+            lbnz    diag_sh1_have
+            ldi     '.'
+diag_sh1_have:
+            str     rb
+            inc     rb
+            dec     rc
+            glo     rc
+            lbnz    diag_sh1_loop
+            ldi     0
+            str     rb
+
+            call    f_inmsg
+            db      13,10,"DIAG shell linebuf before-wait='",0
+            mov     rf, diag_shell_buf
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+
+            ; pure CPU busy-wait, no I/O -- roughly comparable to how
+            ; long a multi-attempt prog_load search (several real
+            ; disk sector reads) takes, at this hardware's own
+            ; reported "Clock: 4000 KHz"
+            ldi     20
+            plo     r9                  ; R9.0 = outer repeat count
+diag_wait_outer:
+            ldi     0
+            plo     rc
+            phi     rc                  ; RC = 0 (wraps to 65536)
+diag_wait_inner:
+            dec     rc
+            ghi     rc
+            lbnz    diag_wait_inner
+            glo     rc
+            lbnz    diag_wait_inner
+            dec     r9
+            glo     r9
+            lbnz    diag_wait_outer
+
+            mov     rf, LINE_BUF
+            mov     rb, diag_shell_buf
+            ldi     24
+            plo     rc
+diag_sh2_loop:
+            lda     rf
+            lbnz    diag_sh2_have
+            ldi     '.'
+diag_sh2_have:
+            str     rb
+            inc     rb
+            dec     rc
+            glo     rc
+            lbnz    diag_sh2_loop
+            ldi     0
+            str     rb
+
+            call    f_inmsg
+            db      13,10,"DIAG shell linebuf after-wait ='",0
+            mov     rf, diag_shell_buf
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
             ; try to load and run it as a program -- RA holds the start
             ; of the trimmed input line.
             ; find the end of the program name (first space or NUL)
@@ -106,5 +194,9 @@ cmd_load_failed:
             call    f_inmsg
             db      "Bad command.",13,10,0
             lbr     shell_prompt
+
+; TEMPORARY DIAGNOSTIC scratch: LINE_BUF dump buffer for the
+; before-wait/after-wait busy-wait test in shell_prompt above
+diag_shell_buf: ds      25
 
             endp
