@@ -1470,6 +1470,33 @@ fc_grow:
             glo     r7
             str     rf                  ; dir_cur_lba = new LBA
 
+            ; BUG FIX: flush the FAT immediately, the same way
+            ; dir_create (MD) already does after its own fat_alloc --
+            ; fat_alloc's "claim" (marking the new cluster end-of-chain)
+            ; and fat_set's link only live in the single-sector FAT
+            ; cache until flushed. If anything later in this same
+            ; session needs a DIFFERENT FAT sector before this one is
+            ; flushed, the cache evicts it unwritten, silently
+            ; reverting the claim -- so the next fat_alloc scan sees
+            ; this cluster as free again and can hand it out a SECOND
+            ; time. Confirmed on hardware via fsck: "/cfg and
+            ; /cfg/env3.dat share clusters" and a duplicate
+            ; /wordle/wordlist.txt entry, both after a directory grew
+            ; past its first cluster (fc_grow) during a REN/COPY/WTEST
+            ; test session -- this path was very likely never
+            ; exercised on real hardware before that session, since it
+            ; only fires once a directory's own entries fill an entire
+            ; sector. Placed here, after dir_clust/dir_sect/dir_cur_lba
+            ; are ALL already safely committed to memory and R7/R8 are
+            ; no longer needed, rather than right after fat_set -- an
+            ; earlier draft of this fix called it there, before
+            ; realizing fat_flush's own documented clobber list
+            ; (R7/R8/R9/RB/RC/RD/RF) includes R8, which still held the
+            ; new cluster number needed for the dir_clust/LBA steps
+            ; just above.
+            call    fat_flush
+            lbdf    fc_full
+
             ; zero-fill dir_buf: a freshly allocated cluster holds
             ; disk garbage, not zero, until something writes it
             mov     rf, dir_buf
@@ -4234,6 +4261,29 @@ fread_calc_read:
             ori     FCB_F_SIZECHG
             str     rf
 
+            ; BUG FIX: flush the FAT immediately after this fat_alloc,
+            ; same reasoning as fc_grow's own fix (see its comment) --
+            ; an unflushed allocation can be silently reverted if the
+            ; single-sector FAT cache gets evicted for a different
+            ; sector before this one is written, letting a later
+            ; fat_alloc hand out the same cluster again. fat_flush
+            ; documents R7/R8/R9/RB/RC/RD/RF as clobbered -- R9/RA/RB/RC
+            ; are this routine's own stable loop registers (see its
+            ; header comment), so all of R9/RA/RB/RC are protected here
+            ; (RA isn't in fat_flush's own clobber list, but protecting
+            ; it too costs nothing and matches the surrounding
+            ; fat_alloc/fat_set calls' own style).
+            push    r9
+            push    ra
+            push    rb
+            push    rc
+            call    fat_flush
+            pop     rc
+            pop     rb
+            pop     ra
+            pop     r9
+            lbdf    fwrite_ioerr
+
 fwrite_have_cluster:
 fwrite_loop:
             glo     rc
@@ -4629,6 +4679,26 @@ fwrite_no_grow:
             inc     rf
             glo     r8
             str     rf                  ; FCB_CCLUST = new cluster
+
+            ; BUG FIX: flush the FAT immediately after this fat_alloc,
+            ; same reasoning as fc_grow's own fix (see its comment) --
+            ; an unflushed allocation can be silently reverted if the
+            ; single-sector FAT cache gets evicted for a different
+            ; sector before this one is written. fat_flush documents
+            ; R7/R8/R9/RB/RC/RD/RF as clobbered -- R9/RA/RB/RC are this
+            ; routine's own stable loop registers, so all four are
+            ; protected here (matching the surrounding fat_alloc/
+            ; fat_set calls' own style).
+            push    r9
+            push    ra
+            push    rb
+            push    rc
+            call    fat_flush
+            pop     rc
+            pop     rb
+            pop     ra
+            pop     r9
+            lbdf    fwrite_ioerr
 
             lbr     fwrite_no_cluster_wrap
 
