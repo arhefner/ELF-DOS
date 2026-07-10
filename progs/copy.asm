@@ -99,6 +99,26 @@ have_dst:
             glo     rd
             str     rf                  ; src_fcb = FCB index
 
+            ; TEMPORARY DIAGNOSTIC: print dst_ptr's string here, in
+            ; copy.asm's OWN code, entirely outside the kernel --
+            ; bisecting whether the destination name is already
+            ; corrupted before the second K_FILE_OPEN call even runs,
+            ; or whether it gets corrupted inside file_open/
+            ; path_resolve itself (ren8.txt/ren9.txt: destination
+            ; shows up as "ini " instead of "init5.rc")
+            call    K_INMSG
+            db      13,10,"DIAG copy dst_ptr='",0
+            mov     rf, dst_ptr
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      "'",13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
             ; --- open destination (mode 1, create-or-overwrite) ---
             mov     rf, dst_ptr
             lda     rf
