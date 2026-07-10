@@ -441,6 +441,40 @@ drd_entry_lb_have:
 drd_is_lfn:
             push    ra                  ; save entry pointer (proc modifies RA)
             call    _dir_proc_lfn       ; RA = entry pointer (already set)
+
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after
+            ; _dir_proc_lfn returns, before drd_got_name's own
+            ; processing of the FOLLOWING short entry runs -- splits
+            ; "corruption during THIS LFN entry's own processing" from
+            ; "corruption during the next short entry's processing"
+            ; (copy13.txt showed corruption already present by the
+            ; time env3.dat's short entry finishes decoding, but not
+            ; whether it happened here, during its OWN preceding LFN
+            ; entry, or in drd_got_name right after).
+            call    f_inmsg
+            db      13,10,"DIAG post-lfn lb='",0
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     24
+            plo     r8
+drd_lfn_lb_loop:
+            lda     rf
+            lbnz    drd_lfn_lb_have
+            ldi     '.'
+drd_lfn_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    drd_lfn_lb_loop
+            ldi     0
+            str     rb
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
             pop     ra                  ; restore entry pointer
             lbr     drd_advance         ; advance and loop
 
