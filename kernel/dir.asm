@@ -336,6 +336,40 @@ drd_got_name:
             glo     rd
             str     rf                  ; result[DIRENT_CLUST+1] = cluster low
 
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after
+            ; attr+cluster writes, before the size write -- copy17.txt
+            ; narrowed corruption to the attr/cluster/size block as a
+            ; whole (clean at post-strcpy, corrupted at post-size);
+            ; this isolates whether it's the attr+cluster pair or the
+            ; size write specifically.
+            push    ra
+            push    r9
+            call    f_inmsg
+            db      13,10,"DIAG post-clust lb='",0
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     24
+            plo     r8
+drd_pc_lb_loop:
+            lda     rf
+            lbnz    drd_pc_lb_have
+            ldi     '.'
+drd_pc_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    drd_pc_lb_loop
+            ldi     0
+            str     rb
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            pop     r9
+            pop     ra
+            ; END TEMPORARY DIAGNOSTIC
+
             ; write file size to result[DIRENT_SIZE] (big-endian)
             ; size is 4 bytes little-endian at DE_SIZE (offset 28)
             mov     rf, ra
