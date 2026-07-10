@@ -439,6 +439,41 @@ drd_eof:
             glo     ra
             str     rf
 
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right when dir_read
+            ; itself hits a literal '$00' terminator byte mid-cluster
+            ; (the MORE likely EOF path here, vs. _dir_next_sector's
+            ; own dns_end -- cluster D2 was zero-filled by fc_grow
+            ; when it was first allocated, so it very likely has a
+            ; genuine $00 terminator right after its live entries,
+            ; never needing a 4th _dir_next_sector call at all). RA
+            ; holds the entry pointer, already saved to dir_eptr above
+            ; -- safe to clobber RF/RB/R8 freely here since nothing
+            ; else survives a DF=1 return.
+            call    f_inmsg
+            db      13,10,"DIAG drd_eof lb='",0
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     24
+            plo     r8
+drd_eof_lb_loop:
+            lda     rf
+            lbnz    drd_eof_lb_have
+            ldi     '.'
+drd_eof_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    drd_eof_lb_loop
+            ldi     0
+            str     rb
+
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
             stc                         ; DF = 1
             rtn
 
@@ -706,6 +741,44 @@ dns_diag_lb_have:
             rtn
 
 dns_end:
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right when
+            ; end-of-chain is detected (fat_get returned an EOC
+            ; marker) -- this is a code path the success-path dump
+            ; above (dns_read) NEVER exercises, since it only fires
+            ; after a SUCCESSFUL sector load. copy11.txt showed
+            ; LINE_BUF still clean immediately after both the
+            ; cluster-10 and cluster-D2 sector loads during a
+            ; not-found scan, with corruption only visible by the
+            ; NEXT file_open call's entry -- meaning it happens
+            ; somewhere between D2's own entries being processed and
+            ; the scan concluding, and THIS end-of-chain detection
+            ; (reached once D2's entries are exhausted with no match)
+            ; is the one remaining untested step in that window.
+            call    f_inmsg
+            db      13,10,"DIAG dns_end lb='",0
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     24
+            plo     r8
+dns_end_lb_loop:
+            lda     rf
+            lbnz    dns_end_lb_have
+            ldi     '.'
+dns_end_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    dns_end_lb_loop
+            ldi     0
+            str     rb
+
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
 dns_err:
             stc
             rtn
