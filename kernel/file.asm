@@ -309,41 +309,6 @@ fopen_no_invalidate:
             ; RD is still the resolved parent cluster from path_resolve
             call    dir_open
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF as raw chars (NUL
-            ; shown as '.') right after dir_open, before the scan loop
-            ; runs -- bracketed against an identical dump right after
-            ; a match is found (below), to catch exactly when LINE_BUF
-            ; gets corrupted during a "found" (mode 0) file_open call.
-            ; ren10.txt/ren11.txt proved COPY's destination string is
-            ; already corrupted ("init5.rc" -> "ini ") by the time
-            ; copy.asm reads it right after the SOURCE's own
-            ; file_open call returns, but static tracing of the
-            ; "found" path (dir_open/fopen_loop/f_strcmp/FCB
-            ; population) found no LINE_BUF write. RF/RC protected
-            ; across each f_tty call since its register-preservation
-            ; contract isn't confirmed (gotcha #8).
-            call    f_inmsg
-            db      13,10,"DIAG linebuf pre-scan ='",0
-            mov     rf, LINE_BUF
-            ldi     32
-            plo     rc
-diag_lb1_loop:
-            lda     rf
-            lbnz    diag_lb1_have
-            ldi     '.'
-diag_lb1_have:
-            push    rf
-            push    rc
-            call    f_tty
-            pop     rc
-            pop     rf
-            dec     rc
-            glo     rc
-            lbnz    diag_lb1_loop
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
-
 fopen_loop:
             mov     rf, file_dirent
             call    dir_read
@@ -363,31 +328,6 @@ fopen_loop:
             mov     rf, file_dirent     ; RF = entry name
             call    f_strcmp
             lbnz    fopen_loop          ; no match: keep looking
-
-            ; TEMPORARY DIAGNOSTIC: same LINE_BUF dump, now right
-            ; after a match is found (before FCB population) --
-            ; see the bracket comment above dir_open's own dump
-            call    f_inmsg
-            db      13,10,"DIAG linebuf post-match='",0
-            mov     rf, LINE_BUF
-            ldi     32
-            plo     rc
-diag_lb2_loop:
-            lda     rf
-            lbnz    diag_lb2_have
-            ldi     '.'
-diag_lb2_have:
-            push    rf
-            push    rc
-            call    f_tty
-            pop     rc
-            pop     rf
-            dec     rc
-            glo     rc
-            lbnz    diag_lb2_loop
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
             ; must NOT be a directory
             mov     rf, file_dirent
