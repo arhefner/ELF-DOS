@@ -394,6 +394,45 @@ drd_got_name:
             glo     rd
             str     rf                  ; result[DIRENT_WRTDATE+1] = low
 
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after the
+            ; attr/cluster/size/wrttime/wrtdate field copies complete,
+            ; before the LFN-state-clear + dir_last_off computation +
+            ; entry-pointer-advance tail runs -- copy15.txt confirmed
+            ; f_strcpy is NOT the culprit (still clean right after
+            ; it), narrowing the remaining window to drd_got_name's
+            ; own code. This splits that in half: the straightforward
+            ; ADD16-based field copies above vs. the dir_last_off
+            ; SM/SMB subtraction + pointer-advance tail below (a
+            ; structurally different kind of arithmetic, worth
+            ; isolating). RA/R9 protected across the dump.
+            push    ra
+            push    r9
+            call    f_inmsg
+            db      13,10,"DIAG post-fields lb='",0
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     24
+            plo     r8
+drd_pf_lb_loop:
+            lda     rf
+            lbnz    drd_pf_lb_have
+            ldi     '.'
+drd_pf_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    drd_pf_lb_loop
+            ldi     0
+            str     rb
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            pop     r9
+            pop     ra
+            ; END TEMPORARY DIAGNOSTIC
+
             ; clear LFN state
             mov     rf, dir_lfn_ok
             ldi     0
