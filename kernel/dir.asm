@@ -59,6 +59,7 @@
             extrn   dir_lfn_ok
             extrn   dir_cur_lba
             extrn   dir_last_off
+            extrn   dns_diag_buf        ; TEMPORARY DIAGNOSTIC
             extrn   _dir_next_sector
             extrn   _cluster_to_lba
             extrn   _dir_fmt83
@@ -92,6 +93,13 @@ dir_lfn_ok:     db      0           ; non-zero if a valid LFN is ready
 dir_cur_lba:    ds      LBA_SIZE
 dir_last_off:   dw      0
 
+; TEMPORARY DIAGNOSTIC scratch: 2 hex digits + null, used by
+; _dir_next_sector to print dir_clust's low byte every time it loads
+; a new sector -- see CLAUDE.md's REN bullet / ren5.txt for why
+; (investigating a phantom duplicate-entry display bug that does not
+; appear when the same disk is checked on the host machine).
+dns_diag_buf:   ds      3
+
                 public  dir_clust
                 public  dir_sect
                 public  dir_eptr
@@ -101,6 +109,7 @@ dir_last_off:   dw      0
                 public  dir_lfn_ok
                 public  dir_cur_lba
                 public  dir_last_off
+                public  dns_diag_buf
 
                 endp
 
@@ -593,6 +602,58 @@ dns_read:
             mov     rf, dir_buf
             call    f_ideread
             lbdf    dns_err
+
+            ; TEMPORARY DIAGNOSTIC: print dir_clust's low byte as 2 hex
+            ; digits every time a new sector is loaded, to directly
+            ; observe the cluster-visitation sequence during a scan
+            ; (investigating the phantom duplicate-entry display bug --
+            ; see CLAUDE.md's REN bullet / ren5.txt).
+            ; NOTE: R9 holds dir_read's saved result-buffer pointer
+            ; across this call -- must not be touched here. Use RB
+            ; instead (unused elsewhere in this proc).
+            mov     rf, dir_clust
+            inc     rf
+            ldn     rf                  ; D = dir_clust low byte
+            plo     rb                  ; stash byte to convert
+
+            mov     rf, dns_diag_buf
+
+            glo     rb                  ; D = byte
+            shr
+            shr
+            shr
+            shr                         ; D = high nibble
+            smi     10
+            lbnf    dns_diag_hi_digit   ; nibble < 10 (borrow, DF=0)
+            adi     'A'                 ; nibble >= 10: D = nibble-10
+            lbr     dns_diag_hi_store
+dns_diag_hi_digit:
+            adi     10+'0'
+dns_diag_hi_store:
+            str     rf
+            inc     rf
+
+            glo     rb                  ; D = byte
+            ani     $0F                 ; D = low nibble
+            smi     10
+            lbnf    dns_diag_lo_digit
+            adi     'A'
+            lbr     dns_diag_lo_store
+dns_diag_lo_digit:
+            adi     10+'0'
+dns_diag_lo_store:
+            str     rf
+            inc     rf
+
+            ldi     0
+            str     rf                  ; null-terminate dns_diag_buf
+
+            call    f_inmsg
+            db      13,10,"DIAG scan: clust=",0
+
+            mov     rf, dns_diag_buf
+            call    f_msg
+            ; END TEMPORARY DIAGNOSTIC
 
             clc
             rtn
