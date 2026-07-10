@@ -114,6 +114,20 @@ K_DIR_CREATE:   equ     $014E
 ;          path component is invalid)
 K_DIR_REMOVE:   equ     $0151
 
+; K_FILE_RENAME: rename a file or directory within the SAME parent
+; directory (no cross-directory move). Works on either files or
+; directories.
+;
+; Args:    RF = pointer to null-terminated OLD path string
+;          RD = pointer to null-terminated NEW name (bare name, no
+;          path separator -- always applies within the OLD path's
+;          own parent directory)
+; Returns: DF = 0 on success, DF = 1 on error (old not found, new
+;          name already exists or is invalid, old or new name is
+;          "."/"..", or an intermediate component of the old path is
+;          invalid)
+K_FILE_RENAME:  equ     $0154
+
 ; ---- Kernel version (read directly, no call needed) ----
 ; $0100's 6-byte header layout is a stable, never-shifting contract
 ; (same reasoning as PROG_BASE/LOADER_ARGS above), so the version
@@ -151,4 +165,4 @@ K_BOOT:         equ     $0139       ; -> f_boot
 K_TTY:          equ     $013C       ; -> f_tty
 K_SETBD:        equ     $013F       ; -> f_setbd
 
-; next free slot address: $0154
+; next free slot address: $0157

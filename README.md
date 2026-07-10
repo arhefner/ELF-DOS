@@ -46,22 +46,17 @@ Actively in development. Currently working, confirmed on real hardware:
 - `MD <path>`: creates an empty subdirectory (single-level only -- the
   parent must already exist). Confirmed on hardware.
 - `RD <path>`: removes an empty subdirectory (refuses non-empty
-  directories, `.`/`..`, and the root). Implemented, not yet
-  hardware-tested.
-- `MD <path>`: creates a new, empty subdirectory (single-level only --
-  the parent must already exist) via the new `K_DIR_CREATE` kernel call
-  (`kernel/file.asm`'s `dir_create`), which allocates and zeros a cluster,
-  writes real `.`/`..` entries into it, then reuses `_file_create`'s own
-  entry-insertion machinery (now generalized via `fc_new_attr`/
-  `fc_new_cluster`) to link it into the parent. **Implemented, not yet
-  confirmed on hardware.**
+  directories, `.`/`..`, and the root). Confirmed on hardware.
+- `REN <path> <newname>`: renames a file or directory within its own
+  parent directory (no cross-directory move). Implemented, not yet
+  confirmed on hardware.
 
 Not yet supported (see `CLAUDE.md` for the fuller running notes):
 
 - `SETTIME` (or similar) to set/correct the clock -- deliberately deferred
   alongside the rest of the small-utility-command backlog below.
 - Multiple partitions / drive letters (`C:`, `D:`, ...).
-- More shell utilities: `REN`, `RD`, `MEM`, etc.
+- More shell utilities: `MEM`, `ATTRIB`, etc.
 - Batch/script support.
 
 ## Architecture

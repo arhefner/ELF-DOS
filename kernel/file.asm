@@ -83,6 +83,7 @@
             extrn   _fclose_rewrite_size
             extrn   _file_create
             extrn   _delete_located_entry
+            extrn   _mark_entry_deleted
             extrn   fc_elba
             extrn   fc_eoff
             extrn   fc_shortname
@@ -94,6 +95,7 @@
             extrn   fc_target_off
             extrn   fc_new_attr
             extrn   fc_new_cluster
+            extrn   fc_new_size
             extrn   _gen_short_name
             extrn   _classify_char
             extrn   _lfn_fill_segment
@@ -109,6 +111,10 @@
             extrn   drm_saved_clust
             extrn   drm_saved_off
             extrn   drm_saved_lba
+            extrn   ren_new_name
+            extrn   ren_parent
+            extrn   ren_old_off
+            extrn   ren_old_lba
 
 ; ----------------------------------------------------------------
 ; file_init: mark all FCB slots as free
@@ -661,17 +667,26 @@ fopen_notfound:
             ldn     rf
             lbz     fopen_err
 
-            ; _file_create writes whatever attribute/initial-cluster
-            ; fc_new_attr/fc_new_cluster hold -- file_open always wants
-            ; a plain file (ATTR_ARCHIVE, cluster 0 = lazily allocated
-            ; on first write, see file_write). dir_create (MD) reuses
-            ; the same entry-insertion machinery with ATTR_DIR and a
-            ; real, already-allocated cluster instead.
+            ; _file_create writes whatever attribute/initial-cluster/
+            ; size fc_new_attr/fc_new_cluster/fc_new_size hold --
+            ; file_open always wants a plain, empty file (ATTR_ARCHIVE,
+            ; cluster 0 = lazily allocated on first write, size 0).
+            ; dir_create (MD) and file_rename (REN) reuse the same
+            ; entry-insertion machinery with different values.
             mov     rf, fc_new_attr
             ldi     ATTR_ARCHIVE
             str     rf
             mov     rf, fc_new_cluster
             ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            mov     rf, fc_new_size
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
             str     rf
             inc     rf
             str     rf
@@ -1716,6 +1731,37 @@ fc_copy_shortname:
             ghi     ra                  ; D = cluster high byte
             str     rf
 
+            ; --- DE_SIZE (4 bytes, little-endian on disk) from
+            ; fc_new_size (big-endian in memory, same convention as
+            ; FCB_FSIZE/_fclose_rewrite_size's own copy). Files and
+            ; newly created directories both leave this 0; file_rename
+            ; (REN) sets it to the renamed entry's existing size,
+            ; preserving it across the delete+recreate. RC/RD are free
+            ; here (their earlier use as loop counters above is done). ---
+            mov     r9, fc_new_size
+            lda     r9                  ; D = size byte 0 (MSB)
+            plo     rc
+            lda     r9                  ; D = size byte 1
+            phi     rc
+            lda     r9                  ; D = size byte 2
+            plo     rd
+            ldn     r9                  ; D = size byte 3 (LSB)
+            phi     rd                  ; RC = bytes 0,1; RD = bytes 2,3
+
+            mov     rf, r8
+            add16   rf, DE_SIZE
+            ghi     rd                  ; D = size byte 3 (LSB) -> first
+            str     rf
+            inc     rf
+            glo     rd                  ; D = size byte 2
+            str     rf
+            inc     rf
+            ghi     rc                  ; D = size byte 1
+            str     rf
+            inc     rf
+            glo     rc                  ; D = size byte 0 (MSB) -> last
+            str     rf
+
             ; --- write time/date (DE_WRTTIME/DE_WRTDATE, 2+2 bytes,
             ; little-endian) with the current time ---
             push    r8                  ; entry base -- rtc_refresh/
@@ -2175,12 +2221,16 @@ fdel_err:
             rtn
 
 ; ----------------------------------------------------------------
-; _delete_located_entry: shared tail for file_delete (DEL) and
-; dir_remove (RD) -- marks the already-located directory entry (and
-; any preceding LFN entries) deleted on disk, then frees its cluster
-; chain. Factored out so dir_remove's own empty-check scan (which
-; needs to dir_open/dir_read the TARGET directory, clobbering dir.asm's
-; live scan state) can run and be undone BEFORE this logic sees
+; _mark_entry_deleted: marks the already-located directory entry (and
+; any preceding LFN entries) deleted on disk. Does NOT free its
+; cluster chain -- shared by _delete_located_entry (DEL/RD's tail,
+; which frees the chain right after) and file_rename (REN, which
+; deliberately does NOT free it, since a rename re-points a NEW entry
+; at the SAME chain rather than discarding the data).
+;
+; Factored out so dir_remove's own empty-check scan (which needs to
+; dir_open/dir_read the TARGET directory, clobbering dir.asm's live
+; scan state) can run and be undone BEFORE this logic sees
 ; dir_last_off/dir_cur_lba/dir_buf, without touching file_delete's own
 ; already-hardware-confirmed code path at all -- file_delete's normal
 ; case never does anything between locating the entry and calling here,
@@ -2195,7 +2245,7 @@ fdel_err:
 ; ----------------------------------------------------------------
             endp
 
-            proc    _delete_located_entry
+            proc    _mark_entry_deleted
 
             ; stash it in memory, not just R9 -- f_idewrite below is only
             ; confirmed to preserve RA/RC/RD (see CLAUDE.md gotcha #10),
@@ -2321,12 +2371,40 @@ dle_mark_short:
 
             mov     rf, dir_buf
             call    f_idewrite
+            lbdf    med_err
+
+            clc                         ; DF = 0, success
+            rtn
+
+med_err:
+            stc                         ; DF = 1, error
+            rtn
+
+; ----------------------------------------------------------------
+; _delete_located_entry: marks the located entry deleted (via
+; _mark_entry_deleted above) and then frees its cluster chain --
+; the DEL/RD tail. file_rename (REN) calls _mark_entry_deleted
+; directly instead, skipping this cluster-free step entirely, since
+; a rename re-points a NEW entry at the SAME cluster chain rather
+; than discarding it.
+;
+; Args:    R9 = target's first cluster (0 = none)
+;          dir_last_off/dir_cur_lba/dir_buf = the located entry's
+;          parent-directory sector (same as _mark_entry_deleted)
+; Returns: DF = 0 on success, DF = 1 on I/O error
+; Modifies: R7, R8, R9, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    _delete_located_entry
+
+            call    _mark_entry_deleted
             lbdf    dle_err
 
             ; --- free the cluster chain, now that the entry is safely
-            ; marked deleted -- reload from memory, not the R9 we set
-            ; before the call above, since f_idewrite's preservation of
-            ; R9 is unconfirmed
+            ; marked deleted -- reload from memory, not the R9 passed
+            ; in, since _mark_entry_deleted's own f_idewrite call may
+            ; have clobbered it (its preservation of R9 is unconfirmed)
             mov     rf, fdel_next_clust
             lda     rf
             phi     r9
@@ -2809,6 +2887,16 @@ dcr_restore:
             glo     rd
             str     rf
 
+            mov     rf, fc_new_size     ; a freshly created directory
+            ldi     0                   ; always reports size 0 in its
+            str     rf                  ; own entry
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+
             call    _file_create
             rtn                         ; DF from _file_create passed
                                         ; straight through
@@ -3094,6 +3182,363 @@ drm_err:
 ; terminated via rtn, so control flow never falls through into them
 drm_dot:        db      ".",0
 drm_dotdot:     db      "..",0
+
+; ----------------------------------------------------------------
+; file_rename: rename a file or directory within the SAME parent
+; directory (no cross-directory move)
+;
+; The new name must be a bare name (no path separator) -- it always
+; applies within the OLD path's own resolved parent. Works on either
+; files or directories (no ATTR_DIR check either way, unlike DEL/RD).
+;
+; Deliberately always inserts a brand-new directory entry (reusing
+; _file_create, parameterized via fc_new_attr/fc_new_cluster/
+; fc_new_size to carry over the target's existing attribute, cluster
+; chain, and size exactly) rather than attempting an in-place short-
+; name/LFN edit -- simpler, and avoids comparing old vs. new LFN slot
+; counts. The new entry is inserted BEFORE the old one is removed, and
+; the new-name collision check happens before either: if anything
+; fails partway, the worst case is a harmless duplicate entry (both
+; names pointing at the same data), never a lost one -- the same
+; "safe/reversible step before the destructive one" ordering this
+; project already uses for DEL/MD. The old entry is removed via
+; _mark_entry_deleted only (NOT _delete_located_entry) -- its cluster
+; chain must NOT be freed, since the new entry now points at it.
+;
+; Args:    RF = pointer to null-terminated OLD path string
+;          RD = pointer to null-terminated NEW name (bare name, no
+;          path separator)
+; Returns: DF = 0 on success, DF = 1 on error (old not found, new
+;          name already exists or is invalid, old or new name is
+;          "."/"..", or an intermediate component of the old path is
+;          invalid)
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    file_rename
+
+            ; save both incoming pointers immediately, using RB as the
+            ; store-address register -- path_resolve (below) clobbers
+            ; RD and needs RF free
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; fo_name = old path pointer
+
+            mov     rb, ren_new_name
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; ren_new_name = new name ptr
+
+            ; --- validate the new name: not empty, no path
+            ; separator, not "." or ".." ---
+            mov     rf, ren_new_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = new name pointer
+            ldn     rd
+            lbz     ren_err             ; empty new name
+
+            mov     rf, ren_new_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = new name pointer (reload)
+ren_check_sep:
+            ldn     rd
+            lbz     ren_check_sep_done  ; reached the null: no separator
+            xri     PATH_SEP
+            lbz     ren_err             ; new name contains '/'
+            inc     rd
+            lbr     ren_check_sep
+ren_check_sep_done:
+
+            mov     rf, ren_new_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ren_dot
+            call    f_strcmp
+            lbz     ren_err             ; new name is "."
+
+            mov     rf, ren_new_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ren_dotdot
+            call    f_strcmp
+            lbz     ren_err             ; new name is ".."
+
+            ; --- resolve the (possibly multi-component) OLD path ---
+            mov     rf, cur_dir
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = current directory cluster
+
+            mov     ra, fo_name
+            lda     ra
+            phi     rf
+            ldn     ra
+            plo     rf                  ; RF = old path pointer
+            call    path_resolve        ; RD = parent cluster, RF = final
+                                        ; component
+            lbdf    ren_err             ; bad intermediate component
+
+            ; save both return values into memory immediately (the
+            ; "." / ".." guard below calls f_strcmp, confirmed to
+            ; clobber RD -- see dir_create's own header comment)
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; fo_name = old final component
+
+            mov     rb, ren_parent
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; ren_parent = parent cluster
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = old final component
+            ldn     rd
+            lbz     ren_err             ; empty final component: no
+                                        ; name given
+
+            ; reject renaming "." or ".." -- these aren't real,
+            ; independently renamable entries
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ren_dot
+            call    f_strcmp
+            lbz     ren_err
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ren_dotdot
+            call    f_strcmp
+            lbz     ren_err
+
+            ; --- scan the parent for the OLD name ---
+            mov     rf, ren_parent
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = parent cluster (reloaded)
+            call    dir_open
+
+ren_old_loop:
+            mov     rf, file_dirent
+            call    dir_read
+            lbdf    ren_err             ; end of directory: not found
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = old final component
+            mov     rf, file_dirent     ; RF = entry name
+            call    f_strcmp
+            lbnz    ren_old_loop        ; no match: keep looking
+
+            ; --- capture attr/cluster/size now, from file_dirent (a
+            ; copy, independent of dir_buf) -- straight into
+            ; fc_new_attr/fc_new_cluster/fc_new_size, since nothing
+            ; else touches those until _file_create reads them below ---
+            mov     rf, file_dirent
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            plo     rb                  ; stash it -- BUG FIX: "mov r9,
+                                        ; fc_new_attr" below itself
+                                        ; clobbers D (gotcha #4), so the
+                                        ; attribute byte just loaded
+                                        ; would not survive to "str r9"
+                                        ; without this stash
+            mov     r9, fc_new_attr
+            glo     rb                  ; D = attribute byte (reloaded)
+            str     r9
+
+            mov     rf, file_dirent
+            add16   rf, DIRENT_CLUST
+            mov     r9, fc_new_cluster
+            lda     rf
+            str     r9
+            inc     r9
+            ldn     rf
+            str     r9
+
+            mov     rf, file_dirent
+            add16   rf, DIRENT_SIZE
+            mov     r9, fc_new_size
+            lda     rf
+            str     r9
+            inc     r9
+            lda     rf
+            str     r9
+            inc     r9
+            lda     rf
+            str     r9
+            inc     r9
+            ldn     rf
+            str     r9
+
+            ; --- save the OLD entry's location before the new-name
+            ; collision scan below clobbers dir.asm's live state ---
+            mov     rf, dir_last_off
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ren_old_off
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, dir_cur_lba
+            mov     rb, ren_old_lba
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+
+            ; --- scan the parent AGAIN, fresh, for a NEW-name
+            ; collision. If none, this naturally leaves dir.asm's live
+            ; state describing the '$00' terminator -- exactly what
+            ; _file_create needs -- so it's used immediately below,
+            ; before anything else can disturb it. ---
+            mov     rf, ren_parent
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    dir_open
+
+ren_new_loop:
+            mov     rf, file_dirent
+            call    dir_read
+            lbdf    ren_insert          ; end of directory: no
+                                        ; collision, proceed
+
+            mov     rf, ren_new_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, file_dirent
+            call    f_strcmp
+            lbnz    ren_new_loop        ; no match: keep looking
+
+            ; new name already exists: reject (nothing destructive
+            ; has happened yet)
+            lbr     ren_err
+
+ren_insert:
+            ; fo_name = new name pointer, for _file_create to read
+            mov     rf, ren_new_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rb, fo_name
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+
+            call    _file_create        ; DF = 0/1
+            lbdf    ren_err             ; failed: nothing destructive
+                                        ; happened, safe to just report
+
+            ; --- restore dir.asm's live state to the OLD entry's
+            ; location, exactly as _mark_entry_deleted expects ---
+            mov     rf, ren_old_off
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, dir_last_off
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, ren_old_lba
+            mov     rb, dir_cur_lba
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+
+            mov     rf, dir_cur_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+
+            mov     rf, dir_buf
+            call    f_ideread           ; dir_buf = OLD entry's parent
+                                        ; sector content again
+            lbdf    ren_err
+
+            ; R9 = the OLD entry's own cluster -- still sitting in
+            ; fc_new_cluster (big-endian in memory), since we just set
+            ; it ourselves above and nothing else has touched it
+            mov     rf, fc_new_cluster
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+
+            call    _mark_entry_deleted ; does NOT free the cluster
+                                        ; chain -- the new entry now
+                                        ; points at it
+            rtn                         ; DF passed straight through
+
+ren_err:
+            stc                         ; DF = 1, error
+            rtn
+
+; local literal strings for the "." / ".." checks above -- placed
+; here, after every reachable code path in this proc already
+; terminated via rtn, so control flow never falls through into them
+ren_dot:        db      ".",0
+ren_dotdot:     db      "..",0
 
 ; ----------------------------------------------------------------
 ; file_read: read bytes from an open file into a buffer
@@ -4221,14 +4666,18 @@ fc_target_off:  dw      0
 fc_elba:        ds      LBA_SIZE
 fc_eoff:        dw      0
 
-; fc_new_attr/fc_new_cluster: parameterize _file_create's short-entry
-; write -- file_open's fopen_notfound always sets ATTR_ARCHIVE/0 (a
-; plain file, first cluster lazily allocated on first write);
-; dir_create (MD) sets ATTR_DIR and an already-allocated cluster.
-; fc_new_cluster is big-endian in memory, same convention as every
-; other scratch cluster field in this file.
+; fc_new_attr/fc_new_cluster/fc_new_size: parameterize _file_create's
+; short-entry write -- file_open's fopen_notfound always sets
+; ATTR_ARCHIVE/0/0 (a plain file, first cluster lazily allocated on
+; first write, size starts empty); dir_create (MD) sets ATTR_DIR and
+; an already-allocated cluster (size stays 0). file_rename (REN) sets
+; all three to the renamed entry's existing attr/cluster/size, so a
+; rename preserves them exactly across its delete+recreate.
+; fc_new_cluster/fc_new_size are big-endian in memory, same convention
+; as every other scratch cluster/size field in this file.
 fc_new_attr:    db      0
 fc_new_cluster: dw      0
+fc_new_size:    dw      0,0             ; 4 bytes, big-endian
 
 ; fa_*: scratch for file_open's mode-2 (append) end-of-file
 ; positioning -- see the append block in file_open. Kept in memory
@@ -4272,6 +4721,15 @@ drm_saved_clust:    dw      0           ; target directory's own first
 drm_saved_off:      dw      0           ; parent's dir_last_off, saved
 drm_saved_lba:      ds      LBA_SIZE    ; parent's dir_cur_lba, saved
 
+; ren_*: scratch for file_rename (REN) -- same reasoning as drm_*: the
+; new-name collision scan (a fresh dir_open/dir_read pass) clobbers
+; dir.asm's live scan state, so the OLD entry's location is saved here
+; first and restored afterward, before _mark_entry_deleted runs.
+ren_new_name:       dw      0           ; new name pointer
+ren_parent:         dw      0           ; resolved parent cluster
+ren_old_off:        dw      0           ; OLD entry's dir_last_off, saved
+ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
+
                 public  io_owner
                 public  file_dirent
                 public  fo_name
@@ -4291,6 +4749,7 @@ drm_saved_lba:      ds      LBA_SIZE    ; parent's dir_cur_lba, saved
                 public  fc_elba
                 public  fc_new_attr
                 public  fc_new_cluster
+                public  fc_new_size
                 public  fc_eoff
                 public  fa_boff
                 public  fa_cluster_idx
@@ -4304,5 +4763,9 @@ drm_saved_lba:      ds      LBA_SIZE    ; parent's dir_cur_lba, saved
                 public  drm_saved_clust
                 public  drm_saved_off
                 public  drm_saved_lba
+                public  ren_new_name
+                public  ren_parent
+                public  ren_old_off
+                public  ren_old_lba
 
             endp

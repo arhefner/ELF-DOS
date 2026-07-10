@@ -3,8 +3,8 @@
 ;
 ; Written by ROM f_boot to $0100, entered at $0106.
 ; Sets up the stack, resets the IDE/SD subsystem, loads the
-; kernel bootstrap sector (sector 1) to $3800, and jumps to
-; the bootstrap entry point at $3806.
+; kernel bootstrap sector (sector 1) to $3E00, and jumps to
+; the bootstrap entry point at $3E06.
 ;
 ; KERN_LOAD was $3000 until 2026-07-09: the kernel proper (loaded by
 ; krnboot to $0100, see krnboot.asm) had grown to the point that its
@@ -13,10 +13,18 @@
 ; load loop was still executing from it -- a silent self-overwrite
 ; with no error message (the corruption happened before kernel_init's
 ; first print), which looked from the outside like "the kernel does
-; not boot at all". Moved to $3800 to restore real headroom, same
-; reasoning as PROG_BASE's own moves (see include/kernel.inc) -- check
+; not boot at all". Moved to $3800 that same day to restore real
+; headroom. Moved again to $3E00 immediately after RENAME (REN) was
+; added -- headroom had shrunk to ~256 bytes (MD/RD/REN together added
+; a meaningful amount of kernel code in one session), well under this
+; project's own "real headroom, not a few dozen bytes" bar, and this
+; time moved proactively, before a hardware failure forced the issue.
+; $3E00 leaves krnboot ending essentially at PROG_BASE's own start
+; ($4000) -- harmless, since krnboot's memory is fully dead by the time
+; any user program ever loads there; the only real constraint is
+; clearance from the KERNEL's own growth, not from PROG_BASE. Check
 ; this margin again if the kernel's "Highest address" approaches
-; $3800 - $0100 = ~14KB.
+; $3E00 - $0100 = ~15.5KB.
 ;
 ; Binary must be exactly 512 bytes:
 ;   $0100-$01BD  boot code (446 bytes max)
@@ -31,8 +39,8 @@
 #include    include/bios.inc
 #include    include/opcodes.def
 
-#define     KERN_LOAD   $3800           ; kernel bootstrap loads here
-#define     KERN_ENTRY  $3806           ; kernel bootstrap entry point
+#define     KERN_LOAD   $3E00           ; kernel bootstrap loads here
+#define     KERN_ENTRY  $3E06           ; kernel bootstrap entry point
 
             org         $0100
 
@@ -61,11 +69,11 @@ mbr_main:   call        f_freemem       ; RF = address of highest RAM byte
             plo         r8              ; R8.0 = LBA bits 23-16 = 0
             phi         r8              ; R8.1 = drive/head = 0
 
-            mov         rf,KERN_LOAD    ; RF = $3800, destination buffer
+            mov         rf,KERN_LOAD    ; RF = $3E00, destination buffer
             call        f_ideread       ; read sector 1
             lbdf        mbr_err         ; DF=1 means read error
 
-            lbr         KERN_ENTRY      ; jump to $3806, kernel bootstrap
+            lbr         KERN_ENTRY      ; jump to $3E06, kernel bootstrap
 
 ;--------------------------------------------------------------
 ; Boot error handler
