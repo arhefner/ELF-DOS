@@ -251,6 +251,46 @@ drd_check_entry:
             mov     rf, dir_lfn         ; RF = LFN source
             mov     rd, r9              ; RD = result buffer (name at offset 0)
             call    f_strcpy
+
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after
+            ; f_strcpy returns, before drd_got_name's own field-copy
+            ; operations run -- copy14.txt narrowed corruption to
+            ; somewhere between _dir_proc_lfn finishing (clean) and
+            ; the fully-decoded entry being returned (corrupted), and
+            ; this is the one call in between whose own register/
+            ; memory contract was assumed rather than fully verified
+            ; (comment above: "confirmed... RF/RD/D" -- this checks
+            ; that assumption directly). RA/R9 protected via push/pop
+            ; since if the assumption is wrong, clobbering them here
+            ; would introduce a SECOND bug on top of this one.
+            push    ra
+            push    r9
+            call    f_inmsg
+            db      13,10,"DIAG post-strcpy lb='",0
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     24
+            plo     r8
+drd_sc_lb_loop:
+            lda     rf
+            lbnz    drd_sc_lb_have
+            ldi     '.'
+drd_sc_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    drd_sc_lb_loop
+            ldi     0
+            str     rb
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            pop     r9
+            pop     ra
+            ; END TEMPORARY DIAGNOSTIC
+
             lbr     drd_got_name
 
 drd_use83:  ; format 8.3 name into result[DIRENT_NAME]
