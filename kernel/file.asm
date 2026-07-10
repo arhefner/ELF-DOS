@@ -433,6 +433,71 @@ fopen_flags_done:
             str     rb
             inc     rb                  ; FCB_EOFF written
 
+            ; --- mode 1 (write/truncate) on an EXISTING file: truncate
+            ; FCB_FSIZE to 0 immediately, matching "overwritten from
+            ; position 0" semantics (COPY's own documented behavior,
+            ; and classic DOS open-for-write semantics generally).
+            ;
+            ; BUG FIX: without this, FCB_FSIZE started out as the
+            ; file's OLD size (just copied from the dirent above), and
+            ; file_write's own size-tracking only ever updates
+            ; FCB_FSIZE when FCB_FPOS grows PAST it (see file_write's
+            ; own comment: "if it grows FCB_FSIZE past the size
+            ; recorded at open, FCB_F_SIZECHG is set"). Overwriting an
+            ; existing LARGER file with SHORTER new content therefore
+            ; never grew past the old size, so FCB_F_SIZECHG never got
+            ; set, file_close never rewrote DE_SIZE, and the directory
+            ; entry kept reporting the OLD (larger) size forever --
+            ; with the file's actual bytes beyond the new, shorter
+            ; content left as untouched stale data from whatever was
+            ; there before. Confirmed on hardware (2026-07-10): WTEST
+            ; created a 2200-byte file, then COPY's new overwrite-
+            ; existing-file path wrote a 52-byte source over it --
+            ; `DIR` kept showing 2200 bytes, and `TYPE` showed the
+            ; correct 52 new bytes followed by ~2148 bytes of the OLD
+            ; WTEST test pattern.
+            ;
+            ; FCB_FPOS is already 0 (set above), so only FCB_FSIZE
+            ; needs zeroing here. Setting FCB_F_SIZECHG immediately
+            ; (rather than waiting for file_write to notice growth)
+            ; guarantees file_close rewrites DE_SIZE even if the
+            ; caller opens for write and closes without writing
+            ; anything -- correct DOS-like "truncated to empty"
+            ; behavior for that case too. file_write's own existing
+            ; grow-detection then naturally tracks the true final size
+            ; from 0 upward as bytes are actually written; no change
+            ; needed there.
+            mov     rf, fo_mode
+            ldn     rf
+            smi     1
+            lbnz    fopen_check_append  ; not mode 1
+
+            mov     rf, fo_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = fcb slot base
+
+            mov     rf, rb
+            add16   rf, FCB_FSIZE
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf                  ; FCB_FSIZE = 0 (4 bytes)
+
+            mov     rf, rb
+            ldn     rf
+            ori     FCB_F_SIZECHG
+            str     rf                  ; FCB_FLAGS |= FCB_F_SIZECHG
+
+            lbr     fopen_no_append     ; mode 1 needs no append
+                                        ; repositioning (FPOS already 0)
+
+fopen_check_append:
             ; --- mode 2 (append): reposition FCB_CCLUST/CSECT/BOFF/
             ; FPOS to end-of-file, so writes append rather than
             ; overwrite from the start. No-op for an empty file
