@@ -101,9 +101,9 @@ dir_last_off:   dw      0
 ; appear when the same disk is checked on the host machine).
 dns_diag_buf:   ds      3
 
-; TEMPORARY DIAGNOSTIC scratch: LINE_BUF dump buffer (16 chars + null),
+; TEMPORARY DIAGNOSTIC scratch: LINE_BUF dump buffer (24 chars + null),
 ; used by _dir_next_sector's own clust= print above
-dns_diag_lb:    ds      17
+dns_diag_lb:    ds      25
 
                 public  dir_clust
                 public  dir_sect
@@ -660,18 +660,24 @@ dns_diag_lo_store:
             mov     rf, dns_diag_buf
             call    f_msg
 
-            ; TEMPORARY DIAGNOSTIC: also dump LINE_BUF's first 16
+            ; TEMPORARY DIAGNOSTIC: also dump LINE_BUF's first 24
             ; bytes (NUL shown as '.') at every sector load, to
             ; bisect a SEPARATE bug -- LINE_BUF getting clobbered
             ; during a mode-0 "not found" scan (confirmed happening
             ; somewhere between file_open's pre-scan and post-return
             ; points, ren8.txt-copy9.txt), narrowing down whether it
             ; happens on the cluster-10 sector, the cluster-D2 sector,
-            ; or the _dir_next_sector chain-follow between them.
+            ; or the _dir_next_sector chain-follow between them. WIDTH
+            ; FIX: a first attempt at 16 bytes was too narrow -- the
+            ; corruption sits at LINE_BUF offset 16 (copy10.txt), one
+            ; past a 16-byte window's last visible index (0-15), so
+            ; every dump looked identically clean regardless of
+            ; whether the corruption had already happened. Widened to
+            ; 24 to match file_open's own dumps and actually cover it.
             ; RB still free here (used above, not needed again).
             mov     rf, LINE_BUF
             mov     rb, dns_diag_lb
-            ldi     16
+            ldi     24
             plo     r8                  ; R8.0 = loop count (R7/R8
                                         ; free here, LBA already
                                         ; consumed by f_ideread above)
