@@ -1352,25 +1352,6 @@ gsn_build_ext_done:
 ; ----------------------------------------------------------------
             proc    _file_create
 
-            ; TEMPORARY DIAGNOSTIC: print the name fo_name points to,
-            ; right at entry -- bracketed against an identical print
-            ; in fc_write_entries (after any fc_grow detour) to see
-            ; whether fo_name's pointed-to string changes mid-call.
-            ; Investigating REN's env3.dat insertion showing up on
-            ; disk as a duplicate "init4.rc" instead (ren7.txt).
-            call    f_inmsg
-            db      13,10,"DIAG fc entry name='",0
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, rd
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
-
             ; --- generate the 8.3 short name + namelen ---
             mov     rf, fo_name
             lda     rf
@@ -1385,25 +1366,6 @@ gsn_build_ext_done:
             inc     rf
             glo     rd
             str     rf
-
-            ; TEMPORARY DIAGNOSTIC: print the generated 8.3 short name
-            ; (11 raw bytes, space-padded, no null) -- confirms
-            ; _gen_short_name itself produced the right short name
-            ; independent of anything happening later in this call
-            call    f_inmsg
-            db      "DIAG fc shortname='",0
-            mov     rf, fc_shortname
-            ldi     11
-            plo     rc
-diag_sn_loop:
-            lda     rf
-            call    f_tty
-            dec     rc
-            glo     rc
-            lbnz    diag_sn_loop
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
             ; --- lfn_count = needs_lfn ? ceil(namelen/13) : 0 ---
             mov     rf, fc_needs_lfn
@@ -1739,26 +1701,6 @@ fc_full:
 ; terminator, then write the sector back.
 ;------------------------------------------------------------------
 fc_write_entries:
-            ; TEMPORARY DIAGNOSTIC: print fo_name's pointed-to string
-            ; again here, right before fc_lfn_loop actually copies
-            ; characters from it -- bracketed against the identical
-            ; print at _file_create's entry (above) to catch fo_name
-            ; changing across the fc_grow detour (fat_alloc/fat_set/
-            ; fat_flush/zero-fill) that runs between them whenever a
-            ; new cluster is needed.
-            call    f_inmsg
-            db      13,10,"DIAG fc_write_entries name='",0
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, rd
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
-
             ; TEMPORARY DIAGNOSTIC: compare THIS call's target
             ; location (fc_target_lba/fc_target_off) against the
             ; PREVIOUS _file_create call's -- investigating whether

@@ -60,6 +60,7 @@
             extrn   dir_cur_lba
             extrn   dir_last_off
             extrn   dns_diag_buf        ; TEMPORARY DIAGNOSTIC
+            extrn   dns_diag_lb         ; TEMPORARY DIAGNOSTIC
             extrn   _dir_next_sector
             extrn   _cluster_to_lba
             extrn   _dir_fmt83
@@ -100,6 +101,10 @@ dir_last_off:   dw      0
 ; appear when the same disk is checked on the host machine).
 dns_diag_buf:   ds      3
 
+; TEMPORARY DIAGNOSTIC scratch: LINE_BUF dump buffer (16 chars + null),
+; used by _dir_next_sector's own clust= print above
+dns_diag_lb:    ds      17
+
                 public  dir_clust
                 public  dir_sect
                 public  dir_eptr
@@ -110,6 +115,7 @@ dns_diag_buf:   ds      3
                 public  dir_cur_lba
                 public  dir_last_off
                 public  dns_diag_buf
+                public  dns_diag_lb
 
                 endp
 
@@ -653,6 +659,41 @@ dns_diag_lo_store:
 
             mov     rf, dns_diag_buf
             call    f_msg
+
+            ; TEMPORARY DIAGNOSTIC: also dump LINE_BUF's first 16
+            ; bytes (NUL shown as '.') at every sector load, to
+            ; bisect a SEPARATE bug -- LINE_BUF getting clobbered
+            ; during a mode-0 "not found" scan (confirmed happening
+            ; somewhere between file_open's pre-scan and post-return
+            ; points, ren8.txt-copy9.txt), narrowing down whether it
+            ; happens on the cluster-10 sector, the cluster-D2 sector,
+            ; or the _dir_next_sector chain-follow between them.
+            ; RB still free here (used above, not needed again).
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     16
+            plo     r8                  ; R8.0 = loop count (R7/R8
+                                        ; free here, LBA already
+                                        ; consumed by f_ideread above)
+dns_diag_lb_loop:
+            lda     rf
+            lbnz    dns_diag_lb_have
+            ldi     '.'
+dns_diag_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    dns_diag_lb_loop
+            ldi     0
+            str     rb
+
+            call    f_inmsg
+            db      " lb='",0
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
             ; END TEMPORARY DIAGNOSTIC
 
             clc
