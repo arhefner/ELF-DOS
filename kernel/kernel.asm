@@ -108,7 +108,8 @@ k_file_delete:  lbr     file_delete         ; $014B
 k_dir_create:   lbr     dir_create          ; $014E
 k_dir_remove:   lbr     dir_remove          ; $0151
 k_file_rename:  lbr     file_rename         ; $0154
-                ; next free address: $0157
+k_read:         lbr     f_read              ; $0157 (BIOS passthrough)
+                ; next free address: $015A
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

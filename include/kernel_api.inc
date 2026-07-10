@@ -164,5 +164,11 @@ K_INPUTL:       equ     $0136       ; -> f_inputl
 K_BOOT:         equ     $0139       ; -> f_boot
 K_TTY:          equ     $013C       ; -> f_tty
 K_SETBD:        equ     $013F       ; -> f_setbd
+K_READ:         equ     $0157       ; -> f_read: blocking read of a single
+                                    ; character from the console, returned
+                                    ; in D. Standard Elf/OS BIOS contract,
+                                    ; not yet independently confirmed on
+                                    ; this hardware (first real caller is
+                                    ; COPY's overwrite-confirmation prompt).
 
-; next free slot address: $0157
+; next free slot address: $015A

@@ -35,7 +35,10 @@ Actively in development. Currently working, confirmed on real hardware:
   wildcards/trees), composed entirely from existing `file_open`/
   `file_read`/`file_write`/`file_close` -- no new kernel primitive needed.
   Confirmed on hardware (surfaced and led to fixing three real `file_open`/
-  `prog_load` bugs -- see `CLAUDE.md`).
+  `prog_load` bugs -- see `CLAUDE.md`). If `<destination>` is an existing
+  directory, the source is copied into it under its own name. If the
+  resolved destination file already exists, prompts to confirm the
+  overwrite (Y/N). Not yet hardware-tested.
 - `DEL <filename>`: deletes a file (refuses directories) via the new
   `K_FILE_DELETE` kernel call (`kernel/file.asm`'s `file_delete`), which
   marks the directory entry deleted on disk *before* freeing its cluster
@@ -48,8 +51,7 @@ Actively in development. Currently working, confirmed on real hardware:
 - `RD <path>`: removes an empty subdirectory (refuses non-empty
   directories, `.`/`..`, and the root). Confirmed on hardware.
 - `REN <path> <newname>`: renames a file or directory within its own
-  parent directory (no cross-directory move). Implemented, not yet
-  confirmed on hardware.
+  parent directory (no cross-directory move). Confirmed on hardware.
 
 Not yet supported (see `CLAUDE.md` for the fuller running notes):
 
