@@ -117,6 +117,79 @@ have_dst:
             call    K_MSG
             call    K_INMSG
             db      "'",13,10,0
+
+            ; also print the raw pointer VALUE (hex) -- confirms
+            ; whether it's still the correct LINE_BUF address
+            ; (meaning the STRING content there is what's corrupted)
+            ; or a wrong address entirely (the pointer itself
+            ; corrupted). RD still holds dst_ptr's value from above.
+            call    K_INMSG
+            db      "DIAG copy dst_ptr addr=",0
+            mov     rb, diag_hexbuf
+
+            ghi     rd
+            plo     rc                  ; RC.0 = stash high byte
+            shr
+            shr
+            shr
+            shr                         ; D = high nibble
+            smi     10
+            lbnf    dcp_d1
+            adi     'A'
+            lbr     dcp_s1
+dcp_d1:
+            adi     10+'0'
+dcp_s1:
+            str     rb
+            inc     rb
+
+            glo     rc
+            ani     $0F
+            smi     10
+            lbnf    dcp_d2
+            adi     'A'
+            lbr     dcp_s2
+dcp_d2:
+            adi     10+'0'
+dcp_s2:
+            str     rb
+            inc     rb
+
+            glo     rd
+            plo     rc                  ; RC.0 = stash low byte
+            shr
+            shr
+            shr
+            shr
+            smi     10
+            lbnf    dcp_d3
+            adi     'A'
+            lbr     dcp_s3
+dcp_d3:
+            adi     10+'0'
+dcp_s3:
+            str     rb
+            inc     rb
+
+            glo     rc
+            ani     $0F
+            smi     10
+            lbnf    dcp_d4
+            adi     'A'
+            lbr     dcp_s4
+dcp_d4:
+            adi     10+'0'
+dcp_s4:
+            str     rb
+            inc     rb
+
+            ldi     0
+            str     rb
+
+            mov     rf, diag_hexbuf
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
             ; END TEMPORARY DIAGNOSTIC
 
             ; --- open destination (mode 1, create-or-overwrite) ---
@@ -228,5 +301,6 @@ dst_ptr:    dw      0
 src_fcb:    db      0
 dst_fcb:    db      0
 copy_buf:   ds      COPY_CHUNK_LEN
+diag_hexbuf: ds     5           ; TEMPORARY DIAGNOSTIC scratch
 
             end     start
