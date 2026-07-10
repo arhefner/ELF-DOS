@@ -396,6 +396,42 @@ drd_got_name:
             glo     ra
             str     rf
 
+            ; TEMPORARY DIAGNOSTIC: print the entry name just decoded
+            ; (R9 = result buffer, DIRENT_NAME at offset 0, still
+            ; valid here) alongside a LINE_BUF dump -- copy12.txt
+            ; proved corruption happens somewhere while decoding
+            ; cluster D2's own entries (init4.rc, TEST.BIN), between
+            ; the clean clust=D2 print and the corrupted drd_eof
+            ; print. This fires once per successfully-decoded entry,
+            ; correlating "which entry" with "already corrupted?".
+            call    f_inmsg
+            db      13,10,"DIAG drd entry='",0
+            mov     rf, r9
+            call    f_msg
+            call    f_inmsg
+            db      "' lb='",0
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     24
+            plo     r8
+drd_entry_lb_loop:
+            lda     rf
+            lbnz    drd_entry_lb_have
+            ldi     '.'
+drd_entry_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    drd_entry_lb_loop
+            ldi     0
+            str     rb
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
             clc                         ; DF = 0 = success
             rtn
 
