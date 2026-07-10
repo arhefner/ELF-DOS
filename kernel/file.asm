@@ -86,7 +86,6 @@
             extrn   _mark_entry_deleted
             extrn   fc_elba
             extrn   fc_eoff
-            extrn   diag_lb_buf
             extrn   fc_shortname
             extrn   fc_needs_lfn
             extrn   fc_namelen
@@ -176,43 +175,6 @@ finit_pad:  inc     rf
             glo     rc
             str     rf                  ; fo_mode = mode
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right at file_open's
-            ; very entry, before path_resolve/dir_open/the scan loop
-            ; run at all -- finer-grained bracket than the existing
-            ; pre-scan/post-match dumps, to pin down whether
-            ; corruption (ren8.txt-ren13.txt) happens during THIS
-            ; call's own path_resolve/dir_open, or happened already,
-            ; during the PREVIOUS file_open call's return/cleanup path
-            ; (ren13.txt showed attempt 1 "copy" clean throughout, but
-            ; attempt 2 "copy.EXE" already corrupted by its own
-            ; pre-scan point -- this narrows which side of that
-            ; boundary it's on). SAFE dump pattern (CLAUDE.md gotcha
-            ; #14): scratch buffer + single f_msg, no per-char BIOS
-            ; calls in a loop.
-            mov     rf, LINE_BUF
-            mov     rb, diag_lb_buf
-            ldi     24
-            plo     rc
-diag_lb0_loop:
-            lda     rf
-            lbnz    diag_lb0_have
-            ldi     '.'
-diag_lb0_have:
-            str     rb
-            inc     rb
-            dec     rc
-            glo     rc
-            lbnz    diag_lb0_loop
-            ldi     0
-            str     rb
-
-            call    f_inmsg
-            db      13,10,"DIAG linebuf entry ='",0
-            mov     rf, diag_lb_buf
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
             ; --- find a free FCB slot ---
             ldi     0
@@ -310,79 +272,10 @@ fopen_no_invalidate:
             glo     rf
             str     rb                  ; fo_name = final component pointer
 
-            ; TEMPORARY DIAGNOSTIC: print fo_name right after
-            ; path_resolve, before the exists-scan (dir_open/dir_read/
-            ; _dir_next_sector) runs -- bracketed against _file_create's
-            ; own entry print (fc entry name=) to narrow down whether
-            ; corruption (COPY's destination showing up as "ini "
-            ; instead of "init5.rc", ren8.txt) happens during
-            ; path_resolve's own copy, or during the exists-scan that
-            ; follows. RD (parent cluster, needed by dir_open right
-            ; after) is protected in RB across the diagnostic calls.
-            ghi     rd
-            phi     rb
-            glo     rd
-            plo     rb                  ; RB = parent cluster (stashed)
-
-            call    f_inmsg
-            db      13,10,"DIAG fopen post-resolve name='",0
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, rd
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-
-            ghi     rb
-            phi     rd
-            glo     rb
-            plo     rd                  ; RD = parent cluster (restored)
-            ; END TEMPORARY DIAGNOSTIC
 
             ; RD is still the resolved parent cluster from path_resolve
             call    dir_open
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF's first 24 bytes
-            ; (NUL shown as '.') right after dir_open, before the scan
-            ; loop runs -- bracketed against an identical dump right
-            ; after a match is found (below), to catch exactly when
-            ; LINE_BUF gets corrupted during a "found" (mode 0)
-            ; file_open call. ren10.txt/ren11.txt proved COPY's
-            ; destination string is already corrupted ("init5.rc" ->
-            ; "ini ") by the time copy.asm reads it right after the
-            ; SOURCE's own file_open call returns. SAFE pattern this
-            ; time (see CLAUDE.md gotcha #14): copy into a scratch
-            ; buffer using only str/lda (no BIOS call inside the
-            ; loop), then a single f_msg call -- the previous attempt
-            ; at this used a tight lda/call-f_tty loop and corrupted
-            ; subsequent shell input on hardware (ren12.txt).
-            mov     rf, LINE_BUF
-            mov     rb, diag_lb_buf
-            ldi     24
-            plo     rc
-diag_lb1_loop:
-            lda     rf
-            lbnz    diag_lb1_have
-            ldi     '.'
-diag_lb1_have:
-            str     rb
-            inc     rb
-            dec     rc
-            glo     rc
-            lbnz    diag_lb1_loop
-            ldi     0
-            str     rb
-
-            call    f_inmsg
-            db      13,10,"DIAG linebuf pre-scan ='",0
-            mov     rf, diag_lb_buf
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
 fopen_loop:
             mov     rf, file_dirent
@@ -404,33 +297,6 @@ fopen_loop:
             call    f_strcmp
             lbnz    fopen_loop          ; no match: keep looking
 
-            ; TEMPORARY DIAGNOSTIC: same LINE_BUF dump, now right
-            ; after a match is found (before FCB population) -- see
-            ; the bracket comment above dir_open's own dump
-            mov     rf, LINE_BUF
-            mov     rb, diag_lb_buf
-            ldi     24
-            plo     rc
-diag_lb2_loop:
-            lda     rf
-            lbnz    diag_lb2_have
-            ldi     '.'
-diag_lb2_have:
-            str     rb
-            inc     rb
-            dec     rc
-            glo     rc
-            lbnz    diag_lb2_loop
-            ldi     0
-            str     rb
-
-            call    f_inmsg
-            db      13,10,"DIAG linebuf post-match='",0
-            mov     rf, diag_lb_buf
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
             ; must NOT be a directory
             mov     rf, file_dirent
@@ -4874,10 +4740,6 @@ fc_target_off:  dw      0
 fc_elba:        ds      LBA_SIZE
 fc_eoff:        dw      0
 
-; TEMPORARY DIAGNOSTIC scratch: LINE_BUF dump buffer, used by
-; file_open's pre-scan/post-match prints (see fopen_loop above)
-diag_lb_buf:    ds      25
-
 ; fc_new_attr/fc_new_cluster/fc_new_size: parameterize _file_create's
 ; short-entry write -- file_open's fopen_notfound always sets
 ; ATTR_ARCHIVE/0/0 (a plain file, first cluster lazily allocated on
@@ -4963,7 +4825,6 @@ ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
                 public  fc_new_cluster
                 public  fc_new_size
                 public  fc_eoff
-                public  diag_lb_buf
                 public  fa_boff
                 public  fa_cluster_idx
                 public  fa_sector_in_clust

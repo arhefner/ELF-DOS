@@ -59,8 +59,6 @@
             extrn   dir_lfn_ok
             extrn   dir_cur_lba
             extrn   dir_last_off
-            extrn   dns_diag_buf        ; TEMPORARY DIAGNOSTIC
-            extrn   dns_diag_lb         ; TEMPORARY DIAGNOSTIC
             extrn   _dir_next_sector
             extrn   _cluster_to_lba
             extrn   _dir_fmt83
@@ -94,17 +92,6 @@ dir_lfn_ok:     db      0           ; non-zero if a valid LFN is ready
 dir_cur_lba:    ds      LBA_SIZE
 dir_last_off:   dw      0
 
-; TEMPORARY DIAGNOSTIC scratch: 2 hex digits + null, used by
-; _dir_next_sector to print dir_clust's low byte every time it loads
-; a new sector -- see CLAUDE.md's REN bullet / ren5.txt for why
-; (investigating a phantom duplicate-entry display bug that does not
-; appear when the same disk is checked on the host machine).
-dns_diag_buf:   ds      3
-
-; TEMPORARY DIAGNOSTIC scratch: LINE_BUF dump buffer (24 chars + null),
-; used by _dir_next_sector's own clust= print above
-dns_diag_lb:    ds      25
-
                 public  dir_clust
                 public  dir_sect
                 public  dir_eptr
@@ -114,8 +101,6 @@ dns_diag_lb:    ds      25
                 public  dir_lfn_ok
                 public  dir_cur_lba
                 public  dir_last_off
-                public  dns_diag_buf
-                public  dns_diag_lb
 
                 endp
 
@@ -252,44 +237,6 @@ drd_check_entry:
             mov     rd, r9              ; RD = result buffer (name at offset 0)
             call    f_strcpy
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after
-            ; f_strcpy returns, before drd_got_name's own field-copy
-            ; operations run -- copy14.txt narrowed corruption to
-            ; somewhere between _dir_proc_lfn finishing (clean) and
-            ; the fully-decoded entry being returned (corrupted), and
-            ; this is the one call in between whose own register/
-            ; memory contract was assumed rather than fully verified
-            ; (comment above: "confirmed... RF/RD/D" -- this checks
-            ; that assumption directly). RA/R9 protected via push/pop
-            ; since if the assumption is wrong, clobbering them here
-            ; would introduce a SECOND bug on top of this one.
-            push    ra
-            push    r9
-            call    f_inmsg
-            db      13,10,"DIAG post-strcpy lb='",0
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8
-drd_sc_lb_loop:
-            lda     rf
-            lbnz    drd_sc_lb_have
-            ldi     '.'
-drd_sc_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    drd_sc_lb_loop
-            ldi     0
-            str     rb
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            pop     r9
-            pop     ra
-            ; END TEMPORARY DIAGNOSTIC
 
             lbr     drd_got_name
 
@@ -336,39 +283,6 @@ drd_got_name:
             glo     rd
             str     rf                  ; result[DIRENT_CLUST+1] = cluster low
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after
-            ; attr+cluster writes, before the size write -- copy17.txt
-            ; narrowed corruption to the attr/cluster/size block as a
-            ; whole (clean at post-strcpy, corrupted at post-size);
-            ; this isolates whether it's the attr+cluster pair or the
-            ; size write specifically.
-            push    ra
-            push    r9
-            call    f_inmsg
-            db      13,10,"DIAG post-clust lb='",0
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8
-drd_pc_lb_loop:
-            lda     rf
-            lbnz    drd_pc_lb_have
-            ldi     '.'
-drd_pc_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    drd_pc_lb_loop
-            ldi     0
-            str     rb
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            pop     r9
-            pop     ra
-            ; END TEMPORARY DIAGNOSTIC
 
             ; write file size to result[DIRENT_SIZE] (big-endian)
             ; size is 4 bytes little-endian at DE_SIZE (offset 28)
@@ -396,40 +310,6 @@ drd_pc_lb_have:
             glo     rb
             str     rf                  ; LSB last
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after the
-            ; attr/cluster/size writes, before the wrttime/wrtdate
-            ; writes -- copy16.txt confirmed corruption happens
-            ; somewhere within the field-copy block as a whole (clean
-            ; at post-strcpy, corrupted at post-fields); this splits
-            ; it in half, isolating the timestamp writes specifically
-            ; since they're the newest addition to this routine.
-            push    ra
-            push    r9
-            call    f_inmsg
-            db      13,10,"DIAG post-size lb='",0
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8
-drd_ps_lb_loop:
-            lda     rf
-            lbnz    drd_ps_lb_have
-            ldi     '.'
-drd_ps_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    drd_ps_lb_loop
-            ldi     0
-            str     rb
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            pop     r9
-            pop     ra
-            ; END TEMPORARY DIAGNOSTIC
 
             ; write last-write time to result[DIRENT_WRTTIME] (big-endian)
             ; time is 2 bytes little-endian at DE_WRTTIME (offset 22)
@@ -463,44 +343,6 @@ drd_ps_lb_have:
             glo     rd
             str     rf                  ; result[DIRENT_WRTDATE+1] = low
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after the
-            ; attr/cluster/size/wrttime/wrtdate field copies complete,
-            ; before the LFN-state-clear + dir_last_off computation +
-            ; entry-pointer-advance tail runs -- copy15.txt confirmed
-            ; f_strcpy is NOT the culprit (still clean right after
-            ; it), narrowing the remaining window to drd_got_name's
-            ; own code. This splits that in half: the straightforward
-            ; ADD16-based field copies above vs. the dir_last_off
-            ; SM/SMB subtraction + pointer-advance tail below (a
-            ; structurally different kind of arithmetic, worth
-            ; isolating). RA/R9 protected across the dump.
-            push    ra
-            push    r9
-            call    f_inmsg
-            db      13,10,"DIAG post-fields lb='",0
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8
-drd_pf_lb_loop:
-            lda     rf
-            lbnz    drd_pf_lb_have
-            ldi     '.'
-drd_pf_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    drd_pf_lb_loop
-            ldi     0
-            str     rb
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            pop     r9
-            pop     ra
-            ; END TEMPORARY DIAGNOSTIC
 
             ; clear LFN state
             mov     rf, dir_lfn_ok
@@ -544,41 +386,6 @@ drd_pf_lb_have:
             glo     ra
             str     rf
 
-            ; TEMPORARY DIAGNOSTIC: print the entry name just decoded
-            ; (R9 = result buffer, DIRENT_NAME at offset 0, still
-            ; valid here) alongside a LINE_BUF dump -- copy12.txt
-            ; proved corruption happens somewhere while decoding
-            ; cluster D2's own entries (init4.rc, TEST.BIN), between
-            ; the clean clust=D2 print and the corrupted drd_eof
-            ; print. This fires once per successfully-decoded entry,
-            ; correlating "which entry" with "already corrupted?".
-            call    f_inmsg
-            db      13,10,"DIAG drd entry='",0
-            mov     rf, r9
-            call    f_msg
-            call    f_inmsg
-            db      "' lb='",0
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8
-drd_entry_lb_loop:
-            lda     rf
-            lbnz    drd_entry_lb_have
-            ldi     '.'
-drd_entry_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    drd_entry_lb_loop
-            ldi     0
-            str     rb
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
             clc                         ; DF = 0 = success
             rtn
@@ -590,38 +397,6 @@ drd_is_lfn:
             push    ra                  ; save entry pointer (proc modifies RA)
             call    _dir_proc_lfn       ; RA = entry pointer (already set)
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after
-            ; _dir_proc_lfn returns, before drd_got_name's own
-            ; processing of the FOLLOWING short entry runs -- splits
-            ; "corruption during THIS LFN entry's own processing" from
-            ; "corruption during the next short entry's processing"
-            ; (copy13.txt showed corruption already present by the
-            ; time env3.dat's short entry finishes decoding, but not
-            ; whether it happened here, during its OWN preceding LFN
-            ; entry, or in drd_got_name right after).
-            call    f_inmsg
-            db      13,10,"DIAG post-lfn lb='",0
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8
-drd_lfn_lb_loop:
-            lda     rf
-            lbnz    drd_lfn_lb_have
-            ldi     '.'
-drd_lfn_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    drd_lfn_lb_loop
-            ldi     0
-            str     rb
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
             pop     ra                  ; restore entry pointer
             lbr     drd_advance         ; advance and loop
@@ -657,40 +432,6 @@ drd_eof:
             glo     ra
             str     rf
 
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right when dir_read
-            ; itself hits a literal '$00' terminator byte mid-cluster
-            ; (the MORE likely EOF path here, vs. _dir_next_sector's
-            ; own dns_end -- cluster D2 was zero-filled by fc_grow
-            ; when it was first allocated, so it very likely has a
-            ; genuine $00 terminator right after its live entries,
-            ; never needing a 4th _dir_next_sector call at all). RA
-            ; holds the entry pointer, already saved to dir_eptr above
-            ; -- safe to clobber RF/RB/R8 freely here since nothing
-            ; else survives a DF=1 return.
-            call    f_inmsg
-            db      13,10,"DIAG drd_eof lb='",0
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8
-drd_eof_lb_loop:
-            lda     rf
-            lbnz    drd_eof_lb_have
-            ldi     '.'
-drd_eof_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    drd_eof_lb_loop
-            ldi     0
-            str     rb
-
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
             stc                         ; DF = 1
             rtn
@@ -862,140 +603,11 @@ dns_read:
             call    f_ideread
             lbdf    dns_err
 
-            ; TEMPORARY DIAGNOSTIC: print dir_clust's low byte as 2 hex
-            ; digits every time a new sector is loaded, to directly
-            ; observe the cluster-visitation sequence during a scan
-            ; (investigating the phantom duplicate-entry display bug --
-            ; see CLAUDE.md's REN bullet / ren5.txt).
-            ; NOTE: R9 holds dir_read's saved result-buffer pointer
-            ; across this call -- must not be touched here. Use RB
-            ; instead (unused elsewhere in this proc).
-            mov     rf, dir_clust
-            inc     rf
-            ldn     rf                  ; D = dir_clust low byte
-            plo     rb                  ; stash byte to convert
-
-            mov     rf, dns_diag_buf
-
-            glo     rb                  ; D = byte
-            shr
-            shr
-            shr
-            shr                         ; D = high nibble
-            smi     10
-            lbnf    dns_diag_hi_digit   ; nibble < 10 (borrow, DF=0)
-            adi     'A'                 ; nibble >= 10: D = nibble-10
-            lbr     dns_diag_hi_store
-dns_diag_hi_digit:
-            adi     10+'0'
-dns_diag_hi_store:
-            str     rf
-            inc     rf
-
-            glo     rb                  ; D = byte
-            ani     $0F                 ; D = low nibble
-            smi     10
-            lbnf    dns_diag_lo_digit
-            adi     'A'
-            lbr     dns_diag_lo_store
-dns_diag_lo_digit:
-            adi     10+'0'
-dns_diag_lo_store:
-            str     rf
-            inc     rf
-
-            ldi     0
-            str     rf                  ; null-terminate dns_diag_buf
-
-            call    f_inmsg
-            db      13,10,"DIAG scan: clust=",0
-
-            mov     rf, dns_diag_buf
-            call    f_msg
-
-            ; TEMPORARY DIAGNOSTIC: also dump LINE_BUF's first 24
-            ; bytes (NUL shown as '.') at every sector load, to
-            ; bisect a SEPARATE bug -- LINE_BUF getting clobbered
-            ; during a mode-0 "not found" scan (confirmed happening
-            ; somewhere between file_open's pre-scan and post-return
-            ; points, ren8.txt-copy9.txt), narrowing down whether it
-            ; happens on the cluster-10 sector, the cluster-D2 sector,
-            ; or the _dir_next_sector chain-follow between them. WIDTH
-            ; FIX: a first attempt at 16 bytes was too narrow -- the
-            ; corruption sits at LINE_BUF offset 16 (copy10.txt), one
-            ; past a 16-byte window's last visible index (0-15), so
-            ; every dump looked identically clean regardless of
-            ; whether the corruption had already happened. Widened to
-            ; 24 to match file_open's own dumps and actually cover it.
-            ; RB still free here (used above, not needed again).
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8                  ; R8.0 = loop count (R7/R8
-                                        ; free here, LBA already
-                                        ; consumed by f_ideread above)
-dns_diag_lb_loop:
-            lda     rf
-            lbnz    dns_diag_lb_have
-            ldi     '.'
-dns_diag_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    dns_diag_lb_loop
-            ldi     0
-            str     rb
-
-            call    f_inmsg
-            db      " lb='",0
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
             clc
             rtn
 
 dns_end:
-            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right when
-            ; end-of-chain is detected (fat_get returned an EOC
-            ; marker) -- this is a code path the success-path dump
-            ; above (dns_read) NEVER exercises, since it only fires
-            ; after a SUCCESSFUL sector load. copy11.txt showed
-            ; LINE_BUF still clean immediately after both the
-            ; cluster-10 and cluster-D2 sector loads during a
-            ; not-found scan, with corruption only visible by the
-            ; NEXT file_open call's entry -- meaning it happens
-            ; somewhere between D2's own entries being processed and
-            ; the scan concluding, and THIS end-of-chain detection
-            ; (reached once D2's entries are exhausted with no match)
-            ; is the one remaining untested step in that window.
-            call    f_inmsg
-            db      13,10,"DIAG dns_end lb='",0
-            mov     rf, LINE_BUF
-            mov     rb, dns_diag_lb
-            ldi     24
-            plo     r8
-dns_end_lb_loop:
-            lda     rf
-            lbnz    dns_end_lb_have
-            ldi     '.'
-dns_end_lb_have:
-            str     rb
-            inc     rb
-            dec     r8
-            glo     r8
-            lbnz    dns_end_lb_loop
-            ldi     0
-            str     rb
-
-            mov     rf, dns_diag_lb
-            call    f_msg
-            call    f_inmsg
-            db      "'",13,10,0
-            ; END TEMPORARY DIAGNOSTIC
 
 dns_err:
             stc

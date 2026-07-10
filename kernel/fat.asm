@@ -49,6 +49,54 @@
             extrn   fat_set
             extrn   fat_alloc
             extrn   fat_flush
+            extrn   fls_cluster
+            extrn   ffl_sector_idx
+
+; ----------------------------------------------------------------
+; _fat_load_sector's own scratch: the cluster number it was called
+; with, kept across its internal fat_flush/f_ideread calls.
+;
+; BUG FIX: this used to live in R9 ("mov r9, rd" at _fat_load_sector's
+; entry) -- but R9 is relied upon by a caller several levels further
+; up the stack: dir_read stashes its own caller's result-buffer
+; pointer in R9 across its internal call to _dir_next_sector (see
+; dir.asm), and _dir_next_sector's own cluster-chain-follow path
+; (dns_subdir) calls fat_get, which calls THIS routine. Nothing in
+; that chain's own documented Args/Returns mentions R9, so the clobber
+; was completely invisible from any single routine's own contract --
+; classic gotcha #10 (a callee's "obviously scratch" register turns
+; out to be exactly what a distant caller depends on surviving).
+; Confirmed on hardware (2026-07-10): every directory scan that
+; crossed a cluster boundary (forcing exactly one fat_get call) wrote
+; the NEXT decoded entry's attr/cluster/size fields to a garbage
+; address computed from the FAT cluster number instead of the real
+; result buffer -- which for a scan on this card's test directory
+; (cluster $10) computed to address $0090, squarely inside LINE_BUF
+; ($0080-$00FF), silently corrupting the shell's own command-line
+; buffer. Moved to memory instead of a register specifically so this
+; class of "unrelated distant caller relies on this register" bug
+; can't recur here regardless of what any future caller happens to
+; keep in a register across a call into this routine.
+            proc    _fat_data
+
+fls_cluster:    dw      0
+
+; ffl_sector_idx: fat_flush's own scratch (see its own BUG FIX note) --
+; same fix, same reason: fat_flush is called from INSIDE
+; _fat_load_sector's fls_load branch (cache dirty case), which sits in
+; the exact same dir_read -> _dir_next_sector -> fat_get ->
+; _fat_load_sector -> fat_flush chain that made R9 unsafe above. Not
+; yet observed to misfire on hardware (the test scans that exposed the
+; fls_cluster bug happened to hit a clean cache), but the mechanism is
+; identical and would trigger under the right timing (a scan crossing
+; a cluster boundary shortly after a write left the FAT cache dirty) --
+; fixed proactively rather than waiting for a second hardware failure.
+ffl_sector_idx: db      0
+
+                public  fls_cluster
+                public  ffl_sector_idx
+
+                endp
 
 ; ----------------------------------------------------------------
 ; fat_init: reset cache state at boot
@@ -71,38 +119,46 @@
 ;
 ; Args:    RD = cluster number
 ; Returns: DF = 0 on success, DF = 1 on I/O error
-; Modifies: R7, R8, R9, RF
+; Modifies: R7, R8, RF
 ; ----------------------------------------------------------------
             proc    _fat_load_sector
 
-            mov     r9, rd              ; R9 = cluster number
+            ; stash the cluster number in memory, not R9 -- see the
+            ; BUG FIX note on fls_cluster's own declaration above for
+            ; why R9 specifically is unsafe to use here
+            mov     rf, fls_cluster
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fls_cluster = cluster number
 
             ; ---- check whether the right FAT sector is cached ----
-            ; FAT sector index = cluster high byte (RD.1 = R9.1)
+            ; FAT sector index = cluster high byte
             mov     rf, fat_csec
             lda     rf                  ; D = fat_csec high byte
             lbnz    fls_load            ; $FF means invalid ($FFFF)
             ldn     rf                  ; D = fat_csec low byte
             str     r2                  ; save fat_csec.lo at [R2]
-            ghi     r9                  ; D = cluster high byte (sector index)
+            mov     rf, fls_cluster
+            ldn     rf                  ; D = cluster high byte (sector index)
             sm                          ; D = cluster.1 - [R2]
             lbz     fls_hit             ; zero: already cached
 
 fls_load:
             ; flush the currently-cached sector first, if dirty --
-            ; a different sector is about to replace it. Protect R9
-            ; (our new cluster number) across the call: fat_flush
-            ; uses R9 internally for the OLD cached sector's index.
+            ; a different sector is about to replace it. No register
+            ; protection needed around this call now that the cluster
+            ; number lives in fls_cluster (memory survives any call
+            ; unconditionally, unlike a register).
             mov     rf, fat_dirty
             ldn     rf
             lbz     fls_no_flush
-            push    r9
             call    fat_flush
-            pop     r9
             lbdf    fls_err
 fls_no_flush:
 
-            ; absolute LBA = bpb_fat_lba + sector_index (R9.1)
+            ; absolute LBA = bpb_fat_lba + sector_index
             mov     rf, bpb_fat_lba
             lda     rf                  ; D = bits 23-16
             plo     r8
@@ -113,7 +169,8 @@ fls_no_flush:
             ldi     0
             phi     r8                  ; R8.1 = 0 (drive/head)
 
-            ghi     r9                  ; D = sector index
+            mov     rf, fls_cluster
+            ldn     rf                  ; D = sector index
             str     r2
             glo     r7
             add                         ; D = D + [R2], DF = carry
@@ -129,12 +186,17 @@ fls_no_flush:
             call    f_ideread
             lbdf    fls_err
 
-            ; update fat_csec with the loaded sector index
+            ; update fat_csec with the loaded sector index (= cluster
+            ; HIGH byte, same as every other "sector index" read in
+            ; this proc -- matches the original "ghi r9" here exactly)
             mov     rf, fat_csec
             ldi     0
             str     rf                  ; fat_csec high byte = 0
-            inc     rf
-            ghi     r9                  ; D = sector index
+            inc     rf                  ; rf = fat_csec+1 (destination
+                                        ; for the low byte, kept live
+                                        ; across the reload below)
+            mov     rb, fls_cluster     ; rb -> fls_cluster's HIGH byte
+            ldn     rb                  ; D = sector index
             str     rf                  ; fat_csec low byte = index
 
             ; freshly-loaded sector is clean
@@ -328,7 +390,7 @@ alloc_err:
 ; copy (bpb_num_fats). No-op if the cache isn't dirty.
 ;
 ; Returns: DF = 0 on success, DF = 1 on I/O error
-; Modifies: R7, R8, R9, RB, RC, RD, RF
+; Modifies: R7, R8, RB, RC, RD, RF
 ; ----------------------------------------------------------------
             proc    fat_flush
 
@@ -340,7 +402,21 @@ alloc_err:
             lda     rf                  ; D = fat_csec high byte
             lbnz    flush_done          ; $FF: no valid sector cached
             ldn     rf                  ; D = fat_csec low byte
-            plo     r9                  ; R9.0 = cached sector index
+            plo     rb                  ; stash it -- "mov rf,
+                                        ; ffl_sector_idx" below itself
+                                        ; clobbers D (gotcha #4), so
+                                        ; without this stash the value
+                                        ; just loaded would not survive
+                                        ; to "str rf"
+            mov     rf, ffl_sector_idx
+            glo     rb                  ; D = cached sector index
+                                        ; (reloaded; see BUG FIX note
+                                        ; on ffl_sector_idx's own
+                                        ; declaration -- was R9.0,
+                                        ; unsafe for the same reason
+                                        ; fls_cluster was)
+            str     rf                  ; ffl_sector_idx = cached
+                                        ; sector index
 
             ldi     0
             plo     rc                  ; RC.0 = FAT copy index (0-based)
@@ -378,8 +454,9 @@ flush_copy_off_loop:
             lbnz    flush_copy_off_loop
 flush_no_copy_off:
 
-            ; add sector_index (R9.0)
-            glo     r9
+            ; add sector_index
+            mov     rf, ffl_sector_idx
+            ldn     rf
             str     r2
             glo     r7
             add
