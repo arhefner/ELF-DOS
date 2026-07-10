@@ -362,6 +362,41 @@ drd_got_name:
             glo     rb
             str     rf                  ; LSB last
 
+            ; TEMPORARY DIAGNOSTIC: dump LINE_BUF right after the
+            ; attr/cluster/size writes, before the wrttime/wrtdate
+            ; writes -- copy16.txt confirmed corruption happens
+            ; somewhere within the field-copy block as a whole (clean
+            ; at post-strcpy, corrupted at post-fields); this splits
+            ; it in half, isolating the timestamp writes specifically
+            ; since they're the newest addition to this routine.
+            push    ra
+            push    r9
+            call    f_inmsg
+            db      13,10,"DIAG post-size lb='",0
+            mov     rf, LINE_BUF
+            mov     rb, dns_diag_lb
+            ldi     24
+            plo     r8
+drd_ps_lb_loop:
+            lda     rf
+            lbnz    drd_ps_lb_have
+            ldi     '.'
+drd_ps_lb_have:
+            str     rb
+            inc     rb
+            dec     r8
+            glo     r8
+            lbnz    drd_ps_lb_loop
+            ldi     0
+            str     rb
+            mov     rf, dns_diag_lb
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            pop     r9
+            pop     ra
+            ; END TEMPORARY DIAGNOSTIC
+
             ; write last-write time to result[DIRENT_WRTTIME] (big-endian)
             ; time is 2 bytes little-endian at DE_WRTTIME (offset 22)
             mov     rf, ra
