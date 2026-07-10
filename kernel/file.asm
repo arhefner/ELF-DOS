@@ -106,6 +106,7 @@
             extrn   fa_sector_in_clust
             extrn   fdel_next_clust
             extrn   fdel_chksum
+            extrn   dle_diag_char
             extrn   dcr_parent
             extrn   dcr_new_clust
             extrn   dcr_sect_lba
@@ -2444,6 +2445,31 @@ dle_mark_short:
             mov     rf, dir_buf
             add16   rf, rd              ; RF = short entry base (RD is
                                         ; untouched by the walk above)
+
+            ; TEMPORARY DIAGNOSTIC: print the entry's first byte as a
+            ; character before overwriting it -- confirms exactly
+            ; which entry is about to be marked deleted
+            ldn     rf                  ; D = first byte (peek only,
+                                        ; ldn doesn't advance rf)
+            plo     rb                  ; stash it
+            mov     r9, dle_diag_char
+            glo     rb
+            str     r9
+            inc     r9
+            ldi     0
+            str     r9
+            call    f_inmsg
+            db      13,10,"DIAG mark-deleting: '",0
+            mov     rf, dle_diag_char
+            call    f_msg
+            call    f_inmsg
+            db      "'",13,10,0
+            ; END TEMPORARY DIAGNOSTIC
+
+            mov     rf, dir_buf
+            add16   rf, rd              ; RF = short entry base (recomputed
+                                        ; -- the diagnostic calls above
+                                        ; clobbered it)
             ldi     $E5
             str     rf                  ; mark deleted in memory
 
@@ -4861,6 +4887,10 @@ fdel_next_clust:    dw      0
 ; effect on any other register isn't documented beyond its own args.
 fdel_chksum:        db      0
 
+; TEMPORARY DIAGNOSTIC scratch: single-char print buffer for
+; _mark_entry_deleted's investigation
+dle_diag_char:      db      0,0
+
 ; dcr_*: scratch for dir_create (MD) -- kept in memory, not registers,
 ; across the several fat_alloc/fat_flush/_cluster_to_lba/f_idewrite/
 ; f_ideread calls between allocating the new cluster and finally
@@ -4920,6 +4950,7 @@ ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
                 public  fa_sector_in_clust
                 public  fdel_next_clust
                 public  fdel_chksum
+                public  dle_diag_char
                 public  dcr_parent
                 public  dcr_new_clust
                 public  dcr_sect_lba
