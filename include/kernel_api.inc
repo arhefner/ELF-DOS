@@ -42,7 +42,10 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $4000       ; user programs load here (see kernel.inc)
+PROG_BASE:      equ     $3E00       ; user programs load here (see kernel.inc;
+                                    ; == KERN_LOAD in boot/mbr.asm by design --
+                                    ; krnboot's own sector is dead once boot
+                                    ; completes, so program loads reuse it)
 LOADER_ARGS:    equ     PROG_BASE-4 ; word 0 = mem_base, word 1 = mem_top
 
 ; LINE_BUF/RUN_TAIL_PTR/RUN_PATH: the shell-as-a-program handoff
@@ -181,8 +184,7 @@ K_SETBD:        equ     $013F       ; -> f_setbd
 K_READ:         equ     $0157       ; -> f_read: blocking read of a single
                                     ; character from the console, returned
                                     ; in D. Standard Elf/OS BIOS contract,
-                                    ; not yet independently confirmed on
-                                    ; this hardware (first real caller is
-                                    ; COPY's overwrite-confirmation prompt).
+                                    ; confirmed on hardware 2026-07-10 via
+                                    ; COPY's overwrite-confirmation prompt.
 
 ; next free slot address: $015A

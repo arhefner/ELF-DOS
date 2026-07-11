@@ -8,24 +8,41 @@
 ; ----------------------------------------------------------------
 ; Memory layout
 ; ----------------------------------------------------------------
-; Moved $2000 -> $3000 -> $4000 over time as the kernel has grown.
-; The first move (to $3000) was forced reactively: the kernel had
-; already grown past $2000 (to $2073) and was silently corrupting its
-; own tail on every prog_load -- confirmed as the cause of "DIR"/etc.
-; crashing partway through on a freshly-formatted test card. The
-; second move (to $4000) was preemptive, made right after adding file
-; creation/append/LFN-writing support pushed the kernel from $2245 to
-; $2a27 in one session -- the biggest single jump since the first
-; move -- rather than waiting for headroom to get uncomfortably thin
-; again. $4000 gives ~5.5KB of headroom; check the kernel's actual
-; "Highest address" from a build against this any time it grows
-; substantially, and move this again (keeping kernel_api.inc's copy
-; in sync) well before it gets close. Note this trades directly
-; against RAM available to programs (mem_base..mem_top) -- there's a
-; planned future pass to shrink the kernel itself once file
-; create/append/LFN support is confirmed working on hardware, which
-; may claw some of this back rather than needing yet another bump.
-PROG_BASE:      equ     $4000       ; user programs load here
+; Moved $2000 -> $3000 -> $4000 -> $3E00 over time as the kernel has
+; grown (and, for this last move, shrunk). The first move (to $3000)
+; was forced reactively: the kernel had already grown past $2000 (to
+; $2073) and was silently corrupting its own tail on every prog_load --
+; confirmed as the cause of "DIR"/etc. crashing partway through on a
+; freshly-formatted test card. The second move (to $4000) was
+; preemptive, made right after adding file creation/append/LFN-writing
+; support pushed the kernel from $2245 to $2a27 in one session.
+;
+; The move to $3E00 (2026-07-10) is different in kind: it's not a
+; growth response, it's reclaiming dead space. PROG_BASE used to sit
+; exactly one 512-byte sector above KERN_LOAD (boot/mbr.asm) --
+; krnboot's own load address -- leaving krnboot's sector ($3E00-$3FFF)
+; permanently unused by anything once boot completes (krnboot's own
+; header comment confirms this: "this code is only needed once and is
+; never called again after the jump to $0106"). Nothing in the kernel
+; or any program ever jumps back into that sector, so PROG_BASE can
+; simply BE KERN_LOAD now -- the first program load of any session
+; (the initial /bin/shell load in kernel_init's run_loop) overwrites
+; krnboot's dead bytes with real program code, for free. This also
+; collapses what used to be two separately-tracked boundaries (the
+; PROG_BASE margin and the KERN_LOAD margin) into a single address --
+; one fewer thing to check after future kernel growth, not just fewer
+; wasted bytes. If KERN_LOAD ever moves again (see boot/mbr.asm), this
+; must move with it, and vice versa; they are the same address by
+; design now, not by coincidence.
+;
+; Check the kernel's actual "Highest address" from a build against
+; this any time the kernel grows substantially, and move both PROG_BASE
+; and KERN_LOAD together (keeping kernel_api.inc's copy of PROG_BASE
+; and boot/mbr.asm's/boot/krnboot.asm's copies of KERN_LOAD/KERN_ENTRY
+; all in sync) well before it gets close. Note this trades directly
+; against RAM available to programs (mem_base..mem_top).
+PROG_BASE:      equ     $3E00       ; user programs load here; == KERN_LOAD
+                                    ; (boot/mbr.asm) by design, see above
 
 ; $0080-$00FF: the ROM's small boot-time stack lives here (see
 ; boot/mbr.asm) but is dead once the kernel sets up its own stack at

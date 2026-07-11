@@ -72,13 +72,17 @@
 
             ; count = mem_top - PROG_BASE
             ;
-            ; BUG FIX: this used to hardcode PROG_BASE's high byte as
-            ; $20 (a leftover from when PROG_BASE was $2000, never
-            ; updated across its later moves to $3000 then $4000) --
-            ; silently overestimating available program RAM by 8KB.
-            ; Caught and fixed while rewriting this routine for the
-            ; shell-as-a-program move. Now uses PROG_BASE's real
-            ; high byte ($40).
+            ; BUG FIX HISTORY: this used to hardcode PROG_BASE's high
+            ; byte as $20 (a leftover from when PROG_BASE was $2000,
+            ; never updated across its later moves to $3000 then
+            ; $4000) -- silently overestimating available program RAM
+            ; by 8KB. Caught and fixed while rewriting this routine for
+            ; the shell-as-a-program move (updated to $40). PROG_BASE
+            ; has since moved again, to $3E00 (krnboot-sector reclaim,
+            ; see kernel.inc) -- updated to $3E accordingly. If
+            ; PROG_BASE ever moves again, this literal must move with
+            ; it; there is no symbolic way to extract just the high
+            ; byte of an `equ` in this assembler (gotcha #2).
             mov     rf, mem_top
             lda     rf
             phi     rd
@@ -90,10 +94,10 @@
             glo     rd
             sm                          ; D = mem_top.lo - $00
             plo     rc
-            ldi     $40
+            ldi     $3E
             str     r2
             ghi     rd
-            smb                         ; D = mem_top.hi - $40 - borrow
+            smb                         ; D = mem_top.hi - $3E - borrow
             phi     rc                  ; RC = available space (mem_top - PROG_BASE)
 
             mov     rf, prog_fcb
@@ -145,7 +149,7 @@
             plo     rd
 
             ghi     rd                  ; PROG_BASE's low byte is 0, so
-            adi     $40                 ; adding it is just += PROG_BASE's
+            adi     $3E                 ; adding it is just += PROG_BASE's
             phi     rd                  ; own high byte -- RD = mem_base
 
             mov     rf, mem_base

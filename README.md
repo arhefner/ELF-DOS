@@ -38,7 +38,7 @@ Actively in development. Currently working, confirmed on real hardware:
   `prog_load` bugs -- see `CLAUDE.md`). If `<destination>` is an existing
   directory, the source is copied into it under its own name. If the
   resolved destination file already exists, prompts to confirm the
-  overwrite (Y/N). Not yet hardware-tested.
+  overwrite (Y/N). Confirmed on hardware.
 - `DEL <filename>`: deletes a file (refuses directories) via the new
   `K_FILE_DELETE` kernel call (`kernel/file.asm`'s `file_delete`), which
   marks the directory entry deleted on disk *before* freeing its cluster
@@ -52,6 +52,8 @@ Actively in development. Currently working, confirmed on real hardware:
   directories, `.`/`..`, and the root). Confirmed on hardware.
 - `REN <path> <newname>`: renames a file or directory within its own
   parent directory (no cross-directory move). Confirmed on hardware.
+- `REBOOT`: warm-reboots via the BIOS boot vector (reloads MBR/krnboot/
+  kernel fresh from disk). Not yet hardware-tested.
 
 Not yet supported (see `CLAUDE.md` for the fuller running notes):
 
@@ -97,7 +99,7 @@ kernel/     Kernel proper: BPB/partition init, FAT, directory, file I/O,
             RTC/timestamps, program loader
 include/    Shared headers: BIOS calls, kernel-internal structures,
             the kernel API jump-table contract, opcode macros
-progs/      Shell command programs (VER, DIR, CD, TYPE, PWD, WTEST, ...),
+progs/      Shell command programs (VER, DIR, CD, TYPE, PWD, REBOOT, ...),
             including the shell itself (shell.asm, run as /bin/shell)
 sys/        Host-side tool for writing images to a target device
 ```
