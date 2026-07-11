@@ -10,7 +10,16 @@
 ; Other modules declare what they need with 'extrn'.
 ;
 ; Link order:
-;   kernel.asm  bpb.asm  fat.asm  file.asm  loader.asm  shell.asm
+;   kernel.asm  bpb.asm  fat.asm  dir.asm  path.asm  rtc.asm  file.asm
+;   loader.asm
+;
+; As of the shell-as-a-program move, the shell is no longer part of
+; the kernel image at all -- it's progs/shell.asm, an ordinary program
+; loaded at /bin/shell. kernel_init's own run_loop (see below) does
+; nothing but alternately load+run the shell (which resolves one
+; command line and returns) and whatever it resolved -- see
+; kernel.inc's RUN_PATH/RUN_TAIL_PTR comment for the full handoff
+; protocol and why the shell can't do this itself.
 ;
 
 #include    include/opcodes.def
@@ -20,7 +29,6 @@
             extrn   bpb_init
             extrn   fat_init
             extrn   file_init
-            extrn   shell_main
             extrn   mem_top
             extrn   mem_base
             extrn   cur_dir
@@ -158,7 +166,53 @@ kernel_init:
             inc     rf
             str     rf
 
-            call    shell_main          ; start the command shell (never returns)
+            call    f_inmsg
+            db      "Type a command.",13,10,0
+
+;------------------------------------------------------------------
+; run_loop: alternately load+run the shell (which resolves one
+; command line and returns) and whatever it resolved. Lives entirely
+; here, in kernel memory, so it's safe regardless of what's currently
+; sitting at PROG_BASE -- see kernel.inc's RUN_PATH/RUN_TAIL_PTR
+; comment for why the shell can't do this hand-off itself. Never
+; returns.
+;------------------------------------------------------------------
+run_loop:
+            mov     rf, shell_path
+            call    prog_load
+            lbdf    kern_shell_err      ; shell itself missing/corrupt: fatal
+
+            call    prog_exec           ; runs the shell; it always
+                                        ; returns with RUN_PATH/
+                                        ; RUN_TAIL_PTR filled in
+
+            mov     rf, RUN_PATH
+            call    prog_load
+            lbdf    run_bad_command     ; not found / bad magic
+
+            mov     rf, RUN_TAIL_PTR
+            lda     rf                  ; D = tail pointer high byte
+            phi     ra
+            ldn     rf                  ; D = tail pointer low byte
+            plo     ra                  ; RA = command tail pointer
+            call    prog_exec           ; D = exit code (unused for now)
+            lbr     run_loop
+
+run_bad_command:
+            call    f_inmsg
+            db      "Bad command.",13,10,0
+            lbr     run_loop
+
+; local literal, placed after every reachable path above already
+; terminates via a branch, so control flow never falls through into
+; it (same convention used for local literals elsewhere in this
+; project, e.g. file_rename's ren_dot/ren_dotdot)
+shell_path: db      "/bin/shell",0
+
+kern_shell_err:
+            call    f_inmsg
+            db      "Shell not found or invalid.",13,10,0
+            lbr     kern_halt
 
 kern_err:   call    f_inmsg
             db      "Kernel init failed",13,10,0

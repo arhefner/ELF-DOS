@@ -6,15 +6,16 @@
 #   mbr        build mbr.bin only
 #   install    build everything and write to disk (MBR + kernel)
 #   update     build and write kernel only (MBR already installed)
-#   progs      build every progs/*.asm into a loadable progs/*.exe
+#   progs      build every progs/*.asm into bin/<name> (bare, no
+#              extension -- mirrors the on-device /bin layout exactly)
 #   clean      remove all generated files
 #
 # Override DEV on the command line to target a specific device:
 #   make install DEV=/dev/sdb
 #
-# Program binaries (progs/*.exe) aren't installed by this Makefile --
-# copy them onto the FAT16 partition yourself, e.g. with mtools:
-#   mcopy -i /dev/sdb@@1M progs/type.exe ::TYPE.EXE
+# bin/ isn't installed by this Makefile -- copy its whole contents onto
+# the FAT16 partition's /bin yourself, e.g. with mtools:
+#   mcopy -i /dev/sdb@@1M bin/* ::BIN/
 # (offset/partition number depend on your card's layout; see the
 # partition table read out earlier in this project's history.)
 #
@@ -41,8 +42,7 @@ KOBJ =  kernel/kernel.prg  \
         kernel/path.prg    \
         kernel/rtc.prg     \
         kernel/file.prg    \
-        kernel/loader.prg  \
-        kernel/shell.prg
+        kernel/loader.prg
 
 # ---- Common include dependencies ----
 INCS =  include/bios.inc    \
@@ -51,8 +51,10 @@ INCS =  include/bios.inc    \
 
 # ---- User programs (progs/ subdir) ----
 # template.asm is a starting point, not a program -- excluded here.
+# Built executables land in bin/, bare-named (no extension), so bin/'s
+# entire contents can be copied straight onto the card as /bin.
 PROG_SRCS = $(filter-out progs/template.asm, $(wildcard progs/*.asm))
-PROG_EXES = $(PROG_SRCS:.asm=.exe)
+PROG_EXES = $(patsubst progs/%.asm,bin/%,$(PROG_SRCS))
 
 .PHONY: all mbr install update progs clean
 
@@ -95,16 +97,17 @@ kernel/file.prg: kernel/file.asm $(INCS)
 kernel/loader.prg: kernel/loader.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) loader.asm
 
-kernel/shell.prg: kernel/shell.asm $(INCS)
-	cd kernel && $(ASM) $(ASMFLAGS) shell.asm
-
 # Programs are single-file: each progs/X.asm assembles and links on
 # its own (no multi-module link order to worry about, unlike KOBJ).
 progs/%.prg: progs/%.asm include/kernel_api.inc include/bios.inc include/opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) $*.asm
 
-progs/%.exe: progs/%.prg
-	$(LINK) $(LFLAGS) -o progs/$*.exe progs/$*.prg
+bin:
+	mkdir -p bin
+
+bin/%: progs/%.prg | bin
+	$(LINK) $(LFLAGS) -o bin/$* progs/$*.prg
+	rm -f bin/$*.lkb
 
 #------------------------------------------------------------------
 # Link rules
@@ -149,13 +152,15 @@ install: $(FULL_BIN) $(MBR_BIN)
 update: $(FULL_BIN)
 	$(SYS) -k $(FULL_BIN) $(DEV)
 
-# Build every progs/*.asm into a loadable progs/*.exe. Not installed
-# by this Makefile -- see the note near the top of this file for
-# getting a binary onto the FAT16 partition.
+# Build every progs/*.asm into bin/<name> (bare name, no extension --
+# matches the on-device /bin layout). Not installed by this Makefile --
+# see the note near the top of this file for getting bin/'s contents
+# onto the FAT16 partition.
 progs: $(PROG_EXES)
 
 clean:
 	rm -f boot/*.prg boot/*.lst \
 	      kernel/*.prg kernel/*.lst \
-	      progs/*.prg progs/*.lst progs/*.exe progs/*.build progs/*.lkb \
+	      progs/*.prg progs/*.lst progs/*.build progs/*.lkb \
 	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
+	rm -rf bin

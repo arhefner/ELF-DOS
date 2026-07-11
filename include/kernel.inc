@@ -31,9 +31,14 @@ PROG_BASE:      equ     $4000       ; user programs load here
 ; boot/mbr.asm) but is dead once the kernel sets up its own stack at
 ; himem during boot, so it's free scratch RAM for the kernel's own
 ; use afterward. Used for the shell's line buffer instead of
-; reserving 128 bytes in the kernel's own data area -- kernel-only
-; (not restated in kernel_api.inc; no program has a reason to touch
-; the shell's input buffer).
+; reserving 128 bytes in the kernel's own data area.
+;
+; NOW ALSO restated in kernel_api.inc (as of the shell-as-a-program
+; move): the shell used to be kernel-internal code with direct access
+; to this via #include, but it's now progs/shell.asm, a separately
+; assembled program -- it still needs to read/write LINE_BUF directly
+; (f_inputl into it, tokenizing the command line in place), so this is
+; no longer purely kernel-only.
 LINE_BUF:       equ     $0080       ; shell command input buffer (128 bytes)
 
 ; Fixed, well-known address for the loader to pass mem_base/mem_top to
@@ -50,6 +55,27 @@ LINE_BUF:       equ     $0080       ; shell command input buffer (128 bytes)
 ; file's internal kernel structures -- keep both definitions in sync
 ; if this ever changes.
 LOADER_ARGS:    equ     PROG_BASE-4
+
+; RUN_TAIL_PTR/RUN_PATH: the shell-as-a-program handoff protocol. The
+; kernel can't let the shell call K_PROG_LOAD/K_PROG_EXEC itself to run
+; a child command -- the shell runs FROM PROG_BASE, so loading a child
+; there would overwrite the shell's own currently-executing code before
+; the child's own "rtn" could ever return into it. Instead, the shell's
+; only job each round is: read a command line, resolve it to a path
+; (bare name -> "/bin/"+name; a name containing '/' -> used as-is,
+; loaded directly), write that path + the tail's location here, and
+; return normally -- the KERNEL's own small run_loop (kernel_init, see
+; kernel.asm) is what actually calls prog_load/prog_exec for the real
+; command, staying safely in kernel memory throughout. Fixed addresses,
+; not normal linked symbols, for the same reason LOADER_ARGS is fixed:
+; progs/shell.asm is assembled and linked completely separately from
+; the kernel and needs an address stable across kernel rebuilds.
+RUN_TAIL_PTR:   equ     PROG_BASE-6     ; 2 bytes: pointer into LINE_BUF
+                                        ; where the command tail starts
+RUN_PATH:       equ     PROG_BASE-70    ; 64-byte buffer: resolved path
+                                        ; to load next
+RUN_PATH_LEN:   equ     64              ; RUN_PATH's own size, for
+                                        ; bounds-checking writes to it
 
 ; ----------------------------------------------------------------
 ; Disk geometry

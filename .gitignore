@@ -1,3 +1,6 @@
+# Build output: bare-named executables mirroring the on-device /bin
+/bin/
+
 # Prerequisites
 *.d
 

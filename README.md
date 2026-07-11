@@ -71,8 +71,15 @@ Not yet supported (see `CLAUDE.md` for the fuller running notes):
   than sharing the kernel's own internal headers — program code never
   depends on kernel internals that could change across updates.
 - **Shell has zero built-in commands.** Every command is a standalone
-  `.EXE` in `progs/`, loaded and run via the kernel's loader
+  executable in `progs/`, loaded and run via the kernel's loader
   (`prog_load`/`prog_exec`).
+- **The shell itself is an ordinary loadable program** (`/bin/shell`
+  on-device), not kernel-resident code. The kernel just runs a small,
+  permanently-resident loop that alternately loads and runs the shell
+  (which reads one command line, resolves it to a path, and returns)
+  and whatever it resolved. Executables are found by bare name (no
+  extension) — a name given on its own is looked up in `/bin`; a name
+  containing `/` is loaded directly as a full path.
 - **Program binaries** are a small custom format: `'EDF'` magic + version
   byte + 2 reserved bytes, then code. Programs load at a fixed
   `PROG_BASE` above the kernel's own memory, and receive their command-
@@ -87,10 +94,11 @@ codebase.
 ```
 boot/       MBR and second-stage boot loader (krnboot)
 kernel/     Kernel proper: BPB/partition init, FAT, directory, file I/O,
-            RTC/timestamps, program loader, shell
+            RTC/timestamps, program loader
 include/    Shared headers: BIOS calls, kernel-internal structures,
             the kernel API jump-table contract, opcode macros
-progs/      Shell command programs (VER, DIR, CD, TYPE, PWD, WTEST, ...)
+progs/      Shell command programs (VER, DIR, CD, TYPE, PWD, WTEST, ...),
+            including the shell itself (shell.asm, run as /bin/shell)
 sys/        Host-side tool for writing images to a target device
 ```
 
@@ -101,7 +109,8 @@ Requires the Asm/02 assembler (`asm02`) and Link/02 linker (`link02`) on
 
 ```
 make            # build kernel-full.bin (bootstrap + kernel)
-make progs      # build every progs/*.asm into a loadable progs/*.exe
+make progs      # build every progs/*.asm into bin/<name> (bare, no
+                # extension -- mirrors the on-device /bin layout)
 make clean      # remove all generated build artifacts
 ```
 
@@ -119,5 +128,11 @@ make install DEV=/dev/sdX   # write MBR + kernel (new/blank disk)
 make update DEV=/dev/sdX    # refresh kernel only (MBR already installed)
 ```
 
-`progs/*.exe` files aren't installed by the Makefile — copy them onto the
-FAT16 partition yourself (e.g. with `mtools`'s `mcopy`).
+`bin/` (built via `make progs`) isn't installed by the Makefile — copy its
+whole contents onto the FAT16 partition's `/bin` yourself (e.g. with
+`mtools`'s `mcopy`). Every file in `bin/` is already bare-named (no
+extension), matching the on-device layout exactly, so the directory can
+be copied wholesale rather than file-by-file — e.g.
+`mcopy -i /dev/sdX@@1M bin/* ::BIN/`. This includes the shell itself
+(`bin/shell`), which the kernel loads by the exact path `/bin/shell` at
+boot.

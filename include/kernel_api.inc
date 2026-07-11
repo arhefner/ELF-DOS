@@ -45,6 +45,20 @@
 PROG_BASE:      equ     $4000       ; user programs load here (see kernel.inc)
 LOADER_ARGS:    equ     PROG_BASE-4 ; word 0 = mem_base, word 1 = mem_top
 
+; LINE_BUF/RUN_TAIL_PTR/RUN_PATH: the shell-as-a-program handoff
+; protocol (see kernel.inc's own copy of this comment for the full
+; reasoning). Only progs/shell.asm has a real reason to touch these --
+; ordinary programs should not -- but they're restated here rather than
+; given a separate include file, matching this file's existing
+; precedent for PROG_BASE/LOADER_ARGS.
+LINE_BUF:       equ     $0080       ; shell command input buffer (128 bytes)
+RUN_TAIL_PTR:   equ     PROG_BASE-6     ; 2 bytes: pointer into LINE_BUF
+                                        ; where the command tail starts
+RUN_PATH:       equ     PROG_BASE-70    ; 64-byte buffer: resolved path
+                                        ; to load next
+RUN_PATH_LEN:   equ     64              ; RUN_PATH's own size, for
+                                        ; bounds-checking writes to it
+
 K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
 
 ; ---- ELF-DOS kernel calls (see kernel/file.asm, kernel/dir.asm, kernel/loader.asm) ----
