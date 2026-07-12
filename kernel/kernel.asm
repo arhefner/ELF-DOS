@@ -117,29 +117,46 @@ k_dir_create:   lbr     dir_create          ; $014E
 k_dir_remove:   lbr     dir_remove          ; $0151
 k_file_rename:  lbr     file_rename         ; $0154
 k_read:         lbr     f_read              ; $0157 (BIOS passthrough)
-                ; next free address: $015A
+
+; K_BPB_INIT/K_FAT_INIT/K_FILE_INIT: boot-only, called exactly once each
+; by boot/krnboot.asm's relocated init code (see kernel_init's own
+; header comment below, and krnboot.asm's, for the full story) -- exist
+; as jump-table slots only because krnboot.asm is linked completely
+; separately from kernel.bin and has no other way to reach these
+; kernel-resident routines. Not meant to be called by ordinary programs.
+k_bpb_init:     lbr     bpb_init            ; $015A
+k_fat_init:     lbr     fat_init            ; $015D
+k_file_init:    lbr     file_init           ; $0160
+                ; next free address: $0163
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
 ; itself, before the jump table above took over that address).
 ;
+; As of the krnboot slack-space reclaim, the one-time-only parts of
+; the original boot sequence (baud rate config, both startup banners,
+; and the bpb_init/fat_init/file_init calls with bpb_init's own error
+; check) have moved to boot/krnboot.asm's relocated init code, which
+; runs immediately before this point and falls through to KERN_ENTRY
+; ($0106, this routine) once it's done -- see that file's own header
+; comment for the full reasoning (that code is dead weight in the
+; permanently-resident kernel image, since it never runs again after
+; the first boot, but is free real estate in krnboot's own sector,
+; which has 400+ bytes of unused padding after its own load loop).
+; What's left here is only the part that genuinely can't move: writes
+; to kernel-resident (relocatable) data, which krnboot.asm has no
+; fixed-address way to reach (unlike the K_BPB_INIT/K_FAT_INIT/
+; K_FILE_INIT calls above, which only needed a stable jump-table
+; address, not a data address).
+;
 ; On entry:
 ;   SCRT initialized (R3=PC, R4=call, R5=ret)
 ;   R2 = stack at top of RAM (set by bootstrap)
-;   All other registers: undefined
+;   All other registers: undefined (bpb_init/fat_init/file_init have
+;   already run, via krnboot.asm's own K_BPB_INIT/K_FAT_INIT/
+;   K_FILE_INIT calls, by the time this point is reached)
 ;------------------------------------------------------------------
 kernel_init:
-            call    f_setbd             ; configure serial baud rate
-
-            call    f_inmsg
-            db      "ELF-DOS v0.1",13,10,0
-
-            call    bpb_init            ; read MBR + VBR, populate BPB cache
-            lbdf    kern_err            ; DF=1 on disk or format error
-
-            call    fat_init            ; invalidate FAT cache, clear dirty flag
-            call    file_init           ; mark all FCB slots as free
-
             ; record top of RAM in mem_top
             ; f_freemem returns in RF; save it before RF is reused
             call    f_freemem           ; RF = address of last RAM byte
@@ -165,9 +182,6 @@ kernel_init:
             str     rf
             inc     rf
             str     rf
-
-            call    f_inmsg
-            db      "Type a command.",13,10,0
 
 ;------------------------------------------------------------------
 ; run_loop: alternately load+run the shell (which resolves one
@@ -212,10 +226,6 @@ shell_path: db      "/bin/shell",0
 kern_shell_err:
             call    f_inmsg
             db      "Shell not found or invalid.",13,10,0
-            lbr     kern_halt
-
-kern_err:   call    f_inmsg
-            db      "Kernel init failed",13,10,0
 kern_halt:  lbr     kern_halt
 
 ;------------------------------------------------------------------

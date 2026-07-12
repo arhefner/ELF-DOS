@@ -36,9 +36,35 @@
 ; rounded up, where the -512 accounts for this bootstrap sector
 ; which has already been loaded.
 ;
+; Krnboot slack-space reclaim: this sector's own code (the load loop
+; above, plus the one-time init code below) has only ever used about
+; 100 of its 512 bytes -- everything from the end of that code to
+; $3FFE was pure, wasted zero padding, since nothing else lived here.
+; But this whole region is dead the instant KERN_ENTRY is reached (see
+; the paragraph above), exactly like krnboot's own load-loop code is --
+; so any kernel init code that only ever needs to run ONCE, at boot,
+; and never again, is free real estate here instead of a permanent
+; cost in the kernel's own resident image. boot_init2 below is exactly
+; that: the one-time-only parts of the original kernel_init prologue
+; (baud rate config, both startup banners, and the bpb_init/fat_init/
+; file_init calls with bpb_init's own error check), moved out of
+; kernel.bin and into this sector's own previously-wasted space.
+;
+; The one thing that couldn't move here: kernel_init's mem_top/
+; mem_base/cur_dir writes. Those touch kernel-resident, relocatable-
+; address data -- this file is linked completely separately from
+; kernel.bin (its own link02 invocation, boot/krnboot.prg only), so it
+; has no way to reach a relocatable kernel symbol directly, only fixed,
+; absolute addresses. The K_BPB_INIT/K_FAT_INIT/K_FILE_INIT calls below
+; work because a jump-table slot IS a fixed address (same mechanism
+; every program already uses to call into the kernel) -- there's no
+; equivalent fixed-address path for writing to a data label whose own
+; position shifts across kernel rebuilds.
+;
 
 #include    include/bios.inc
 #include    include/opcodes.def
+#include    include/kernel_api.inc
 
 #define     KERN_BASE   $0100           ; kernel proper loads here
 #define     KERN_ENTRY  $0106           ; kernel proper entry point
@@ -111,9 +137,10 @@ do_load:    mov         rf,ra           ; RF = current load address
             lbr         load_loop
 
 ;--------------------------------------------------------------
-; All sectors loaded -- jump to kernel entry point
+; All sectors loaded -- run the relocated one-time init code below,
+; which falls through to the real kernel entry point once it's done.
 ;--------------------------------------------------------------
-load_done:  lbr         KERN_ENTRY      ; jump to $0106, kernel proper
+load_done:  lbr         boot_init2
 
 ;--------------------------------------------------------------
 ; Load error handler
@@ -121,6 +148,41 @@ load_done:  lbr         KERN_ENTRY      ; jump to $0106, kernel proper
 load_err:   call        f_inmsg
             db          "Kernel load error",13,10,0
 load_halt:  lbr         load_halt       ; hang -- nothing to return to
+
+;--------------------------------------------------------------
+; boot_init2: one-time kernel init code relocated from kernel_init --
+; see this file's own header comment for the full reasoning. Runs
+; immediately after the sector load loop above, in the exact same
+; SCRT/stack environment that loop already runs in (nothing here
+; needs anything more than that).
+;--------------------------------------------------------------
+boot_init2:
+            call        f_setbd             ; configure serial baud rate
+
+            call        f_inmsg
+            db          "ELF-DOS v0.1",13,10,0
+
+            call        K_BPB_INIT          ; read MBR + VBR, populate BPB cache
+            lbdf        boot_kern_err       ; DF=1 on disk or format error
+
+            call        K_FAT_INIT          ; invalidate FAT cache, clear dirty flag
+            call        K_FILE_INIT         ; mark all FCB slots as free
+
+            call        f_inmsg
+            db          "Type a command.",13,10,0
+
+            lbr         KERN_ENTRY          ; continue into kernel_init proper
+
+;--------------------------------------------------------------
+; boot_init2 error handler -- relocated from kernel.asm's kern_err,
+; same message and behavior, just physically moved here along with
+; the check that reaches it.
+;--------------------------------------------------------------
+boot_kern_err:
+            call        f_inmsg
+            db          "Kernel init failed",13,10,0
+boot_kern_halt:
+            lbr         boot_kern_halt
 
 ;--------------------------------------------------------------
 ; Pad to exactly 512 bytes (fills the remainder of sector 1)

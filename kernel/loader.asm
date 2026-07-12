@@ -73,31 +73,33 @@
             ; count = mem_top - PROG_BASE
             ;
             ; BUG FIX HISTORY: this used to hardcode PROG_BASE's high
-            ; byte as $20 (a leftover from when PROG_BASE was $2000,
-            ; never updated across its later moves to $3000 then
-            ; $4000) -- silently overestimating available program RAM
-            ; by 8KB. Caught and fixed while rewriting this routine for
-            ; the shell-as-a-program move (updated to $40). PROG_BASE
-            ; has since moved again, to $3E00 (krnboot-sector reclaim,
-            ; see kernel.inc) -- updated to $3E accordingly. If
-            ; PROG_BASE ever moves again, this literal must move with
-            ; it; there is no symbolic way to extract just the high
-            ; byte of an `equ` in this assembler (gotcha #2).
+            ; byte as a plain literal ($20, then $40, then $3E across
+            ; PROG_BASE's successive moves) -- silently stale, and
+            ; silently overestimated available program RAM by 8KB the
+            ; first time it was missed entirely. Now uses `high
+            ; PROG_BASE`/`low PROG_BASE` instead: confirmed via an
+            ; isolated Asm/02 test (2026-07-10) that `high`/`low`
+            ; correctly re-evaluate a symbol's `equ` value at assemble
+            ; time (this was wrongly assumed unsupported -- gotcha #2's
+            ; claim about compound `symbol+CONST` expressions turned
+            ; out not to reproduce in testing either; see the gotcha
+            ; list for the full retraction). This literal now updates
+            ; itself automatically whenever PROG_BASE moves again.
             mov     rf, mem_top
             lda     rf
             phi     rd
             ldn     rf
             plo     rd                  ; RD = mem_top
 
-            ldi     $00
+            ldi     low PROG_BASE
             str     r2
             glo     rd
-            sm                          ; D = mem_top.lo - $00
+            sm                          ; D = mem_top.lo - PROG_BASE.lo
             plo     rc
-            ldi     $3E
+            ldi     high PROG_BASE
             str     r2
             ghi     rd
-            smb                         ; D = mem_top.hi - $3E - borrow
+            smb                         ; D = mem_top.hi - PROG_BASE.hi - borrow
             phi     rc                  ; RC = available space (mem_top - PROG_BASE)
 
             mov     rf, prog_fcb
@@ -149,7 +151,7 @@
             plo     rd
 
             ghi     rd                  ; PROG_BASE's low byte is 0, so
-            adi     $3E                 ; adding it is just += PROG_BASE's
+            adi     high PROG_BASE      ; adding it is just += PROG_BASE's
             phi     rd                  ; own high byte -- RD = mem_base
 
             mov     rf, mem_base

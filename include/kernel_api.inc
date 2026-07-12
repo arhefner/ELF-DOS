@@ -187,4 +187,18 @@ K_READ:         equ     $0157       ; -> f_read: blocking read of a single
                                     ; confirmed on hardware 2026-07-10 via
                                     ; COPY's overwrite-confirmation prompt.
 
-; next free slot address: $015A
+; K_BPB_INIT/K_FAT_INIT/K_FILE_INIT: reserved -- boot-only one-time init,
+; called exactly once each by boot/krnboot.asm's relocated init code
+; (see that file's own header comment), not meant to be called by
+; ordinary programs (re-running them mid-session would reset live BPB/
+; FAT-cache/FCB state out from under whatever's currently using it).
+; Exist as jump-table slots at all only because krnboot.asm is linked
+; completely separately from kernel.bin, so this fixed-address table is
+; the only way it can reach these kernel-resident routines -- same
+; reasoning as every other slot in this file, just with a boot-code
+; caller instead of a program.
+K_BPB_INIT:     equ     $015A       ; -> bpb_init
+K_FAT_INIT:     equ     $015D       ; -> fat_init
+K_FILE_INIT:    equ     $0160       ; -> file_init
+
+; next free slot address: $0163

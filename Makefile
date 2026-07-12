@@ -23,7 +23,12 @@
 ASM         = asm02
 ASMFLAGS    = -L -C -I ..
 LINK        = link02
-LFLAGS      = -b -be
+# -r: short-branch relaxation (Link/02, opt-in). Only affects proc/endp
+# -wrapped code (that's the only case where a long-branch target isn't
+# already fully known at assemble time) -- kernel/*.asm uses proc/endp
+# throughout and benefits; progs/*.asm is flat and sees zero effect,
+# harmlessly.
+LFLAGS      = -b -be -r
 
 DEV         = /dev/mmcblk0
 SYS         = sys/elfdos-sys
