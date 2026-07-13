@@ -41,7 +41,6 @@ FULL_BIN    = kernel-full.bin
 
 # ---- Kernel object files (in kernel/ subdir, link order matters) ----
 KOBJ =  kernel/kernel.prg  \
-        kernel/bpb.prg     \
         kernel/fat.prg     \
         kernel/dir.prg     \
         kernel/path.prg    \
@@ -80,9 +79,6 @@ boot/krnboot.prg: boot/krnboot.asm $(INCS)
 
 kernel/kernel.prg: kernel/kernel.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) kernel.asm
-
-kernel/bpb.prg: kernel/bpb.asm $(INCS)
-	cd kernel && $(ASM) $(ASMFLAGS) bpb.asm
 
 kernel/fat.prg: kernel/fat.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) fat.asm
@@ -131,8 +127,10 @@ $(KERNEL_BIN): $(KOBJ)
 # Concatenate bootstrap + kernel proper into final install image.
 #
 # Layout of kernel-full.bin:
-#   Bytes    0-511:  krnboot.bin  (loads to $3E00, entry at $3E06)
-#   Bytes 512+:      kernel.bin   (loads to $0100, entry at $0106)
+#   Bytes     0-1535:  krnboot.bin  (loads to $3E00, entry at $3E06;
+#                       3 sectors = KRNBOOT_SECTORS as of the
+#                       multi-sector krnboot expansion, up from 1)
+#   Bytes 1536+:       kernel.bin   (loads to $0100, entry at $0106)
 #
 # sys patches the sector count into bytes 4-5 of krnboot before
 # writing, so the bootstrap knows how many sectors follow it.

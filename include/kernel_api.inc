@@ -201,4 +201,74 @@ K_BPB_INIT:     equ     $015A       ; -> bpb_init
 K_FAT_INIT:     equ     $015D       ; -> fat_init
 K_FILE_INIT:    equ     $0160       ; -> file_init
 
-; next free slot address: $0163
+; K_SECWRITE/K_SECREAD: raw 512-byte sector read/write by LBA, bypassing
+; the FAT16 filesystem entirely -- direct passthroughs to the same BIOS
+; routines this project's own fat.asm uses for FAT/directory sector I/O.
+; Args: R7/R8 = 24-bit LBA (R8.0 = bits 23-16, R7.1 = bits 15-8, R7.0 =
+; bits 7-0, R8.1 = 0, the drive/head byte), RF = pointer to a 512-byte
+; buffer (source for K_SECWRITE, destination for K_SECREAD). Returns:
+; DF = 0/1 (success/error); R7/R8 are clobbered by the call. DANGEROUS
+; if misused -- a wrong LBA can silently corrupt the running filesystem
+; or the boot sectors themselves. Added specifically for progs/sys.asm
+; (target-side kernel/MBR installer); not intended for casual use.
+K_SECWRITE:     equ     $0163       ; -> f_idewrite
+K_SECREAD:      equ     $0166       ; -> f_ideread
+
+; K_STAT: resolve a (possibly multi-component) path to its own
+; directory entry, filling the caller's buffer with the same format
+; K_DIR_READ itself returns (DIRENT_NAME/ATTR/CLUST/SIZE/WRTTIME/
+; WRTDATE below). Works on either a file or a directory -- unlike
+; K_FILE_DELETE (files only) or K_DIR_REMOVE (directories only), the
+; caller decides what to do with DIRENT_ATTR's ATTR_DIR bit.
+;
+; Args:    RF = pointer to null-terminated path string
+;          RD = pointer to a caller-provided DIRENT_LEN-byte buffer
+; Returns: DF = 0 on success (buffer filled), DF = 1 on error (not
+;          found, an intermediate path component is invalid, or the
+;          path names the root/a directory via a trailing separator --
+;          see K_PATH_RESOLVE's own comment on that case; there's no
+;          real directory entry describing the root itself)
+K_STAT:         equ     $0169       ; -> file_stat
+
+; BPBBLK_*/BPB_DATA_PTR: restated from kernel.inc (not #included, per
+; the note above) for krnboot's own relocated bpb_init body, which
+; reaches these 11 kernel-resident fields (part1_lba through
+; fat_csec, 23 bytes, always contiguous -- see kernel.inc's own
+; header comment on this block for the full reasoning) via a fixed
+; pointer instead of a normal relocatable symbol, since krnboot.asm is
+; linked completely separately from kernel.bin. BPB_DATA_PTR's own
+; VALUE (the block's real address) is populated at kernel *link* time,
+; not by krnboot -- krnboot only ever reads it. This is a DATA slot,
+; not a call target (2 bytes, not a 3-byte lbr), sitting at the jump
+; table's own tail by design -- the next real K_* call slot starts
+; 2 bytes later than it otherwise would.
+BPBBLK_PART1_LBA:  equ  0          ; 3 bytes
+BPBBLK_FAT_LBA:    equ  3          ; 3 bytes
+BPBBLK_ROOT_LBA:   equ  6          ; 3 bytes
+BPBBLK_DATA_LBA:   equ  9          ; 3 bytes
+BPBBLK_SPC:        equ  12         ; 1 byte
+BPBBLK_SPC_SHIFT:  equ  13         ; 1 byte
+BPBBLK_ROOT_ENTS:  equ  14         ; 2 bytes
+BPBBLK_NUM_FATS:   equ  16         ; 1 byte
+BPBBLK_SPF:        equ  17         ; 2 bytes
+BPBBLK_MAX_CLUST:  equ  19         ; 2 bytes
+BPBBLK_FAT_CSEC:   equ  21         ; 2 bytes
+BPBBLK_LEN:        equ  23         ; total block size
+
+BPB_DATA_PTR:      equ  $016C      ; 2-byte pointer to the block's
+                                    ; start (part1_lba's real address)
+
+; Raw FAT16 VBR/BPB and MBR partition-table field offsets, restated
+; from kernel.inc for the same reason as BPBBLK_*/BPB_DATA_PTR above --
+; krnboot's own relocated bpb_init body needs these to parse the raw
+; MBR/VBR sector bytes it reads directly (kernel.inc's own copy, used
+; by every other BPB/FAT-adjacent kernel file, is unaffected).
+BPB_SPC:        equ     $0D         ; sectors per cluster (byte)
+BPB_RSVD:       equ     $0E         ; reserved sector count (word)
+BPB_NFAT:       equ     $10         ; number of FATs (byte)
+BPB_ROOTENT:    equ     $11         ; root directory entry count (word)
+BPB_SPF:        equ     $16         ; sectors per FAT (word)
+PT_OFFSET:      equ     $01BE       ; partition table offset within MBR
+PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
+
+; next free jump-table slot address: $016E

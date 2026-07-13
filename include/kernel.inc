@@ -153,6 +153,35 @@ PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 LBA_SIZE:       equ     3           ; bytes per stored LBA
 
 ; ----------------------------------------------------------------
+; BPB data block offsets -- the 11 fields bpb_init populates, always
+; contiguous at the top of kernel.asm's _kernel_data block (part1_lba
+; through fat_csec, nothing interleaved). Exists so a fixed pointer to
+; the block's start (BPB_DATA_PTR, see kernel_api.inc) plus these
+; offsets can reach any individual field without needing a relocatable
+; symbol -- the mechanism boot/krnboot.asm's own separately-linked
+; bpb_init body needs, since it can't reference kernel.bin's normal
+; symbols directly (see kernel_api.inc's own header comment on this).
+; Deliberately narrow: does NOT cover fat_dirty or fat_cache (the
+; 512-byte MBR/VBR scratch buffer), which come immediately after this
+; block in kernel.asm but are not part of it -- krnboot's own relocated
+; bpb_init uses a local scratch buffer instead, so the fixed pointer's
+; reach stays limited to exactly the fields that need to cross the
+; link-unit boundary, not the kernel's wider FCB/directory state.
+; ----------------------------------------------------------------
+BPBBLK_PART1_LBA:   equ     0           ; 3 bytes
+BPBBLK_FAT_LBA:     equ     3           ; 3 bytes
+BPBBLK_ROOT_LBA:    equ     6           ; 3 bytes
+BPBBLK_DATA_LBA:    equ     9           ; 3 bytes
+BPBBLK_SPC:         equ     12          ; 1 byte
+BPBBLK_SPC_SHIFT:   equ     13          ; 1 byte
+BPBBLK_ROOT_ENTS:   equ     14          ; 2 bytes
+BPBBLK_NUM_FATS:    equ     16          ; 1 byte
+BPBBLK_SPF:         equ     17          ; 2 bytes
+BPBBLK_MAX_CLUST:   equ     19          ; 2 bytes
+BPBBLK_FAT_CSEC:    equ     21          ; 2 bytes
+BPBBLK_LEN:         equ     23          ; total block size
+
+; ----------------------------------------------------------------
 ; FCB (File Control Block) structure offsets
 ;
 ; Each FCB is FCB_LEN bytes.  The kernel maintains FCB_COUNT

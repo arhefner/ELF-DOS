@@ -51,6 +51,14 @@
 #include <errno.h>
 
 #define SECTOR_SIZE         512
+#define KRNBOOT_SECTORS     3       /* krnboot's own on-disk footprint,
+                                     * sectors 1..KRNBOOT_SECTORS -- must
+                                     * match boot/krnboot.asm's own sector
+                                     * count and boot/mbr.asm's/
+                                     * progs/sys.asm's sector math (see
+                                     * krnboot.asm's own header comment
+                                     * for the multi-sector expansion
+                                     * this constant is part of) */
 #define MBR_CODE_SIZE       446     /* boot code area, before partition table */
 #define MBR_PT_OFFSET       446     /* partition table starts here */
 #define MBR_SIG_OFFSET      510     /* $55/$AA boot signature */
@@ -276,25 +284,26 @@ static int install_kernel(disk_t disk, const char *kern_path) {
     if (!kern_bin) return -1;
 
     /* verify this looks like our kernel binary */
-    if (kern_size < SECTOR_SIZE || memcmp(kern_bin, "KRN", 3) != 0) {
+    if (kern_size < KRNBOOT_SECTORS * SECTOR_SIZE || memcmp(kern_bin, "KRN", 3) != 0) {
         fprintf(stderr,
-            "'%s': missing 'KRN' signature at offset 0 or file < 512 bytes.\n"
-            "       Is this the correct file?\n", kern_path);
+            "'%s': missing 'KRN' signature at offset 0 or file < %d bytes.\n"
+            "       Is this the correct file?\n", kern_path, KRNBOOT_SECTORS * SECTOR_SIZE);
         free(kern_bin);
         return -1;
     }
 
     /*
      * Compute number of additional sectors (kernel proper) after the
-     * 512-byte bootstrap sector.  Uses ceiling division:
+     * KRNBOOT_SECTORS-sector bootstrap.  Uses ceiling division:
      *
-     *   extra = ceil((kern_size - 512) / 512)
+     *   extra = ceil((kern_size - KRNBOOT_SECTORS*512) / 512)
      *
-     * Equivalent to:  (kern_size - 1) / 512  for kern_size >= 512.
-     * (Both give 0 when kern_size == 512, i.e. bootstrap only.)
+     * Equivalent to: (kern_size - 1) / 512 - (KRNBOOT_SECTORS - 1)
+     * for kern_size >= KRNBOOT_SECTORS*512. (Both give 0 when
+     * kern_size == KRNBOOT_SECTORS*512, i.e. bootstrap only.)
      */
     uint32_t total_sectors = (uint32_t)((kern_size + SECTOR_SIZE - 1) / SECTOR_SIZE);
-    uint32_t extra_sectors = total_sectors - 1;
+    uint32_t extra_sectors = total_sectors - KRNBOOT_SECTORS;
 
     if (extra_sectors > 0xFFFF) {
         fprintf(stderr,
@@ -309,8 +318,8 @@ static int install_kernel(disk_t disk, const char *kern_path) {
     kern_bin[KERN_CNT_OFFSET + 1] = (uint8_t)(extra_sectors & 0xFF);
 
     printf("  File size   : %zu bytes\n",    kern_size);
-    printf("  Total sectors: %u (bootstrap 1 + kernel proper %u)\n",
-           total_sectors, extra_sectors);
+    printf("  Total sectors: %u (bootstrap %u + kernel proper %u)\n",
+           total_sectors, (unsigned)KRNBOOT_SECTORS, extra_sectors);
     printf("  Sector count patched into header: %u ($%04X)\n",
            extra_sectors, extra_sectors);
 

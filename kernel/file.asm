@@ -84,6 +84,8 @@
             extrn   _file_create
             extrn   _delete_located_entry
             extrn   _mark_entry_deleted
+            extrn   _is_dot_or_dotdot
+            extrn   _find_dirent
             extrn   fc_elba
             extrn   fc_eoff
             extrn   fc_shortname
@@ -107,7 +109,6 @@
             extrn   dcr_parent
             extrn   dcr_new_clust
             extrn   dcr_sect_lba
-            extrn   drm_parent
             extrn   drm_saved_clust
             extrn   drm_saved_off
             extrn   drm_saved_lba
@@ -1506,7 +1507,37 @@ fc_grow:
             glo     r8
             plo     rb                  ; RB = new cluster (fat_set's
                                         ; value arg)
+
+            ; BUG FIX (2026-07-13): fat_set internally calls
+            ; _fat_load_sector, whose own header documents
+            ; "Modifies: R7, R8, RF" -- but fat_set's own header has
+            ; no Modifies line at all, so this transitive clobber is
+            ; invisible from fat_set's contract alone (gotcha #10's
+            ; exact pattern). R8 (still holding the new cluster number
+            ; here) gets stomped whenever dir_clust's own FAT sector
+            ; isn't the one _fat_load_sector already has cached --
+            ; which, for a directory growing past its first cluster,
+            ; is effectively guaranteed (the just-scanned free cluster
+            ; found by fat_alloc above is almost always in a different
+            ; FAT sector than dir_clust's own low, long-allocated
+            ; cluster number). Without this fix, the very next block
+            ; below writes garbage (leftover LBA arithmetic from
+            ; _fat_load_sector) into dir_clust and then into
+            ; dir_cur_lba via _cluster_to_lba -- so the new directory
+            ; entry gets written to a WILD, unrelated disk address
+            ; instead of the real newly allocated cluster, while the
+            ; FAT link itself (written correctly, before this
+            ; corruption, using RD/RB already captured above) still
+            ; makes the real new cluster look properly chained. This
+            ; is the root cause of the 2026-07-13 "MD/COPY report
+            ; success but the entry never appears in DIR, fsck finds
+            ; orphaned chains and cluster-length mismatches elsewhere"
+            ; investigation -- file_write's own call to fat_set already
+            ; protects R8 (and R7/R9/RA/RC) around this exact call for
+            ; this exact reason; this path never got the same fix.
+            push    r8
             call    fat_set             ; RD=old, RB=new; DF=0/1
+            pop     r8
             lbdf    fc_full
 
             mov     rf, dir_clust
@@ -2235,62 +2266,14 @@ fcrw_err:
 
             proc    file_delete
 
-            mov     rd, rf              ; RD = name/path pointer
-            mov     rf, fo_name
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; fo_name = name/path pointer
-                                        ; (reusing file_open's own
-                                        ; scratch field -- file_delete
-                                        ; is never called while a
-                                        ; file_open is mid-flight)
+            ; RF (the incoming path pointer) is exactly _find_dirent's
+            ; own argument -- resolve + scan is delegated wholesale
+            call    _find_dirent        ; DF = 0/1; file_dirent holds
+                                        ; the match on success
+            lbdf    fdel_err            ; bad path, or not found
 
-            ; --- resolve the (possibly multi-component) path ---
-            mov     rf, cur_dir
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current directory cluster
-
-            mov     ra, fo_name
-            lda     ra
-            phi     rf
-            ldn     ra
-            plo     rf                  ; RF = name/path pointer
-            call    path_resolve        ; RD = parent cluster, RF = final
-                                        ; component
-            lbdf    fdel_err            ; bad intermediate component
-
-            ; an empty final component means the path named a
-            ; directory itself -- not a file to delete
-            ldn     rf
-            lbz     fdel_err
-
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = final component ptr
-
-            ; RD is still the resolved parent cluster from path_resolve
-            call    dir_open
-
-fdel_loop:
-            mov     rf, file_dirent
-            call    dir_read
-            lbdf    fdel_err            ; end of directory: not found
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = saved name pointer
-            mov     rf, file_dirent     ; RF = entry name
-            call    f_strcmp
-            lbnz    fdel_loop           ; no match: keep looking
+            ; an empty final component would have already been
+            ; rejected by _find_dirent -- nothing further to check here
 
             ; must NOT be a directory
             mov     rf, file_dirent
@@ -2565,6 +2548,181 @@ dle_err:
             rtn
 
 ; ----------------------------------------------------------------
+; _is_dot_or_dotdot: check whether a name is literally "." or "..".
+; Consolidates 5 previously-duplicated occurrences of this exact
+; check (dir_create's collision guard, dir_remove's target guard AND
+; its own emptiness-check loop, file_rename's old-name and new-name
+; guards) that each independently reloaded a stashed name pointer and
+; called f_strcmp twice against locally-duplicated ".", ".." literals.
+; Unlike the bigger path_resolve+dir_open/dir_read+f_strcmp search
+; loop (file_stat's own header comment), this is pure string
+; comparison -- no dir_read/fat_get cluster-chain-following involved,
+; so it carries none of the register-clobber risk that code has
+; historically had (see CLAUDE.md gotcha #10).
+;
+; Args:    RD = pointer to the null-terminated name string to check
+; Returns: DF = 1 if the name IS "." or ".." ; DF = 0 otherwise
+; Modifies: RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    _is_dot_or_dotdot
+            mov     rf, idd_name
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; idd_name = RD (the name
+                                        ; pointer, stashed since
+                                        ; f_strcmp clobbers RD)
+
+            mov     rf, idd_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = name pointer (reloaded)
+            mov     rf, idd_dot
+            call    f_strcmp
+            lbz     idd_yes
+
+            mov     rf, idd_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = name pointer (reloaded
+                                        ; again -- f_strcmp clobbered
+                                        ; it above)
+            mov     rf, idd_dotdot
+            call    f_strcmp
+            lbz     idd_yes
+
+            clc                         ; DF = 0, not "." or ".."
+            rtn
+
+idd_yes:    stc                         ; DF = 1, is "." or ".."
+            rtn
+
+idd_name:   dw      0
+idd_dot:    db      ".",0
+idd_dotdot: db      "..",0
+            endp
+
+; ----------------------------------------------------------------
+; _find_dirent: resolve a (possibly multi-component) path relative to
+; cur_dir, then scan its parent directory for an exact name match.
+; Consolidates the path_resolve+dir_open/dir_read+f_strcmp search core
+; duplicated across file_delete, dir_remove's locate-target,
+; file_rename's locate-old-name, and file_stat -- each of these is a
+; "must find" caller (DF=0 is the only success outcome, DF=1 is always
+; a hard error regardless of the reason).
+;
+; Deliberately NOT used (yet) by dir_create's or file_rename's own
+; "must NOT find" collision checks, or by file_open: those callers
+; need the resolved parent cluster specifically on the "not found"
+; outcome (dir_create to insert the new entry / write its ".." field;
+; file_open to populate FCB_ELBA/FCB_EOFF from dir.asm's own live scan
+; state after its own free-FCB-slot prologue), which this routine's
+; simple DF=0/1 contract can't unambiguously distinguish from "path
+; itself failed to resolve" without a real design pass of its own
+; (deferred -- see project memory). file_rename's new-name check
+; doesn't even need a fresh path_resolve at all (it reuses ren_parent,
+; already resolved for the old name) so it isn't a candidate for this
+; routine regardless.
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success -- RD = resolved parent cluster;
+;          file_dirent holds the matched entry; dir_last_off/
+;          dir_cur_lba/dir_buf describe its parent-directory sector
+;          (same convention _file_create relies on).
+;          DF = 1 on error (bad intermediate path component, empty
+;          final component, or no match found) -- on a clean "no
+;          match" specifically, dir_eptr/dir_cur_lba/dir_clust/
+;          dir_sect are left describing the '$00' terminator sector,
+;          same as file_open's own existing not-found behavior; RD is
+;          NOT meaningful on this path, callers must not read it.
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+
+            proc    _find_dirent
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; fo_name = path pointer
+
+            mov     rf, cur_dir
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = current directory cluster
+
+            mov     ra, fo_name
+            lda     ra
+            phi     rf
+            ldn     ra
+            plo     rf                  ; RF = path pointer
+            call    path_resolve        ; RD = parent cluster, RF = final
+                                        ; component
+            lbdf    fdd_err             ; bad intermediate component
+
+            ldn     rf
+            lbz     fdd_err             ; empty final component
+
+            ; save both return values into memory immediately -- RD is
+            ; about to be clobbered by f_strcmp inside the scan loop
+            ; below, and fdd_parent needs to survive to be handed back
+            ; to the caller on a successful match
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; fo_name = final component ptr
+
+            mov     rb, fdd_parent
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; fdd_parent = parent cluster
+
+            ; RD is still the resolved parent cluster from path_resolve
+            call    dir_open
+
+fdd_loop:
+            mov     rf, file_dirent
+            call    dir_read
+            lbdf    fdd_err             ; end of directory: not found
+                                        ; (dir.asm's scan state left
+                                        ; describing the terminator)
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = saved name pointer
+            mov     rf, file_dirent     ; RF = entry name
+            call    f_strcmp
+            lbnz    fdd_loop            ; no match: keep looking
+
+            ; found -- reload the parent cluster into RD for the caller
+            mov     rf, fdd_parent
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            clc                         ; DF = 0, found
+            rtn
+
+fdd_err:
+            stc                         ; DF = 1, error/not found
+            rtn
+
+fdd_parent: dw      0
+            endp
+
+; ----------------------------------------------------------------
 ; dir_create: create a new, empty subdirectory (MD)
 ;
 ; Allocates and zeros a fresh cluster, writes '.' (self) and '..'
@@ -2590,7 +2748,6 @@ dle_err:
 ;          intermediate path component is invalid, or disk full)
 ; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
 ; ----------------------------------------------------------------
-            endp
 
             proc    dir_create
 
@@ -2661,18 +2818,8 @@ dle_err:
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, dcr_dot
-            call    f_strcmp
-            lbz     dcr_err
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, dcr_dotdot
-            call    f_strcmp
-            lbz     dcr_err
+            call    _is_dot_or_dotdot
+            lbdf    dcr_err
 
             ; reload the parent cluster fresh from memory -- RD has
             ; been clobbered several times since path_resolve returned
@@ -3001,12 +3148,6 @@ dcr_err:
             stc
             rtn
 
-; local literal strings for the "." / ".." name-collision guard above
-; -- placed here, after every reachable code path in this proc already
-; terminated via rtn, so control flow never falls through into them
-dcr_dot:        db      ".",0
-dcr_dotdot:     db      "..",0
-
 ; ----------------------------------------------------------------
 ; dir_remove: remove an EMPTY subdirectory (RD)
 ;
@@ -3039,100 +3180,33 @@ dcr_dotdot:     db      "..",0
 
             proc    dir_remove
 
-            mov     rd, rf              ; RD = path pointer
-            mov     rf, fo_name
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; fo_name = path pointer
-
-            ; --- resolve the (possibly multi-component) path ---
-            mov     rf, cur_dir
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current directory cluster
-
-            mov     ra, fo_name
-            lda     ra
-            phi     rf
-            ldn     ra
-            plo     rf                  ; RF = path pointer
-            call    path_resolve        ; RD = parent cluster, RF = final
-                                        ; component
-            lbdf    drm_err             ; bad intermediate component
-
-            ; save BOTH return values into memory immediately, using RB
-            ; (untouched by path_resolve) as the destination pointer for
-            ; each -- the "." / ".." guard below calls f_strcmp, which
-            ; clobbers RD (confirmed the hard way during dir_create's
-            ; own bug hunt -- see its header comment), so both must be
-            ; safely in memory, not left in RD/RF, before that runs.
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = final component ptr
-
-            mov     rb, drm_parent
-            ghi     rd
-            str     rb
-            inc     rb
-            glo     rd
-            str     rb                  ; drm_parent = parent cluster
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = final component pointer
-            ldn     rd
-            lbz     drm_err             ; empty final component: no
-                                        ; name given
+            ; RF (the incoming path pointer) is exactly _find_dirent's
+            ; own argument -- resolve + scan is delegated wholesale
+            call    _find_dirent        ; DF = 0/1; file_dirent holds
+                                        ; the match, fo_name still
+                                        ; points at the resolved final
+                                        ; component, on success
+            lbdf    drm_err             ; bad path, empty final
+                                        ; component, or not found
 
             ; reject "." and ".." as the target -- these aren't real,
-            ; independently removable entries
+            ; independently removable entries. Checked AFTER the scan
+            ; here (the original, pre-consolidation code checked
+            ; BEFORE) because _find_dirent's scan legitimately FINDS a
+            ; match for "." or ".." -- every non-root directory
+            ; contains real entries by those names, pointing at itself
+            ; and its own parent -- so the reject has to happen
+            ; regardless of whether the search succeeds. fo_name is
+            ; still valid here (_find_dirent leaves it pointing at the
+            ; resolved final component on success), so this produces
+            ; the exact same outcome as the original pre-scan check.
             mov     rf, fo_name
             lda     rf
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, drm_dot
-            call    f_strcmp
-            lbz     drm_err
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, drm_dotdot
-            call    f_strcmp
-            lbz     drm_err
-
-            mov     rf, drm_parent
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = parent cluster (reloaded
-                                        ; fresh)
-            call    dir_open
-
-drm_loop:
-            mov     rf, file_dirent
-            call    dir_read
-            lbdf    drm_err             ; end of directory: not found
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = saved name pointer
-            mov     rf, file_dirent     ; RF = entry name
-            call    f_strcmp
-            lbnz    drm_loop            ; no match: keep looking
+            call    _is_dot_or_dotdot
+            lbdf    drm_err
 
             ; must BE a directory
             mov     rf, file_dirent
@@ -3205,14 +3279,9 @@ drm_empty_loop:
                                         ; proceed with removal
 
             mov     rd, file_dirent
-            mov     rf, drm_dot
-            call    f_strcmp
-            lbz     drm_empty_loop      ; matches "."
-
-            mov     rd, file_dirent
-            mov     rf, drm_dotdot
-            call    f_strcmp
-            lbz     drm_empty_loop      ; matches ".."
+            call    _is_dot_or_dotdot
+            lbdf    drm_empty_loop      ; matches "." or ".." -- keep
+                                        ; scanning
 
             ; anything else: not empty
             lbr     drm_err
@@ -3272,12 +3341,6 @@ drm_restore:
 drm_err:
             stc                         ; DF = 1, error
             rtn
-
-; local literal strings for the "." / ".." checks above -- placed
-; here, after every reachable code path in this proc already
-; terminated via rtn, so control flow never falls through into them
-drm_dot:        db      ".",0
-drm_dotdot:     db      "..",0
 
 ; ----------------------------------------------------------------
 ; file_rename: rename a file or directory within the SAME parent
@@ -3360,45 +3423,30 @@ ren_check_sep_done:
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, ren_dot
-            call    f_strcmp
-            lbz     ren_err             ; new name is "."
+            call    _is_dot_or_dotdot
+            lbdf    ren_err             ; new name is "." or ".."
 
-            mov     rf, ren_new_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ren_dotdot
-            call    f_strcmp
-            lbz     ren_err             ; new name is ".."
-
-            ; --- resolve the (possibly multi-component) OLD path ---
-            mov     rf, cur_dir
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current directory cluster
-
+            ; --- resolve the OLD path and locate its entry ---
+            ; fo_name currently holds the OLD path pointer (saved at
+            ; entry, above) -- exactly _find_dirent's own argument
             mov     ra, fo_name
             lda     ra
             phi     rf
             ldn     ra
             plo     rf                  ; RF = old path pointer
-            call    path_resolve        ; RD = parent cluster, RF = final
+            call    _find_dirent        ; DF = 0/1; on success, RD =
+                                        ; resolved parent cluster,
+                                        ; file_dirent = matched entry,
+                                        ; fo_name = resolved final
                                         ; component
-            lbdf    ren_err             ; bad intermediate component
+            lbdf    ren_err             ; bad path, empty final
+                                        ; component, or not found
 
-            ; save both return values into memory immediately (the
-            ; "." / ".." guard below calls f_strcmp, confirmed to
-            ; clobber RD -- see dir_create's own header comment)
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = old final component
-
+            ; stash the parent cluster immediately -- needed below for
+            ; the new-name collision check and the final _file_create
+            ; insertion, and the "." / ".." guard right after this
+            ; clobbers RD (f_strcmp, confirmed -- see dir_create's own
+            ; header comment)
             mov     rb, ren_parent
             ghi     rd
             str     rb
@@ -3406,56 +3454,21 @@ ren_check_sep_done:
             glo     rd
             str     rb                  ; ren_parent = parent cluster
 
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = old final component
-            ldn     rd
-            lbz     ren_err             ; empty final component: no
-                                        ; name given
-
             ; reject renaming "." or ".." -- these aren't real,
-            ; independently renamable entries
+            ; independently renamable entries. Checked AFTER the scan
+            ; here (see dir_remove's own identical reasoning) because
+            ; _find_dirent's scan legitimately FINDS a match for "."
+            ; or ".." -- every non-root directory contains real
+            ; entries by those names, pointing at itself and its own
+            ; parent -- so the reject has to happen regardless of
+            ; whether the search succeeds. fo_name is still valid here.
             mov     rf, fo_name
             lda     rf
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, ren_dot
-            call    f_strcmp
-            lbz     ren_err
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ren_dotdot
-            call    f_strcmp
-            lbz     ren_err
-
-            ; --- scan the parent for the OLD name ---
-            mov     rf, ren_parent
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = parent cluster (reloaded)
-            call    dir_open
-
-ren_old_loop:
-            mov     rf, file_dirent
-            call    dir_read
-            lbdf    ren_err             ; end of directory: not found
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = old final component
-            mov     rf, file_dirent     ; RF = entry name
-            call    f_strcmp
-            lbnz    ren_old_loop        ; no match: keep looking
+            call    _is_dot_or_dotdot
+            lbdf    ren_err
 
             ; --- capture attr/cluster/size now, from file_dirent (a
             ; copy, independent of dir_buf) -- straight into
@@ -3630,11 +3643,92 @@ ren_err:
             stc                         ; DF = 1, error
             rtn
 
-; local literal strings for the "." / ".." checks above -- placed
-; here, after every reachable code path in this proc already
-; terminated via rtn, so control flow never falls through into them
-ren_dot:        db      ".",0
-ren_dotdot:     db      "..",0
+; ----------------------------------------------------------------
+; file_stat: resolve a (possibly multi-component) path to its own
+; directory entry, filling the caller's buffer with the same format
+; dir_read itself returns (DIRENT_NAME/ATTR/CLUST/SIZE/WRTTIME/
+; WRTDATE). Works on either a file or a directory -- unlike
+; file_delete (files only) or dir_remove (directories only), the
+; caller decides what to do with DIRENT_ATTR's ATTR_DIR bit, same
+; "caller decides" philosophy path_resolve itself already uses for
+; its own final component.
+;
+; Added specifically to stop a third caller (progs/stat.asm, after
+; progs/copy.asm's destination-directory check and progs/sys.asm's
+; own size lookup) from hand-rolling the same path_resolve +
+; dir_open/dir_read + f_strcmp scan loop a third time -- see
+; progs/sys.asm's own header comment for the size-lookup case this
+; was extracted from.
+;
+; An empty final component (path was "", "/", or ended in a
+; separator) is an error here -- the root has no directory entry of
+; its own describing it (see path_resolve's own header comment for
+; this same case), so there is nothing to fill the caller's buffer
+; with.
+;
+; Args:    RF = pointer to null-terminated path string
+;          RD = pointer to a caller-provided DIRENT_LEN-byte buffer
+; Returns: DF = 0 on success (buffer filled), DF = 1 on error (not
+;          found, an intermediate path component is invalid, or the
+;          path names the root/a directory via a trailing separator)
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    file_stat
+
+            ; stash the caller's buffer pointer -- must survive
+            ; _find_dirent, which clobbers R9/RA/RB/RC/RD/RF internally
+            mov     rb, fst_buf
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; fst_buf = caller's buffer ptr
+
+            ; RF (the incoming path pointer) is exactly _find_dirent's
+            ; own argument
+            call    _find_dirent        ; DF = 0/1; on success,
+                                        ; file_dirent holds the matched
+                                        ; entry
+            lbdf    fst_err             ; bad path, empty final
+                                        ; component, or not found
+
+            ; copy file_dirent (DIRENT_LEN bytes) into the caller's
+            ; buffer -- _find_dirent always populates the shared
+            ; file_dirent scratch, not an arbitrary caller-supplied
+            ; buffer, so this copy is the price of sharing the search
+            ; core with file_delete/dir_remove/file_rename (a one-off
+            ; 139-byte copy, not a hot path)
+            mov     rf, file_dirent
+            mov     r9, fst_buf
+            lda     r9
+            phi     r8
+            ldn     r9
+            plo     r8                  ; R8 = caller's buffer pointer
+
+            ldi     0
+            phi     rc
+            ldi     DIRENT_LEN
+            plo     rc                  ; RC = 139 (DIRENT_LEN)
+fst_copy:
+            lda     rf
+            str     r8
+            inc     r8
+            dec     rc
+            glo     rc
+            lbnz    fst_copy
+            ghi     rc
+            lbnz    fst_copy
+
+            clc                         ; DF = 0, success
+            rtn
+
+fst_err:
+            stc                         ; DF = 1, error
+            rtn
+
+fst_buf:        dw      0
 
 ; ----------------------------------------------------------------
 ; file_read: read bytes from an open file into a buffer
@@ -3966,6 +4060,7 @@ fread_copy_done:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = current cluster
+
             call    fat_get             ; RD = next cluster
             pop     rc
             pop     rb
@@ -4486,7 +4581,9 @@ fwrite_no_grow:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = current cluster
+
             call    fat_get             ; RD = next cluster, or EOC
+
             pop     rc
             pop     rb
             pop     ra
@@ -4854,7 +4951,6 @@ dcr_sect_lba:       ds      LBA_SIZE    ; current sector's LBA while
 ; here first and restored afterward, before _delete_located_entry
 ; (shared with DEL) runs. Kept in memory, not registers, across that
 ; scan for the same reasoning as fdel_next_clust/dcr_*.
-drm_parent:         dw      0           ; resolved parent cluster
 drm_saved_clust:    dw      0           ; target directory's own first
                                         ; cluster
 drm_saved_off:      dw      0           ; parent's dir_last_off, saved
@@ -4898,7 +4994,6 @@ ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
                 public  dcr_parent
                 public  dcr_new_clust
                 public  dcr_sect_lba
-                public  drm_parent
                 public  drm_saved_clust
                 public  drm_saved_off
                 public  drm_saved_lba

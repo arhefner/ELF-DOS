@@ -36,8 +36,7 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            call    K_INMSG
-            db      "C:> ",0
+            call    print_prompt
 
             mov     rf, LINE_BUF
             ldi     127
@@ -166,5 +165,145 @@ resolved:
             rtn
 
 bin_prefix: db      "/bin/",0
+
+;------------------------------------------------------------------
+; print_prompt: print "C:/> " at root, "C:/<name>> " one level under
+; root, or "C:.../<name>> " deeper -- <name> is always just the
+; current directory's own name, never the full path (kept short and
+; cheap on purpose; PWD already exists for the full path). Reuses
+; PWD's own "find my own name" trick (open current dir, find '..' to
+; get the parent's cluster, open the parent, scan for the entry whose
+; DIRENT_CLUST matches) but only ONE level -- pwd.asm's own header
+; explains why FAT records no "my own name"/"path from root" anywhere,
+; only each directory's parent link.
+;
+; Args:    none
+; Returns: nothing (prints the prompt directly)
+; Modifies: everything (R7-RD) -- called once at the very top of
+;           start, before any other state exists to protect.
+;------------------------------------------------------------------
+print_prompt:
+            call    K_GETCURDIR         ; RD = current directory cluster
+
+            ; already at root?
+            ghi     rd
+            lbnz    pp_not_root
+            glo     rd
+            lbnz    pp_not_root
+
+            call    K_INMSG
+            db      "C:/> ",0
+            rtn
+
+pp_not_root:
+            mov     rf, pp_clust
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; pp_clust = cur_dir
+
+            ; --- open cur_dir, find its '..' entry -> parent cluster ---
+            call    K_DIR_OPEN          ; RD still = cur_dir
+
+pp_find_dotdot:
+            mov     rf, pp_dirent
+            call    K_DIR_READ
+            lbdf    pp_ioerr            ; ran out of entries: shouldn't
+                                        ; happen for a real subdirectory
+
+            mov     rf, pp_dirent       ; RF = entry name
+            mov     rd, pp_dotdot       ; RD = ".."
+            call    f_strcmp
+            lbnz    pp_find_dotdot
+
+            ; parent = this entry's DIRENT_CLUST
+            mov     rf, pp_dirent
+            add16   rf, DIRENT_CLUST
+            lda     rf                  ; D = cluster high byte
+            phi     rd
+            ldn     rf                  ; D = cluster low byte
+            plo     rd
+            mov     rf, pp_parent
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; pp_parent = RD
+
+            ; --- open parent, find the entry whose cluster == pp_clust ---
+            call    K_DIR_OPEN          ; RD is still = parent
+
+pp_find_self:
+            mov     rf, pp_dirent
+            call    K_DIR_READ
+            lbdf    pp_ioerr            ; ran out: shouldn't happen --
+                                        ; pp_clust must appear once in
+                                        ; its own parent's listing
+
+            ; compare this entry's cluster against pp_clust, high byte
+            ; then low byte (same SM-based equality idiom pwd.asm uses)
+            mov     rf, pp_dirent
+            add16   rf, DIRENT_CLUST
+            lda     rf                  ; D = entry cluster high byte,
+                                        ; RF -> entry cluster low byte
+            str     r2
+            mov     rb, pp_clust
+            ldn     rb                  ; D = pp_clust high byte
+            sm                          ; D = pp_clust.hi - entry.hi
+            lbnz    pp_find_self        ; mismatch: keep looking
+
+            ldn     rf                  ; D = entry cluster low byte
+            str     r2
+            inc     rb                  ; RB -> pp_clust low byte
+            ldn     rb                  ; D = pp_clust low byte
+            sm                          ; D = pp_clust.lo - entry.lo
+            lbnz    pp_find_self        ; mismatch: keep looking
+
+            ; match: pp_dirent's name is our own name. Reload pp_parent
+            ; fresh from memory (not any register -- the scan above
+            ; used RD/RF/RB freely) to decide which prompt form to use.
+            mov     rf, pp_parent
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = pp_parent
+
+            ghi     rd
+            lbnz    pp_deep
+            glo     rd
+            lbnz    pp_deep
+
+            ; parent is root: "C:/<name>> "
+            call    K_INMSG
+            db      "C:/",0
+            mov     rf, pp_dirent
+            call    K_MSG
+            call    K_INMSG
+            db      "> ",0
+            rtn
+
+pp_deep:
+            ; parent is itself a subdirectory: "C:.../<name>> "
+            call    K_INMSG
+            db      "C:.../",0
+            mov     rf, pp_dirent
+            call    K_MSG
+            call    K_INMSG
+            db      "> ",0
+            rtn
+
+pp_ioerr:
+            ; shouldn't happen for a real directory -- fall back to a
+            ; plain, always-safe prompt rather than fail the whole
+            ; command loop over a cosmetic feature
+            call    K_INMSG
+            db      "C:> ",0
+            rtn
+
+pp_dotdot:  db      "..",0
+pp_clust:   dw      0
+pp_parent:  dw      0
+pp_dirent:  ds      DIRENT_LEN
 
             end     start

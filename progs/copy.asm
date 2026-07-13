@@ -29,7 +29,28 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
-COPY_CHUNK_LEN: equ     64
+COPY_CHUNK_LEN: equ     512     ; matches the sector size -- was 64,
+                                ; bumped once the underlying directory-
+                                ; growth bug (fc_grow's unprotected R8
+                                ; across fat_set) was found and fixed;
+                                ; changing it earlier would have shifted
+                                ; the cluster-boundary alignment of the
+                                ; test cases that exposed that bug.
+                                ; Also cuts real disk I/O, not just call
+                                ; overhead: file_read/file_write share a
+                                ; SINGLE io_buf slot across FCBs (see
+                                ; this file's own header comment), so
+                                ; every alternation between the src and
+                                ; dst FCBs evicts the other's cached
+                                ; sector -- at the old 64-byte chunk
+                                ; size, copying one 512-byte sector took
+                                ; 8 iterations x (1 disk read to reload
+                                ; src's sector + 1 disk read to reload
+                                ; dst's for read-modify-write + 1 disk
+                                ; write) = 24 real disk operations. One
+                                ; 512-byte chunk per sector cuts that to
+                                ; 3 -- an 8x reduction in actual disk
+                                ; I/O, not just kernel-call overhead.
 DST_BUF_LEN:    equ     132
 
             org     PROG_BASE
@@ -349,10 +370,14 @@ dst_check_done:
 ;------------------------------------------------------------------
 copy_loop:
             mov     rf, copy_buf
-            ldi     COPY_CHUNK_LEN
+            ldi     low COPY_CHUNK_LEN
             plo     rc
-            ldi     0
-            phi     rc                  ; RC = chunk size requested
+            ldi     high COPY_CHUNK_LEN
+            phi     rc                  ; RC = chunk size requested (512
+                                        ; doesn't fit ldi's 8-bit
+                                        ; immediate directly -- low/high
+                                        ; split, same pattern loader.asm
+                                        ; already uses for PROG_BASE)
             mov     rd, src_fcb
             ldn     rd                  ; D = FCB index, RF untouched
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1

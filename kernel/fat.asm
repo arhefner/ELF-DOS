@@ -51,6 +51,7 @@
             extrn   fat_flush
             extrn   fls_cluster
             extrn   ffl_sector_idx
+            extrn   fat_next_free
 
 ; ----------------------------------------------------------------
 ; _fat_load_sector's own scratch: the cluster number it was called
@@ -93,8 +94,17 @@ fls_cluster:    dw      0
 ; fixed proactively rather than waiting for a second hardware failure.
 ffl_sector_idx: db      0
 
+; fat_next_free: fat_alloc's "next-fit" search hint -- the cluster to
+; start its next scan from, instead of always restarting at cluster 2.
+; See fat_alloc's own header for why the always-restart design was a
+; real, measured performance problem. Initialized by fat_init (below);
+; kept in memory (not a register) since it must survive across every
+; call into this file between one fat_alloc and the next.
+fat_next_free:  dw      0
+
                 public  fls_cluster
                 public  ffl_sector_idx
+                public  fat_next_free
 
                 endp
 
@@ -103,9 +113,20 @@ ffl_sector_idx: db      0
 ; Called by kernel_main after bpb_init.
 ; bpb_init already sets fat_csec=$FFFF; this proc exists for
 ; symmetry and any future initialisation needs.
+;
+; Also sets fat_next_free = 2 -- the same starting point fat_alloc's
+; old always-restart-from-2 design used unconditionally, now just the
+; one-time initial value for its search hint.
 ; Returns: nothing
 ; ----------------------------------------------------------------
             proc    fat_init
+
+            mov     rf, fat_next_free
+            ldi     0
+            str     rf
+            inc     rf
+            ldi     2
+            str     rf                  ; fat_next_free = 2
 
             rtn
 
@@ -148,15 +169,34 @@ ffl_sector_idx: db      0
 fls_load:
             ; flush the currently-cached sector first, if dirty --
             ; a different sector is about to replace it. No register
-            ; protection needed around this call now that the cluster
-            ; number lives in fls_cluster (memory survives any call
-            ; unconditionally, unlike a register).
+            ; protection needed around this call for THIS proc's own
+            ; purposes, since fls_cluster (memory) drives everything
+            ; below rather than RD -- but see the BUG FIX note just
+            ; below for a gap that observation alone would miss.
             mov     rf, fat_dirty
             ldn     rf
             lbz     fls_no_flush
             call    fat_flush
             lbdf    fls_err
 fls_no_flush:
+
+            ; BUG FIX (2026-07-13): fat_flush's own header documents RD
+            ; as clobbered -- but THIS proc's own header promises "RD
+            ; unchanged" to ITS caller (fat_get, which reuses RD
+            ; immediately after this call returns to compute a byte
+            ; offset). Without this reload, any cache-miss that also
+            ; had to flush a dirty sector first would hand fat_get back
+            ; a corrupted cluster number, making it compute the wrong
+            ; offset into fat_cache -- confirmed on hardware via a
+            ; related instance of this same class of bug (see git
+            ; history for the full story). Reloading unconditionally is
+            ; a no-op when the flush above wasn't actually taken, so
+            ; this is cheap insurance either way.
+            mov     rf, fls_cluster
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
 
             ; absolute LBA = bpb_fat_lba + sector_index
             mov     rf, bpb_fat_lba
@@ -305,10 +345,26 @@ fat_set_err:
 ; ----------------------------------------------------------------
 ; fat_alloc: find and allocate a free cluster
 ;
-; Scans forward from cluster 2 looking for a FAT entry of 0 (free),
-; bounded by bpb_max_clust. Claims the cluster immediately by
-; marking it end-of-chain, so a second call in a row can't return
-; the same cluster before the caller links it into a chain.
+; PERFORMANCE (2026-07-15): used to always restart its scan at cluster
+; 2, forgetting where the previous call left off. Correct, but
+; O(clusters already in use) per call -- fine on a mostly-empty disk,
+; but on a volume formatted with spc=1 (512-byte clusters, one of this
+; project's real test cards) every 512 bytes written needs a fresh
+; cluster, so total allocation work for an N-cluster file grew roughly
+; with N^2. Confirmed as the dominant cost behind a 63828-byte COPY
+; (~125 clusters) taking over a minute, against ~15 seconds for the
+; same data over a 57600-baud serial link (which has no allocation
+; cost on the sending side at all). Now uses a "next-fit" search:
+; start from fat_next_free (wherever the previous successful
+; allocation left off) and wrap around to cluster 2 exactly once if
+; the scan reaches bpb_max_clust without finding anything, so clusters
+; freed by an earlier DEL/RD (which live before the hint) stay
+; reachable -- at the cost of a second bounded pass only when the
+; first one comes up empty.
+;
+; Claims the cluster immediately by marking it end-of-chain, so a
+; second call in a row can't return the same cluster before the
+; caller links it into a chain.
 ;
 ; Returns: RD = newly allocated cluster number
 ;          DF = 0 on success, DF = 1 if disk full or I/O error
@@ -316,13 +372,18 @@ fat_set_err:
 ; ----------------------------------------------------------------
             proc    fat_alloc
 
-            ldi     0
+            mov     rf, fat_next_free
+            lda     rf
             phi     r8
-            ldi     2
-            plo     r8                  ; R8 = candidate cluster, starts at 2
+            ldn     rf
+            plo     r8                  ; R8 = candidate, starts at the hint
+
+            ldi     0
+            plo     r9                  ; R9.0 = wrapped-already flag
 
 alloc_loop:
-            ; bound check: candidate > bpb_max_clust -> disk full
+            ; bound check: candidate > bpb_max_clust -> wrap to 2 once,
+            ; or disk full if this scan has already wrapped
             mov     rf, bpb_max_clust
             lda     rf
             phi     rd
@@ -337,15 +398,30 @@ alloc_loop:
             str     r2
             ghi     rd
             smb                         ; D = max_clust.hi - candidate.hi - borrow
-            lbnf    alloc_full          ; DF=0: candidate > max_clust
+            lbdf    alloc_have_candidate ; DF=1: candidate <= max_clust
 
-            ; read this cluster's FAT entry
+            glo     r9
+            lbnz    alloc_full          ; already wrapped once: truly full
+            ldi     1
+            plo     r9                  ; mark wrapped
+            ldi     0
+            phi     r8
+            ldi     2
+            plo     r8                  ; candidate = 2
+            lbr     alloc_loop
+
+alloc_have_candidate:
+            ; read this cluster's FAT entry -- R9 (wrapped flag)
+            ; protected across fat_get the same way R8 (the scan
+            ; candidate) already is
             ghi     r8
             phi     rd
             glo     r8
             plo     rd                  ; RD = candidate cluster
             push    r8
+            push    r9
             call    fat_get             ; RD = FAT entry value; DF=0/1
+            pop     r9
             pop     r8
             lbdf    alloc_err
 
@@ -374,6 +450,32 @@ alloc_found:
             call    fat_set
             pop     rd
             lbdf    alloc_err
+
+            ; fat_next_free = this cluster + 1 -- write RD first, then
+            ; increment IN PLACE (rather than computing "RD+1" into a
+            ; spare register), since fat_set's own internal call into
+            ; _fat_load_sector documents R7/R8/RF as clobbered, so
+            ; nothing but RD itself (explicitly restored above) is
+            ; trustworthy here. RD stays the allocated cluster -- the
+            ; documented return value -- untouched by any of this.
+            mov     rf, fat_next_free
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fat_next_free = allocated cluster
+
+            mov     rf, fat_next_free
+            inc     rf                  ; rf -> fat_next_free's low byte
+            ldn     rf
+            adi     1
+            str     rf
+            lbnz    alloc_hint_done
+            dec     rf                  ; rf -> fat_next_free's high byte
+            ldn     rf
+            adi     1
+            str     rf
+alloc_hint_done:
 
             clc                         ; DF = 0, RD = allocated cluster
             rtn

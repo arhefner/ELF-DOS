@@ -2,9 +2,17 @@
 ; mbr.asm - Master Boot Record boot code
 ;
 ; Written by ROM f_boot to $0100, entered at $0106.
-; Sets up the stack, resets the IDE/SD subsystem, loads the
-; kernel bootstrap sector (sector 1) to $3E00, and jumps to
-; the bootstrap entry point at $3E06.
+; Sets up the stack, resets the IDE/SD subsystem, loads the kernel
+; bootstrap's KRNBOOT_SECTORS consecutive sectors (sectors 1..
+; KRNBOOT_SECTORS) to $3E00, and jumps to the bootstrap entry point
+; at $3E06. KRNBOOT_SECTORS grew from 1 to 3 as part of the
+; multi-sector krnboot expansion (moving bpb_init's body into
+; krnboot.asm's own sectors) -- see that file's own header comment
+; for the full reasoning; boot/krnboot.asm's own "ldi 4" (where the
+; kernel proper's own sectors start, sector 0=MBR + KRNBOOT_SECTORS=3
+; bootstrap sectors = kernel proper starts at sector 4) and
+; sys/sys.c's/progs/sys.asm's own sector-count math must all stay in
+; lockstep with this same value.
 ;
 ; KERN_LOAD was $3000 until 2026-07-09: the kernel proper (loaded by
 ; krnboot to $0100, see krnboot.asm) had grown to the point that its
@@ -41,6 +49,10 @@
 
 #define     KERN_LOAD   $3E00           ; kernel bootstrap loads here
 #define     KERN_ENTRY  $3E06           ; kernel bootstrap entry point
+#define     KRNBOOT_SECTORS 3           ; sectors 1..3 hold the bootstrap
+                                        ; (must match krnboot.asm's own
+                                        ; sector count and sys/sys.c's
+                                        ; /progs/sys.asm's sector math)
 
             org         $0100
 
@@ -69,9 +81,21 @@ mbr_main:   call        f_freemem       ; RF = address of highest RAM byte
             plo         r8              ; R8.0 = LBA bits 23-16 = 0
             phi         r8              ; R8.1 = drive/head = 0
 
-            mov         rf,KERN_LOAD    ; RF = $3E00, destination buffer
-            call        f_ideread       ; read sector 1
+            mov         ra,KERN_LOAD    ; RA = current destination,
+                                        ; starts at $3E00
+            ldi         KRNBOOT_SECTORS
+            plo         rc              ; RC.0 = sectors remaining
+
+mbr_load_loop:
+            mov         rf,ra           ; RF = current destination
+            call        f_ideread       ; read one sector into [RF]
             lbdf        mbr_err         ; DF=1 means read error
+
+            add16       ra,$0200        ; advance destination by 512
+            inc         r7              ; advance to next LBA sector
+            dec         rc
+            glo         rc
+            lbnz        mbr_load_loop
 
             lbr         KERN_ENTRY      ; jump to $3E06, kernel bootstrap
 

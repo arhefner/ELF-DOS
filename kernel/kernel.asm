@@ -26,12 +26,12 @@
 #include    include/bios.inc
 #include    include/kernel.inc
 
-            extrn   bpb_init
             extrn   fat_init
             extrn   file_init
             extrn   mem_top
             extrn   mem_base
             extrn   cur_dir
+            extrn   part1_lba
 
             extrn   file_open
             extrn   file_close
@@ -42,6 +42,7 @@
             extrn   dir_create
             extrn   dir_remove
             extrn   file_rename
+            extrn   file_stat
             extrn   dir_open
             extrn   dir_read
             extrn   path_resolve
@@ -118,16 +119,55 @@ k_dir_remove:   lbr     dir_remove          ; $0151
 k_file_rename:  lbr     file_rename         ; $0154
 k_read:         lbr     f_read              ; $0157 (BIOS passthrough)
 
-; K_BPB_INIT/K_FAT_INIT/K_FILE_INIT: boot-only, called exactly once each
-; by boot/krnboot.asm's relocated init code (see kernel_init's own
-; header comment below, and krnboot.asm's, for the full story) -- exist
-; as jump-table slots only because krnboot.asm is linked completely
+; K_FAT_INIT/K_FILE_INIT: boot-only, called exactly once each by
+; boot/krnboot.asm's relocated init code (see kernel_init's own header
+; comment below, and krnboot.asm's, for the full story) -- exist as
+; jump-table slots only because krnboot.asm is linked completely
 ; separately from kernel.bin and has no other way to reach these
-; kernel-resident routines. Not meant to be called by ordinary programs.
-k_bpb_init:     lbr     bpb_init            ; $015A
+; kernel-resident routines. Not meant to be called by ordinary
+; programs. K_BPB_INIT (still at $015A, the same append-only slot)
+; no longer calls a real bpb_init -- see k_bpb_init_stub's own header
+; comment (further down in this file) for why.
+k_bpb_init:     lbr     k_bpb_init_stub     ; $015A
 k_fat_init:     lbr     fat_init            ; $015D
 k_file_init:    lbr     file_init           ; $0160
-                ; next free address: $0163
+
+; K_SECWRITE/K_SECREAD: raw 512-byte sector read/write by LBA, bypassing
+; the FAT16 filesystem entirely -- direct passthroughs to the same BIOS
+; routines fat.asm itself uses for FAT/directory sector I/O. Args: R7/R8
+; = 24-bit LBA (R8.0 = bits 23-16, R7.1 = bits 15-8, R7.0 = bits 7-0,
+; R8.1 = 0, the drive/head byte -- see include/kernel.inc's own LBA
+; storage format comment), RF = pointer to a 512-byte buffer (source for
+; K_SECWRITE, destination for K_SECREAD). Returns: DF = 0/1 (success/
+; error); R7/R8 are clobbered by the call, same as calling f_idewrite/
+; f_ideread directly. DANGEROUS if misused -- a wrong LBA can silently
+; corrupt the running filesystem or the boot sectors themselves; added
+; specifically for progs/sys.asm (target-side kernel/MBR installer) and
+; not intended for casual use by other programs.
+k_secwrite:     lbr     f_idewrite          ; $0163 (BIOS passthrough)
+k_secread:      lbr     f_ideread           ; $0166 (BIOS passthrough)
+
+; K_STAT: resolve a path to its own directory entry without opening it
+; as a file -- works on either a file or a directory. See
+; kernel/file.asm's file_stat for the full contract (args/returns) and
+; the motivation (a third caller, progs/stat.asm, was about to
+; hand-roll the same path_resolve+dir_open/dir_read+f_strcmp scan
+; progs/copy.asm and progs/sys.asm already each do inline).
+k_stat:         lbr     file_stat           ; $0169
+
+; BPB_DATA_PTR: a DATA slot (2 bytes, not a 3-byte lbr call target),
+; sitting at the jump table's own tail by design (the user's own
+; earlier proposal). Holds the real, link-time-resolved address of the
+; BPB data block (part1_lba..fat_csec, 23 bytes, see kernel.inc's own
+; BPBBLK_* offsets) -- boot/krnboot.asm's own separately-linked,
+; relocated bpb_init body reads this fixed address to reach these
+; kernel-resident fields, since it has no way to reference kernel.bin's
+; normal relocatable symbols directly. Populated here, not by krnboot --
+; this line is part of kernel.bin's own link, so "dw part1_lba" resolves
+; to the block's real address automatically, same as any other
+; relocatable reference.
+                dw      part1_lba           ; $016C: BPB_DATA_PTR
+                ; next free jump-table address: $016E
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
@@ -253,6 +293,21 @@ kernel_setcurdir:
             inc     rf
             glo     rd
             str     rf
+            rtn
+
+;------------------------------------------------------------------
+; k_bpb_init_stub: K_BPB_INIT's jump-table slot no longer points at a
+; real routine -- bpb_init's body moved to boot/krnboot.asm's own
+; inlined copy as part of the multi-sector krnboot expansion, and
+; krnboot itself (the only caller K_BPB_INIT ever had) now reaches
+; those fields directly via BPB_DATA_PTR instead of this call. Per
+; this project's append-only jump-table rule (slots are never removed,
+; so any future code that somehow still calls $015A gets defined
+; behavior, not garbage), the slot stays and points here instead: a
+; trivial always-succeeds no-op.
+;------------------------------------------------------------------
+k_bpb_init_stub:
+            clc
             rtn
 
 ;==================================================================
