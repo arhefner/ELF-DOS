@@ -48,15 +48,19 @@ start:
 
 have_name:
             mov     rf, ra              ; RF = filename
+            mov     rd, wbtest_fcb      ; RD = our FCB struct
+            mov     ra, wbtest_iobuf    ; RA = our I/O buffer (movs
+                                        ; before the mode load below,
+                                        ; since mov clobbers D)
             ldi     1                   ; mode = write (create/truncate)
-            call    K_FILE_OPEN         ; D = FCB index, DF=0/1
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    open_error
 
-            plo     r8                  ; R8.0 = FCB index (temp, mov
+            plo     r8                  ; R8.0 = handle (temp, mov
                                         ; below clobbers D)
-            mov     rf, saved_fcb
+            mov     rf, saved_handle
             glo     r8
-            str     rf                  ; saved_fcb = FCB index
+            str     rf                  ; saved_handle = handle
 
             mov     rf, fill_byte
             ldi     0
@@ -104,8 +108,8 @@ wb_fill_loop:
             plo     rc
             ldi     0
             phi     rc                  ; RC = 64 (write count)
-            mov     rd, saved_fcb
-            ldn     rd                  ; D = FCB index, RF/RC untouched
+            mov     rd, saved_handle
+            ldn     rd                  ; D = handle, RF/RC untouched
             call    K_FILE_WRITE        ; DF = 0/1
             lbdf    write_error
 
@@ -155,7 +159,7 @@ wb_last_fill_loop:
             plo     rc
             ldi     0
             phi     rc
-            mov     rd, saved_fcb
+            mov     rd, saved_handle
             ldn     rd
             call    K_FILE_WRITE
             lbdf    write_error
@@ -163,7 +167,7 @@ wb_last_fill_loop:
 ;------------------------------------------------------------------
 ; Close and report.
 ;------------------------------------------------------------------
-            mov     rd, saved_fcb
+            mov     rd, saved_handle
             ldn     rd
             call    K_FILE_CLOSE        ; result intentionally ignored
 
@@ -179,7 +183,7 @@ open_error:
             rtn
 
 write_error:
-            mov     rd, saved_fcb
+            mov     rd, saved_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -187,7 +191,9 @@ write_error:
             ldi     1
             rtn
 
-saved_fcb:          db      0
+wbtest_fcb:         ds      FCB_LEN
+wbtest_iobuf:       ds      FCB_IOBUF_LEN
+saved_handle:       db      0
 fill_byte:          db      0
 chunks_left_hi:     db      0
 chunks_left_lo:     db      0

@@ -51,22 +51,26 @@
 ; instant KERN_ENTRY is reached, exactly like the load loop itself.
 ;
 ; The one thing that couldn't move here: kernel_init's mem_top/
-; mem_base/cur_dir writes. Those touch kernel-resident, relocatable-
-; address data -- this file is linked completely separately from
-; kernel.bin (its own link02 invocation, boot/krnboot.prg only), so it
-; has no way to reach a relocatable kernel symbol directly, only fixed,
-; absolute addresses. The K_FAT_INIT/K_FILE_INIT calls below work
-; because a jump-table slot IS a fixed address (same mechanism every
-; program already uses to call into the kernel) -- there's no
-; equivalent fixed-address path for writing to a data label whose own
-; position shifts across kernel rebuilds. bpb_init's own fields
-; (part1_lba etc.) are the one exception: BPB_DATA_PTR (see
-; kernel_api.inc) is a SECOND fixed-address mechanism, a pointer
+; mem_base/drive_cur_dir/cur_drive writes. Those touch kernel-
+; resident, relocatable-address data -- this file is linked completely
+; separately from kernel.bin (its own link02 invocation, boot/
+; krnboot.prg only), so it has no way to reach a relocatable kernel
+; symbol directly, only fixed, absolute addresses. The K_FAT_INIT/
+; K_FILE_INIT calls below work because a jump-table slot IS a fixed
+; address (same mechanism every program already uses to call into the
+; kernel) -- there's no equivalent fixed-address path for writing to a
+; data label whose own position shifts across kernel rebuilds.
+; bpb_init's own fields (part1_lba etc.) are the exception: BPB_DATA_PTR
+; (see kernel_api.inc) is a SECOND fixed-address mechanism, a pointer
 ; rather than a jump-table slot, purpose-built so this file's own
 ; inlined bpb_init body (below) can write those specific fields
 ; directly without needing a K_BPB_INIT call at all -- K_BPB_INIT's
 ; jump-table slot itself is now a harmless stub (kernel.asm), since
-; this is the only place that ever called it.
+; this is the only place that ever called it. DRIVE_DATA_PTR
+; (2026-07-13) is a THIRD such pointer, same mechanism, for the
+; multi-partition drive_present/drive_bpb_table arrays this file's
+; boot-time scan (below) now populates for every drive, not just the
+; boot partition.
 ;
 
 #include    include/bios.inc
@@ -171,30 +175,72 @@ boot_init2:
             db          "ELF-DOS v0.1",13,10,0
 
 ;--------------------------------------------------------------
-; Inlined bpb_init (relocated from kernel/bpb.asm -- see this file's
-; own header comment for the full reasoning). Two phases:
+; Inlined, multi-partition bpb_init (relocated from kernel/bpb.asm,
+; then extended 2026-07-13 for up to DRIVE_COUNT=4 partitions -- see
+; this file's own header comment for the original single-partition
+; reasoning, still valid for why this lives here at all). Now a real
+; LOOP over partition-table entries 0..DRIVE_COUNT-1 (drives C..F),
+; not unrolled -- four copies of the original ~700-byte Phase 1/
+; Phase 2 body would never fit in this bootstrap's own sector budget.
+; Three phases per iteration:
 ;
-; Phase 1 (below, through the fat_csec write) computes every BPB
-; field into LOCAL, krnboot-resident scratch variables (boot_part1_lba
-; etc.) using the EXACT same register logic as the original bpb_init --
-; this part touches nothing kernel-resident, so it's a pure rename of
-; the original's destination labels, not a redesign.
+; Phase 1 (through the fat_csec write) computes one drive's BPB
+; fields into LOCAL, krnboot-resident scratch variables
+; (boot_part1_lba etc.) using the EXACT same register logic as the
+; original single-partition bpb_init -- this part touches nothing
+; kernel-resident. The MBR (sector 0) is re-read at the top of EVERY
+; iteration, not just once, since each iteration's own VBR read
+; (Step 3, present drives only) overwrites boot_scratch -- a fresh
+; MBR read is the simplest way to recover the next entry's own
+; partition-table bytes without a second buffer.
+;
+; A drive with a zero LBA-start field is treated as absent: Steps 3-8
+; are skipped entirely, and every OTHER local scratch field (not
+; boot_part1_lba, which is already 0 -- that's how absence is
+; detected) is explicitly zeroed before Phase 2 runs, so an absent
+; drive's drive_bpb_table entry ends up all-zero rather than carrying
+; over stale values from a previous iteration. No partition-type-byte
+; or VBR-signature validation, matching this project's own existing
+; rigor level (the single-partition version never validated beyond
+; "LBA-start nonzero" either).
 ;
 ; Phase 2 (the "copy into the real kernel-resident block" section
-; further below) is the ONLY new logic: it reads BPB_DATA_PTR (the
-; fixed pointer kernel.asm populates at its own link time -- see
-; kernel_api.inc's own header comment on it) to find the real BPB
-; data block's address, then copies each of Phase 1's local results
-; into it via BPBBLK_* offsets. Deliberately kept as one uniform,
-; repetitive, easy-to-verify pass at the very end, instead of
-; interleaving the offset arithmetic into Phase 1's own live register
-; state -- concentrates the only genuinely new risk into code that's
-; trivial to eyeball-check field by field (right offset, right local
-; source, right byte count), rather than needing to trace complex
-; register interactions throughout.
+; further below) is UNCHANGED from the single-partition version except
+; for what boot_bpb_base points at: it reads DRIVE_DATA_PTR (the fixed
+; pointer kernel.asm populates at its own link time -- see
+; kernel_api.inc's own header comment on it) once, before the loop, to
+; find drive_present[0]'s real address; each iteration then computes
+; &drive_present[idx] and &drive_bpb_table[idx] (the latter stashed
+; into boot_bpb_base, exactly the variable name/role Phase 2's copy
+; code already expects) from that one base pointer plus the loop
+; index. Every one of Phase 2's per-field copy instructions is
+; byte-identical to the single-partition version -- only the
+; preamble that computes where boot_bpb_base points changed.
 ;--------------------------------------------------------------
 
-; ---- Phase 1, Step 1: read MBR (sector 0) into local scratch ----
+            mov         rf,DRIVE_DATA_PTR
+            lda         rf
+            phi         rd
+            ldn         rf
+            plo         rd                  ; RD = drive_present[0]'s
+                                            ; real, link-time-resolved
+                                            ; address
+            mov         rf,boot_drive_base
+            ghi         rd
+            str         rf
+            inc         rf
+            glo         rd
+            str         rf                  ; boot_drive_base =
+                                            ; drive_present's address
+
+            mov         rf,boot_drive_idx
+            ldi         0
+            str         rf                  ; boot_drive_idx = 0
+
+boot_drive_loop:
+
+; ---- Step 1: read MBR (sector 0) fresh every iteration -- see
+; header comment above for why ----
             ldi         0
             plo         r7
             phi         r7
@@ -205,13 +251,24 @@ boot_init2:
             call        f_ideread
             lbdf        boot_kern_err       ; read error
 
-; ---- Phase 1, Step 2: extract partition 1 start LBA ----
-            mov         rf,boot_scratch
-            ldi         $01
-            phi         rd
-            ldi         $c6
+; ---- Step 2: extract THIS entry's start LBA. Offset within the MBR
+; sector = PT_OFFSET + idx*PT_ENTRY_LEN + PT_LBA_OFF = $01BE +
+; idx*16 + 8 = $01C6 + idx*16 -- low byte only (idx 0-3 keeps the
+; result in $C6-$F6, never crossing into the high byte) ----
+            mov         rf,boot_drive_idx
+            ldn         rf                  ; D = idx (0-3)
+            shl
+            shl
+            shl
+            shl                             ; D = idx * PT_ENTRY_LEN (16)
+            adi         $C6
             plo         rd
-            add16       rf,rd               ; RF = boot_scratch + PT_OFFSET + PT_LBA_OFF
+            ldi         $01
+            phi         rd                  ; RD = this entry's LBA-
+                                            ; start field offset
+
+            mov         rf,boot_scratch
+            add16       rf,rd               ; RF = boot_scratch + offset
             lda         rf
             plo         r7
             lda         rf
@@ -231,12 +288,112 @@ boot_init2:
             glo         r7
             str         rf
 
-; ---- Phase 1, Step 3: read VBR (partition 1's first sector) ----
+; ---- resolve this iteration's two destination addresses:
+; &drive_present[idx] (-> boot_present_addr) and &drive_bpb_table[idx]
+; (-> boot_bpb_base, the same variable Phase 2 below already expects)
+; -- both derived from boot_drive_base plus idx (see
+; kernel_api.inc's own DRIVE_DATA_PTR comment: drive_present[0..3] is
+; followed immediately by drive_bpb_table[0..3]) ----
+            mov         rf,boot_drive_idx
+            ldn         rf
+            plo         r9
+            ldi         0
+            phi         r9                  ; R9 = idx, zero-extended
+
+            mov         rf,boot_drive_base
+            lda         rf
+            phi         rd
+            ldn         rf
+            plo         rd                  ; RD = drive_present's
+                                            ; real address
+            add16       rd,r9               ; RD = &drive_present[idx]
+            mov         rf,boot_present_addr
+            ghi         rd
+            str         rf
+            inc         rf
+            glo         rd
+            str         rf
+
+            mov         rf,boot_drive_base
+            lda         rf
+            phi         rd
+            ldn         rf
+            plo         rd                  ; RD = drive_present's
+                                            ; real address (again)
+            add16       rd,DRIVE_COUNT      ; RD = drive_bpb_table's
+                                            ; real address
+
+            glo         r9
+            lbz         boot_bpb_off_done   ; idx 0: no offset to add
+            plo         rc                  ; RC.0 = remaining count
+boot_bpb_off_loop:
+            add16       rd,BPBBLK_LEN
+            dec         rc
+            glo         rc
+            lbnz        boot_bpb_off_loop
+boot_bpb_off_done:
+            mov         rf,boot_bpb_base
+            ghi         rd
+            str         rf
+            inc         rf
+            glo         rd
+            str         rf                  ; boot_bpb_base =
+                                            ; &drive_bpb_table[idx]
+
+; ---- presence check: is this entry's LBA-start nonzero? ----
+            mov         rf,boot_part1_lba
+            lda         rf
+            lbnz        boot_drive_present
+            lda         rf
+            lbnz        boot_drive_present
+            ldn         rf
+            lbnz        boot_drive_present
+
+; ---- absent: drive_present[idx] = 0; zero every OTHER local
+; scratch field (boot_part1_lba is already 0) so Phase 2 below
+; writes an all-zero drive_bpb_table entry, then skip straight to
+; Phase 2 -- no VBR read, no Steps 4-8 ----
+            mov         rf,boot_present_addr
+            lda         rf
+            phi         rd
+            ldn         rf
+            plo         rd
+            mov         rf,rd
+            ldi         0
+            str         rf                  ; drive_present[idx] = 0
+
+            mov         rf,boot_fat_lba
+            ldi         20                  ; boot_fat_lba..boot_fat_csec,
+                                            ; contiguous, 20 bytes (see
+                                            ; the scratch declarations
+                                            ; below)
+            plo         rc
+boot_absent_zero:
+            ldi         0
+            str         rf
+            inc         rf
+            dec         rc
+            glo         rc
+            lbnz        boot_absent_zero
+
+            lbr         boot_drive_copy
+
+boot_drive_present:
+            mov         rf,boot_present_addr
+            lda         rf
+            phi         rd
+            ldn         rf
+            plo         rd
+            mov         rf,rd
+            ldi         1
+            str         rf                  ; drive_present[idx] = 1
+
+; ---- Step 3: read VBR (this partition's first sector) ----
             mov         rf,boot_scratch
             call        f_ideread
             lbdf        boot_kern_err       ; read error
 
-; ---- Phase 1, Step 4: sectors-per-cluster, spc_shift ----
+; ---- Step 4: sectors-per-cluster, spc_shift ----
             mov         rf,boot_scratch
             ldi         0
             phi         rd
@@ -442,24 +599,15 @@ boot_spc_done:
             str         rf
 
 ;--------------------------------------------------------------
-; Phase 2: copy every field computed above into the real,
-; kernel-resident BPB data block via BPB_DATA_PTR. See this section's
-; own header comment above for why this is deliberately one simple,
-; uniform pass rather than interleaved into Phase 1.
+; Phase 2: copy every field computed above into drive_bpb_table[idx]
+; -- boot_bpb_base was already set to that entry's real address by
+; the per-iteration preamble earlier in the loop (both the present
+; and absent branches set it before reaching here). Every instruction
+; from here through the fat_csec copy is byte-identical to the
+; original single-partition version; only what boot_bpb_base points
+; at has changed.
 ;--------------------------------------------------------------
-            mov         rf,BPB_DATA_PTR
-            lda         rf
-            phi         rd
-            ldn         rf
-            plo         rd                  ; RD = BPB block's real,
-                                            ; link-time-resolved address
-
-            mov         rf,boot_bpb_base
-            ghi         rd
-            str         rf
-            inc         rf
-            glo         rd
-            str         rf                  ; boot_bpb_base = block address
+boot_drive_copy:
 
             ; part1_lba (3 bytes)
             mov         rd,boot_bpb_base
@@ -618,12 +766,38 @@ boot_spc_done:
             ldn         ra
             str         rf
 
+; ---- advance to the next drive; loop while idx < DRIVE_COUNT ----
+            mov         rf,boot_drive_idx
+            ldn         rf
+            adi         1
+            str         rf
+            smi         DRIVE_COUNT
+            lbnf        boot_drive_loop     ; DF=0: still < DRIVE_COUNT
+
 ;--------------------------------------------------------------
-; end of inlined bpb_init
+; end of inlined, multi-partition bpb_init
 ;--------------------------------------------------------------
 
             call        K_FAT_INIT          ; invalidate FAT cache, clear dirty flag
             call        K_FILE_INIT         ; mark all FCB slots as free
+
+            ; K_SHELL_INIT (2026-07-13): locate "C:/bin/shell"'s own
+            ; directory entry and cache its (drive, sector LBA, byte
+            ; offset) into shell_drive/shell_elba/shell_eoff -- see
+            ; kernel.asm's own kernel_shell_init for the full mechanism
+            ; and why (run_loop's own reload of the shell every command
+            ; cycle reads that cached location directly instead of a
+            ; full directory scan each time). Needs fd_table already
+            ; zeroed (K_FILE_INIT, just above), and works correctly
+            ; this early -- before kernel_init's own cur_drive/
+            ; drive_cur_dir zero-init has run -- only because the path
+            ; it searches always has an explicit "C:" prefix (see
+            ; kernel_shell_init's own header comment).
+            call        K_SHELL_INIT
+            lbdf        boot_no_shell_err   ; "C:/bin/shell" missing or
+                                            ; invalid: fatal, same
+                                            ; severity as any other
+                                            ; boot-time failure here
 
             call        f_inmsg
             db          "Type a command.",13,10,0
@@ -631,14 +805,19 @@ boot_spc_done:
             lbr         KERN_ENTRY          ; continue into kernel_init proper
 
 ;--------------------------------------------------------------
-; boot_init2 error handler -- relocated from kernel.asm's kern_err,
+; boot_init2 error handlers -- relocated from kernel.asm's kern_err,
 ; same message and behavior, just physically moved here along with
-; the check that reaches it.
+; the checks that reach them.
 ;--------------------------------------------------------------
 boot_kern_err:
             call        f_inmsg
             db          "Kernel init failed",13,10,0
 boot_kern_halt:
+            lbr         boot_kern_halt
+
+boot_no_shell_err:
+            call        f_inmsg
+            db          "No shell on C:.",13,10,0
             lbr         boot_kern_halt
 
 ;--------------------------------------------------------------
@@ -662,6 +841,12 @@ boot_spf:           dw      0
 boot_max_clust:     dw      0
 boot_fat_csec:      dw      0
 boot_bpb_base:      dw      0
+boot_drive_idx:     db      0           ; loop counter, 0..DRIVE_COUNT-1
+boot_drive_base:    dw      0           ; DRIVE_DATA_PTR's resolved
+                                        ; address (drive_present[0]),
+                                        ; read once before the loop
+boot_present_addr:  dw      0           ; this iteration's own
+                                        ; &drive_present[idx]
 boot_scratch:       ds      512
 
 ;--------------------------------------------------------------

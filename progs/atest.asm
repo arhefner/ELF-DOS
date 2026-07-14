@@ -47,14 +47,18 @@ start:
 
 have_name:
             mov     rf, ra              ; RF = filename
+            mov     rd, atest_fcb       ; RD = our FCB struct
+            mov     ra, atest_iobuf     ; RA = our I/O buffer (movs
+                                        ; before the mode load below,
+                                        ; since mov clobbers D)
             ldi     2                   ; mode = append
-            call    K_FILE_OPEN         ; D = FCB index, DF=0/1
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    not_found
 
-            plo     rd                  ; stash FCB index (mov below clobbers D)
-            mov     rf, atest_fcb
+            plo     rd                  ; stash handle (mov below clobbers D)
+            mov     rf, atest_handle
             glo     rd
-            str     rf                  ; atest_fcb = FCB index
+            str     rf                  ; atest_handle = handle
 
             mov     rf, remaining
             ldi     REPEAT_COUNT
@@ -72,9 +76,9 @@ write_loop:
             phi     rc                  ; RC = byte count
 
             ; see progs/wtest.asm's own note: RD (not RF) is used to
-            ; fetch the FCB index so RF stays pointed at test_line
-            mov     rd, atest_fcb
-            ldn     rd                  ; D = FCB index, RF untouched
+            ; fetch the handle so RF stays pointed at test_line
+            mov     rd, atest_handle
+            ldn     rd                  ; D = handle, RF untouched
             call    K_FILE_WRITE        ; RC = bytes written, DF=0/1
             lbdf    write_error
 
@@ -86,7 +90,7 @@ write_loop:
             lbr     write_loop
 
 write_done:
-            mov     rd, atest_fcb
+            mov     rd, atest_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -95,7 +99,7 @@ write_done:
             rtn
 
 write_error:
-            mov     rd, atest_fcb
+            mov     rd, atest_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -110,7 +114,9 @@ not_found:
             rtn
 
 test_line:      db      "abcdefghij",10
-atest_fcb:      db      0
+atest_fcb:      ds      FCB_LEN
+atest_iobuf:    ds      FCB_IOBUF_LEN
+atest_handle:   db      0
 remaining:      db      0
 
             end     start

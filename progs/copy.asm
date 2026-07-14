@@ -20,9 +20,11 @@
 ;
 ; Copying a file onto itself is not specially detected or guarded
 ; against -- it will open the same file twice, for read and write
-; simultaneously, and produce garbled results (this hardware's
-; single shared io_buf sector cache means only one FCB's sector can
-; be resident at a time). Don't do that.
+; simultaneously (each with its own independent FCB and I/O buffer,
+; 2026-07-15), but the mode-1 destination open truncates the file to
+; empty immediately (see file_open's own mode-1 semantics), which
+; destroys the source's real content out from under the read side
+; regardless of separate buffers. Don't do that.
 ;
 
 #include    include/opcodes.def
@@ -36,21 +38,24 @@ COPY_CHUNK_LEN: equ     512     ; matches the sector size -- was 64,
                                 ; changing it earlier would have shifted
                                 ; the cluster-boundary alignment of the
                                 ; test cases that exposed that bug.
-                                ; Also cuts real disk I/O, not just call
-                                ; overhead: file_read/file_write share a
-                                ; SINGLE io_buf slot across FCBs (see
-                                ; this file's own header comment), so
-                                ; every alternation between the src and
-                                ; dst FCBs evicts the other's cached
-                                ; sector -- at the old 64-byte chunk
-                                ; size, copying one 512-byte sector took
-                                ; 8 iterations x (1 disk read to reload
-                                ; src's sector + 1 disk read to reload
-                                ; dst's for read-modify-write + 1 disk
-                                ; write) = 24 real disk operations. One
-                                ; 512-byte chunk per sector cuts that to
-                                ; 3 -- an 8x reduction in actual disk
-                                ; I/O, not just kernel-call overhead.
+                                ; At the time this was bumped, it also
+                                ; cut real disk I/O, not just call
+                                ; overhead: file_read/file_write used to
+                                ; share a SINGLE io_buf slot across all
+                                ; FCBs, so every alternation between the
+                                ; src and dst FCBs evicted the other's
+                                ; cached sector -- at the old 64-byte
+                                ; chunk size, copying one 512-byte sector
+                                ; took 8 iterations x 3 real disk ops
+                                ; each = 24 total. One 512-byte chunk
+                                ; per sector cut that to 3. Since
+                                ; 2026-07-15, src/dst each have their own
+                                ; independent FCB and I/O buffer (see
+                                ; below), so this specific thrashing no
+                                ; longer applies either way -- but 512
+                                ; still means 8x fewer K_FILE_READ/
+                                ; K_FILE_WRITE round-trips than 64 did,
+                                ; so the chunk size stayed as-is.
 DST_BUF_LEN:    equ     132
 
             org     PROG_BASE
@@ -124,19 +129,23 @@ have_dst:
             ldn     rf
             str     rb                  ; real_dst = dst_ptr (default)
 
-            ; load dst_ptr's string value into RC before K_GETCURDIR
-            ; clobbers RD
+            ; load dst_ptr's string value into RC, then RF, for
+            ; K_PATH_RESOLVE (which no longer takes a base-cluster
+            ; argument -- it determines that, and the target drive,
+            ; internally now; see kernel_api.inc)
             mov     rf, dst_ptr
             lda     rf
             phi     rc
             ldn     rf
             plo     rc                  ; RC = destination string pointer
 
-            call    K_GETCURDIR         ; RD = current directory cluster
             mov     rf, rc              ; RF = destination path
             call    K_PATH_RESOLVE      ; RD = parent cluster, RF = final
-                                        ; component, DF = 0/1
-            lbdf    dst_not_dir         ; bad intermediate component
+                                        ; component, RC.0 = resolved
+                                        ; drive (unused here), DF = 0/1
+            lbdf    dst_not_dir         ; bad intermediate component, or
+                                        ; an "X:" prefix named an
+                                        ; unmounted drive
 
             ; an empty final component means dst_ptr itself named a
             ; directory ("/", "cfg/", ...) -- no further lookup needed
@@ -281,14 +290,23 @@ dst_not_dir:
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, rd
+            mov     rf, rd              ; RF = destination path string
+            mov     rd, dst_fcb         ; RD = our dst_fcb struct (reused
+                                        ; below for the REAL destination
+                                        ; open too -- this existence-
+                                        ; check FCB is always closed
+                                        ; before that happens, so the
+                                        ; memory is free to reuse; movs
+                                        ; before the mode load since mov
+                                        ; itself clobbers D, gotcha #4)
+            mov     ra, dst_iobuf       ; RA = our dst_iobuf buffer
             ldi     0                   ; mode = read (existence check)
-            call    K_FILE_OPEN         ; D = FCB index, DF = 0/1
+            call    K_FILE_OPEN         ; D = handle, DF = 0/1
             lbdf    dst_check_done      ; not found (or a directory):
                                         ; proceed directly, nothing to
                                         ; close
 
-            ; D still holds the FCB index K_FILE_OPEN just returned
+            ; D still holds the handle K_FILE_OPEN just returned
             ; (lbdf above doesn't touch D) -- file_close takes it
             ; directly in D, not RF, so no stash/reload is even needed
             call    K_FILE_CLOSE
@@ -338,15 +356,17 @@ dst_check_done:
             ldn     rf
             plo     rd
             mov     rf, rd              ; RF = source string
+            mov     rd, src_fcb         ; RD = our src_fcb struct
+            mov     ra, src_iobuf       ; RA = our src_iobuf buffer
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; D = FCB index, DF=0/1
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    src_not_found
 
-            plo     rd                  ; stash FCB index (mov below
+            plo     rd                  ; stash handle (mov below
                                         ; clobbers D)
-            mov     rf, src_fcb
+            mov     rf, src_handle
             glo     rd
-            str     rf                  ; src_fcb = FCB index
+            str     rf                  ; src_handle = handle
 
             ; --- open destination (mode 1, create-or-overwrite) ---
             mov     rf, real_dst
@@ -355,14 +375,18 @@ dst_check_done:
             ldn     rf
             plo     rd
             mov     rf, rd              ; RF = destination string
+            mov     rd, dst_fcb         ; RD = our dst_fcb struct (same
+                                        ; memory as the existence check
+                                        ; above -- already closed there)
+            mov     ra, dst_iobuf       ; RA = our dst_iobuf buffer
             ldi     1                   ; mode = write
-            call    K_FILE_OPEN         ; D = FCB index, DF=0/1
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    dst_open_error
 
             plo     rd
-            mov     rf, dst_fcb
+            mov     rf, dst_handle
             glo     rd
-            str     rf                  ; dst_fcb = FCB index
+            str     rf                  ; dst_handle = handle
 
 ;------------------------------------------------------------------
 ; Copy loop: read a chunk from source, write the same chunk (exact
@@ -378,8 +402,8 @@ copy_loop:
                                         ; immediate directly -- low/high
                                         ; split, same pattern loader.asm
                                         ; already uses for PROG_BASE)
-            mov     rd, src_fcb
-            ldn     rd                  ; D = FCB index, RF untouched
+            mov     rd, src_handle
+            ldn     rd                  ; D = handle, RF untouched
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    read_error
 
@@ -392,18 +416,18 @@ have_bytes:
                                         ; holds the byte count from
                                         ; K_FILE_READ -- mov only
                                         ; touches RF/D, not RC)
-            mov     rd, dst_fcb
-            ldn     rd                  ; D = FCB index, RF untouched
+            mov     rd, dst_handle
+            ldn     rd                  ; D = handle, RF untouched
             call    K_FILE_WRITE        ; DF=0/1
             lbdf    write_error
 
             lbr     copy_loop
 
 copy_done:
-            mov     rd, src_fcb
+            mov     rd, src_handle
             ldn     rd
             call    K_FILE_CLOSE
-            mov     rd, dst_fcb
+            mov     rd, dst_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -412,10 +436,10 @@ copy_done:
             rtn
 
 read_error:
-            mov     rd, src_fcb
+            mov     rd, src_handle
             ldn     rd
             call    K_FILE_CLOSE
-            mov     rd, dst_fcb
+            mov     rd, dst_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -424,10 +448,10 @@ read_error:
             rtn
 
 write_error:
-            mov     rd, src_fcb
+            mov     rd, src_handle
             ldn     rd
             call    K_FILE_CLOSE
-            mov     rd, dst_fcb
+            mov     rd, dst_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -436,7 +460,7 @@ write_error:
             rtn
 
 dst_open_error:
-            mov     rd, src_fcb
+            mov     rd, src_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -466,8 +490,23 @@ usage_error:
 src_ptr:    dw      0
 dst_ptr:    dw      0
 real_dst:   dw      0
-src_fcb:    db      0
-dst_fcb:    db      0
+
+; CALLER-ALLOCATED FCBs (2026-07-15): src_fcb/dst_fcb are the real FCB
+; memory now (K_FILE_OPEN's RD arg), each with its own private
+; FCB_IOBUF_LEN I/O buffer (RA arg) -- this is the whole point for
+; COPY specifically, since src and dst no longer share and thrash a
+; single kernel-resident buffer. src_handle/dst_handle hold the small-
+; integer handles K_FILE_OPEN returns, passed to K_FILE_CLOSE/READ/
+; WRITE exactly as before. dst_fcb/dst_iobuf are reused for both the
+; destination-exists check and the real destination open -- the first
+; is always closed before the second happens.
+src_fcb:    ds      FCB_LEN
+src_iobuf:  ds      FCB_IOBUF_LEN
+src_handle: db      0
+dst_fcb:    ds      FCB_LEN
+dst_iobuf:  ds      FCB_IOBUF_LEN
+dst_handle: db      0
+
 dstchk_arg: dw      0
 dstchk_result: ds   DIRENT_LEN
 dst_final:  ds      DST_BUF_LEN

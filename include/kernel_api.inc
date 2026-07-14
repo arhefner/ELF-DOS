@@ -8,10 +8,17 @@
 ;
 ; The table itself lives at a fixed address ($0106, the same address
 ; the boot chain has always jumped to) in kernel/kernel.asm. Each
-; slot is a 3-byte 'lbr' to the real routine, so these addresses are
-; a stable contract: new entries are only ever APPENDED here, never
-; reordered or removed, so a program built against an older kernel
-; keeps working after the kernel is rebuilt.
+; slot is a 3-byte 'lbr' to the real routine. Once this project
+; releases, these addresses become a stable contract (new entries only
+; ever APPENDED, never reordered or removed, so a program built
+; against an older kernel keeps working after a rebuild) -- but until
+; then, EVERY program in this repo is rebuilt from source on every
+; `make progs`, so nothing external depends on today's addresses.
+; 2026-07-13's pre-release cleanup pass (removing K_BPB_INIT/
+; K_PROG_LOAD/K_PROG_EXEC, adding K_SHELL_INIT/K_GETSHELLDRIVE, and
+; renumbering the whole table sequentially rather than leaving gaps)
+; deliberately used this last mutable window; don't repeat that kind
+; of full renumber after release.
 ;
 ; Calling convention for every slot: identical to the real routine it
 ; forwards to (see kernel/file.asm, kernel/dir.asm, kernel/loader.asm,
@@ -64,7 +71,32 @@ RUN_PATH_LEN:   equ     64              ; RUN_PATH's own size, for
 
 K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
 
+; FCB_LEN/FCB_IOBUF_LEN: sizes only, not the field layout (which stays
+; kernel-internal, see kernel.inc's own FCB_* offsets) -- same
+; "publish a size, not the struct" precedent as DIRENT_LEN below.
+; CALLER-ALLOCATED FCBs (2026-07-15): a program declares its own
+; `ds FCB_LEN` (the FCB itself) and `ds FCB_IOBUF_LEN` (that FCB's own
+; private 512-byte sector buffer) per file it wants open at once, and
+; passes both pointers to K_FILE_OPEN. The kernel still hands back a
+; plain small-integer handle (same as always -- needed for the future
+; ELFC C library's own low-level I/O convention), now backed by an
+; 8-slot table of pointers instead of a 3-slot table of full FCBs, so
+; the real per-file storage lives in the (much larger) caller's own
+; RAM rather than the kernel's.
+FCB_LEN:        equ     32
+FCB_IOBUF_LEN:  equ     512
+
 ; ---- ELF-DOS kernel calls (see kernel/file.asm, kernel/dir.asm, kernel/loader.asm) ----
+; K_FILE_OPEN:  Args: RF = path, D = mode (0=read, 1=read/write),
+;               RD = pointer to caller's FCB_LEN-byte FCB (need not be
+;               pre-zeroed -- file_open initializes every field),
+;               RA = pointer to caller's FCB_IOBUF_LEN-byte I/O buffer.
+;               Returns: D = handle (small integer, same convention
+;               as before), DF = 0/1.
+; K_FILE_CLOSE/K_FILE_SEEK: Args: D = handle. Returns: DF = 0/1.
+; K_FILE_READ/K_FILE_WRITE: Args: D = handle, RF = data buffer,
+;               RC = byte count. Returns: RC = bytes actually
+;               transferred (read only), DF = 0/1.
 K_FILE_OPEN:    equ     $0109
 K_FILE_CLOSE:   equ     $010C
 K_FILE_READ:    equ     $010F
@@ -72,23 +104,73 @@ K_FILE_WRITE:   equ     $0112
 K_FILE_SEEK:    equ     $0115
 K_DIR_OPEN:     equ     $0118
 K_DIR_READ:     equ     $011B
-K_PROG_LOAD:    equ     $011E
-K_PROG_EXEC:    equ     $0121
-K_GETCURDIR:    equ     $0142       ; RD = current directory cluster (no args)
-K_SETCURDIR:    equ     $0145       ; args: RD = new current directory cluster
 
-; K_PATH_RESOLVE: resolve a '/'-separated path to (parent directory
-; cluster, final path component). A leading '/' resolves from the
-; FAT16 root; otherwise resolution starts from RD (get the current
-; directory via K_GETCURDIR first). Every component except the last
-; is looked up as a directory ('.' and '..' work automatically --
-; real FAT entries, no special-casing needed); the last component is
-; NOT looked up here -- the caller decides what to do with it (e.g.
-; search for a file vs. a directory).
+; K_PROG_LOAD/K_PROG_EXEC: REMOVED 2026-07-13 (pre-release jump-table
+; cleanup). Neither could ever be safely called by a program while it
+; was running -- loading a second program to PROG_BASE overwrites the
+; caller's own currently-executing code, the exact constraint that
+; already forced the shell hand-off protocol (RUN_PATH/RUN_TAIL_PTR)
+; in the first place. Confirmed via repo-wide grep that the only
+; callers were kernel.asm's own run_loop, via direct same-link-unit
+; calls, never through this table. Collapsed internally into a single
+; kernel-private routine (prog_run, kernel/loader.asm) with no
+; jump-table exposure at all, since nothing external could ever call
+; it. Safe to remove outright (not just leave a stub) because nothing
+; in this repo depends on today's addresses yet -- see K_BPB_INIT's
+; own removal note below for the same reasoning. (See the "BIOS
+; passthroughs" section further down for K_TYPE through K_SETBD,
+; which now start at $011E, immediately after K_DIR_READ, instead of
+; $0124.)
+
+; K_GETCURDIR/K_SETCURDIR/K_SETDRIVE/K_GETSHELLDRIVE: multi-drive
+; current-directory state (2026-07-13). Classic MS-DOS semantics,
+; adopted deliberately: CD-style directory changes and drive switches
+; are two separate operations. K_SETCURDIR sets a given drive's OWN
+; remembered directory and never changes which drive is active --
+; "CD D:\games" while C: is active updates D's directory without
+; switching to it. The ONLY way the active drive itself changes is
+; K_SETDRIVE, which the shell calls directly from a bare "C:"/"D:"/
+; "E:"/"F:" command line (see progs/shell.asm) -- never from CD.
+;
+; K_GETCURDIR: no args.
+;   Returns: RD = the ACTIVE drive's current directory cluster
+;            (0 = that drive's root), D = cur_drive (0-3, 0=C..3=F)
+; K_SETCURDIR: Args: D = drive index (0-3), RD = new directory
+;   cluster for THAT drive. Returns: nothing. Does not touch which
+;   drive is active, even if D != the active drive.
+; K_SETDRIVE: Args: D = drive index (0-3) to make active.
+;   Returns: DF = 0 on success, DF = 1 if that drive has no mounted
+;   partition (drive_present[D]=0) -- nothing changes in that case.
+; K_GETSHELLDRIVE: no args. Returns: D = shell_drive (0-3), the drive
+;   the shell binary itself was found on at boot (see K_SHELL_INIT
+;   below) -- almost always 0 (C:) in practice. Used by progs/shell.asm
+;   to build a fallback "<shell_drive>:/bin/<name>" candidate when a
+;   bare command name isn't found on the active drive, so ordinary
+;   commands work from any drive without needing /bin duplicated
+;   everywhere.
+K_GETCURDIR:    equ     $013C
+K_SETCURDIR:    equ     $013F
+K_SETDRIVE:     equ     $0142
+K_GETSHELLDRIVE: equ    $0145
+
+; K_PATH_RESOLVE: resolve a '/'-separated path, optionally prefixed
+; with a drive letter, to (parent directory cluster, final path
+; component, resolved drive). An optional 2-character "X:" prefix
+; (C:-F:, case-insensitive) names the target drive; absent, the
+; target drive is cur_drive. After any prefix, a leading '/' resolves
+; from that drive's FAT16 root; otherwise resolution starts from that
+; drive's OWN remembered current directory (drive_cur_dir[target] --
+; NOT necessarily the active drive's directory, per the K_SETCURDIR
+; semantics above). Internally switches the active BPB/FAT-cache to
+; the target drive (see _switch_drive, kernel-internal) before doing
+; any lookup that depends on it -- a no-op if that drive is already
+; active. Every component except the last is looked up as a directory
+; ('.' and '..' work automatically -- real FAT entries, no special-
+; casing needed); the last component is NOT looked up here -- the
+; caller decides what to do with it (e.g. search for a file vs. a
+; directory).
 ;
 ; Args:    RF = pointer to null-terminated path string (not modified)
-;          RD = base cluster for relative paths (ignored if the path
-;               has a leading '/')
 ; Returns: RD = resolved parent directory cluster
 ;          RF = pointer to the final path component, null-terminated.
 ;               Points into kernel scratch memory -- same convention
@@ -98,8 +180,11 @@ K_SETCURDIR:    equ     $0145       ; args: RD = new current directory cluster
 ;               a separator (the resolved RD cluster IS the target
 ;               in that case -- e.g. CD should skip straight to
 ;               K_SETCURDIR rather than searching for an empty name).
+;          RC.0 = resolved drive index (0-3, 0=C..3=F)
 ;          DF = 0 on success, DF = 1 if an intermediate component
-;               was not found, or was found but is not a directory
+;               was not found, was found but is not a directory, or
+;               an explicit "X:" prefix named a drive with no mounted
+;               partition
 K_PATH_RESOLVE: equ     $0148
 
 ; K_FILE_DELETE: delete a file (not a directory -- rejected).
@@ -171,25 +256,25 @@ ATTR_DIR:       equ     $10         ; DIRENT_ATTR bit set for subdirectories
 ; Calling through here rather than directly into BIOS means a program
 ; has no dependency on the raw BIOS vector table, and gives ELF-DOS a
 ; hook point for future I/O redirection.
-K_TYPE:         equ     $0124       ; -> f_type
-K_MSG:          equ     $0127       ; -> f_msg
-K_INMSG:        equ     $012A       ; -> f_inmsg
-K_GETDEV:       equ     $012D       ; -> f_getdev
-K_GETTOD:       equ     $0130       ; -> f_gettod
-K_SETTOD:       equ     $0133       ; -> f_settod
-K_INPUTL:       equ     $0136       ; -> f_inputl
-K_BOOT:         equ     $0139       ; -> f_boot
-K_TTY:          equ     $013C       ; -> f_tty
-K_SETBD:        equ     $013F       ; -> f_setbd
+K_TYPE:         equ     $011E       ; -> f_type
+K_MSG:          equ     $0121       ; -> f_msg
+K_INMSG:        equ     $0124       ; -> f_inmsg
+K_GETDEV:       equ     $0127       ; -> f_getdev
+K_GETTOD:       equ     $012A       ; -> f_gettod
+K_SETTOD:       equ     $012D       ; -> f_settod
+K_INPUTL:       equ     $0130       ; -> f_inputl
+K_BOOT:         equ     $0133       ; -> f_boot
+K_TTY:          equ     $0136       ; -> f_tty
+K_SETBD:        equ     $0139       ; -> f_setbd
 K_READ:         equ     $0157       ; -> f_read: blocking read of a single
                                     ; character from the console, returned
                                     ; in D. Standard Elf/OS BIOS contract,
                                     ; confirmed on hardware 2026-07-10 via
                                     ; COPY's overwrite-confirmation prompt.
 
-; K_BPB_INIT/K_FAT_INIT/K_FILE_INIT: reserved -- boot-only one-time init,
-; called exactly once each by boot/krnboot.asm's relocated init code
-; (see that file's own header comment), not meant to be called by
+; K_FAT_INIT/K_FILE_INIT/K_SHELL_INIT: reserved -- boot-only one-time
+; init, called exactly once each by boot/krnboot.asm's relocated init
+; code (see that file's own header comment), not meant to be called by
 ; ordinary programs (re-running them mid-session would reset live BPB/
 ; FAT-cache/FCB state out from under whatever's currently using it).
 ; Exist as jump-table slots at all only because krnboot.asm is linked
@@ -197,9 +282,28 @@ K_READ:         equ     $0157       ; -> f_read: blocking read of a single
 ; the only way it can reach these kernel-resident routines -- same
 ; reasoning as every other slot in this file, just with a boot-code
 ; caller instead of a program.
-K_BPB_INIT:     equ     $015A       ; -> bpb_init
-K_FAT_INIT:     equ     $015D       ; -> fat_init
-K_FILE_INIT:    equ     $0160       ; -> file_init
+;
+; K_BPB_INIT REMOVED 2026-07-13 (pre-release cleanup): its own
+; jump-table slot had already been a no-op stub since the multi-sector
+; krnboot expansion (bpb_init's real body moved into krnboot.asm
+; itself, which reaches the BPB fields directly via BPB_DATA_PTR
+; instead) -- grep confirmed zero remaining callers, so the dead stub
+; is now removed outright rather than kept as a stub forever.
+;
+; K_SHELL_INIT (new): locates the shell binary's own directory entry
+; once at boot (always "C:/bin/shell" -- see kernel.inc's own
+; shell_drive/shell_elba/shell_eoff comment) via _find_dirent, and
+; records its (drive, sector LBA, byte offset within that sector) into
+; those three kernel-resident fields, rather than a path string --
+; run_loop's own reload of the shell every command cycle then reads
+; that ONE known sector directly instead of re-walking a directory
+; scan every time (see kernel/loader.asm's prog_run_shell). Args:
+; none. Returns: DF = 0 on success (shell_drive/shell_elba/shell_eoff
+; populated), DF = 1 if "C:/bin/shell" doesn't exist or isn't a file
+; -- boot/krnboot.asm treats DF = 1 as a fatal boot error.
+K_FAT_INIT:     equ     $015A       ; -> fat_init
+K_FILE_INIT:    equ     $015D       ; -> file_init
+K_SHELL_INIT:   equ     $0160       ; -> kernel_shell_init
 
 ; K_SECWRITE/K_SECREAD: raw 512-byte sector read/write by LBA, bypassing
 ; the FAT16 filesystem entirely -- direct passthroughs to the same BIOS
@@ -258,6 +362,35 @@ BPBBLK_LEN:        equ  23         ; total block size
 BPB_DATA_PTR:      equ  $016C      ; 2-byte pointer to the block's
                                     ; start (part1_lba's real address)
 
+; DRIVE_DATA_PTR: same mechanism as BPB_DATA_PTR above, for the
+; multi-partition boot-time scan (2026-07-13). Points at
+; drive_present[0..DRIVE_COUNT-1] (1 byte each, presence flags)
+; immediately followed by drive_bpb_table[0..DRIVE_COUNT-1]
+; (BPBBLK_LEN bytes each, contiguous, same "point at the block's
+; start" convention) -- krnboot's own relocated partition-scan loop
+; writes both regions through this one pointer, one drive at a time.
+; Its reach extends 6 more bytes past drive_bpb_table (still
+; contiguous) to shell_drive/shell_elba/shell_eoff -- boot-discovered
+; facts in the same spirit as drive_present, populated once by
+; K_SHELL_INIT (see below) rather than the partition-scan loop itself,
+; but reusing this same pointer rather than adding a second one. Does
+; NOT reach drive_cur_dir/cur_drive/active_bpb_drive -- those are
+; session state, not boot-time facts, and are initialized by
+; kernel_init instead (see kernel.asm).
+DRIVE_COUNT:       equ  4          ; C:, D:, E:, F:
+DRIVE_DATA_PTR:    equ  $016E      ; 2-byte pointer to drive_present's
+                                    ; real address
+DRIVE_PRESENT_LEN: equ  DRIVE_COUNT            ; 4 bytes
+DRIVE_BPB_TABLE_OFF: equ DRIVE_COUNT           ; drive_bpb_table starts
+                                                ; this many bytes after
+                                                ; DRIVE_DATA_PTR's target
+SHELL_DATA_OFF: equ     DRIVE_COUNT + DRIVE_COUNT*BPBBLK_LEN
+                                                ; shell_drive (then
+                                                ; shell_elba, then
+                                                ; shell_eoff) starts
+                                                ; this many bytes after
+                                                ; DRIVE_DATA_PTR's target
+
 ; Raw FAT16 VBR/BPB and MBR partition-table field offsets, restated
 ; from kernel.inc for the same reason as BPBBLK_*/BPB_DATA_PTR above --
 ; krnboot's own relocated bpb_init body needs these to parse the raw
@@ -268,7 +401,12 @@ BPB_RSVD:       equ     $0E         ; reserved sector count (word)
 BPB_NFAT:       equ     $10         ; number of FATs (byte)
 BPB_ROOTENT:    equ     $11         ; root directory entry count (word)
 BPB_SPF:        equ     $16         ; sectors per FAT (word)
-PT_OFFSET:      equ     $01BE       ; partition table offset within MBR
+PT_OFFSET:      equ     $01BE       ; partition table entry 0 (drive C)
+                                    ; offset within the MBR
+PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
+                                    ; partition-table entries -- entry i
+                                    ; (drive C+i) starts at
+                                    ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $016E
+; next free jump-table slot address: $0170

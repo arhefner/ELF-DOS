@@ -74,19 +74,24 @@ LINE_BUF:       equ     $0080       ; shell command input buffer (128 bytes)
 LOADER_ARGS:    equ     PROG_BASE-4
 
 ; RUN_TAIL_PTR/RUN_PATH: the shell-as-a-program handoff protocol. The
-; kernel can't let the shell call K_PROG_LOAD/K_PROG_EXEC itself to run
-; a child command -- the shell runs FROM PROG_BASE, so loading a child
-; there would overwrite the shell's own currently-executing code before
-; the child's own "rtn" could ever return into it. Instead, the shell's
-; only job each round is: read a command line, resolve it to a path
-; (bare name -> "/bin/"+name; a name containing '/' -> used as-is,
-; loaded directly), write that path + the tail's location here, and
-; return normally -- the KERNEL's own small run_loop (kernel_init, see
-; kernel.asm) is what actually calls prog_load/prog_exec for the real
-; command, staying safely in kernel memory throughout. Fixed addresses,
-; not normal linked symbols, for the same reason LOADER_ARGS is fixed:
-; progs/shell.asm is assembled and linked completely separately from
-; the kernel and needs an address stable across kernel rebuilds.
+; kernel can't let the shell load and run a child command itself -- the
+; shell runs FROM PROG_BASE, so loading a child there would overwrite
+; the shell's own currently-executing code before the child's own
+; "rtn" could ever return into it (the same reason the collapsed
+; prog_run/prog_run_shell, kernel/loader.asm, have no jump-table slot
+; at all -- nothing could ever call them safely except the kernel's
+; own run_loop). Instead, the shell's only job each round is: read a
+; command line, resolve it to a path AND CONFIRM IT EXISTS (bare name
+; -> "/bin/"+name on the active drive, falling back to the shell's own
+; drive if not found there; a name containing '/' -> used as-is,
+; checked once, no fallback), write that path + the tail's location
+; here, and return normally -- the KERNEL's own small run_loop
+; (kernel_init, see kernel.asm) is what actually calls prog_run for
+; the real command, staying safely in kernel memory throughout. Fixed
+; addresses, not normal linked symbols, for the same reason
+; LOADER_ARGS is fixed: progs/shell.asm is assembled and linked
+; completely separately from the kernel and needs an address stable
+; across kernel rebuilds.
 RUN_TAIL_PTR:   equ     PROG_BASE-6     ; 2 bytes: pointer into LINE_BUF
                                         ; where the command tail starts
 RUN_PATH:       equ     PROG_BASE-70    ; 64-byte buffer: resolved path
@@ -181,11 +186,29 @@ BPBBLK_MAX_CLUST:   equ     19          ; 2 bytes
 BPBBLK_FAT_CSEC:    equ     21          ; 2 bytes
 BPBBLK_LEN:         equ     23          ; total block size
 
+; DRIVE_COUNT: number of possible drives (C:/D:/E:/F:), i.e. the size
+; of drive_present/drive_bpb_table/drive_cur_dir in kernel.asm and the
+; bound of boot/krnboot.asm's own partition-scan loop (see
+; kernel_api.inc's DRIVE_DATA_PTR comment for the boot-time mechanism).
+DRIVE_COUNT:        equ     4
+
 ; ----------------------------------------------------------------
 ; FCB (File Control Block) structure offsets
 ;
-; Each FCB is FCB_LEN bytes.  The kernel maintains FCB_COUNT
-; FCBs in a static table (fcb_table).
+; Each FCB is FCB_LEN bytes. CALLER-ALLOCATED (2026-07-15): the
+; kernel no longer maintains a fixed-size table of full FCBs -- the
+; caller (a program, or the kernel's own prog_run for its one
+; internal need) owns the memory and passes a pointer to file_open.
+; Handles stay small integers, exactly as before (needed for the
+; future ELFC C library's own low-level I/O convention): file_open
+; registers the caller's FCB pointer into a small kernel-resident
+; table of just POINTERS (fd_table, FD_COUNT slots, see below) and
+; returns the slot index; file_close/file_read/file_write/file_seek
+; still take that same index, now resolved via one extra pointer
+; dereference instead of a direct fcb_table-relative computation.
+; This raises the old hard 3-concurrent-file ceiling to FD_COUNT (8)
+; while making the kernel-resident table itself smaller (FD_COUNT*2
+; bytes of pointers vs. the old FCB_COUNT*32 bytes of full FCBs).
 ;
 ; File size and position are stored as 4-byte big-endian values.
 ; On this 16K-64K machine the high words will normally be zero,
@@ -204,11 +227,31 @@ FCB_ELBA:       equ     16          ; directory entry's sector LBA (3 bytes,
                                     ; by file_open from the same values
 FCB_EOFF:       equ     19          ; entry's byte offset within that
                                     ; sector (2 bytes, big-endian, 0-511)
-FCB_LEN:        equ     32          ; total FCB size (padded from the 21
-                                    ; bytes actually used up to the next
-                                    ; power of 2, so index*FCB_LEN can
-                                    ; stay a simple 5-shift multiply --
-                                    ; see file.asm)
+FCB_IOBUF:      equ     21          ; pointer (2 bytes) to this FCB's own
+                                    ; caller-supplied 512-byte sector
+                                    ; buffer -- set by file_open from its
+                                    ; RA argument. Replaces the old single
+                                    ; shared io_buf/io_owner mechanism:
+                                    ; each FCB now has its own buffer, so
+                                    ; two FCBs alternating access (e.g.
+                                    ; COPY's src read / dst write loop)
+                                    ; no longer evict each other's cached
+                                    ; sector.
+FCB_DRIVE:      equ     23          ; drive index (1 byte, 0=C..3=F) this
+                                    ; FCB was opened against -- set by
+                                    ; file_open from path_resolve's
+                                    ; resolved drive. file_read/write/
+                                    ; seek/close each call _switch_drive
+                                    ; on this before touching any BPB/FAT
+                                    ; state, so two FCBs on different
+                                    ; drives can be interleaved correctly
+                                    ; (e.g. COPY between drives) -- see
+                                    ; fat.asm's _switch_drive.
+FCB_LEN:        equ     32          ; total FCB size (21 original bytes +
+                                    ; 2 for FCB_IOBUF + 1 for FCB_DRIVE =
+                                    ; 24, still comfortably inside the
+                                    ; power-of-2 padding to 32 -- no
+                                    ; growth needed)
 
 ; FCB flag bits
 FCB_F_OPEN:     equ     $01         ; slot is in use
@@ -220,9 +263,18 @@ FCB_F_DIRTY:    equ     $04         ; io_buf holds data not yet written to disk
 FCB_F_SIZECHG:  equ     $08         ; FCB_FSIZE grew since open; the
                                     ; directory entry's size field needs
                                     ; rewriting at file_close (see FCB_ELBA)
+FCB_F_IOVALID:  equ     $10         ; this FCB's own IOBUF currently holds
+                                    ; a real, current sector (set after a
+                                    ; real disk read; cleared on open,
+                                    ; on any cluster/sector wrap, and on
+                                    ; seek). Per-FCB replacement for the
+                                    ; old global io_owner comparison.
 
-; Number of simultaneous open files
-FCB_COUNT:      equ     3
+; fd_table: kernel-resident array of FD_COUNT pointers (see
+; kernel/kernel.asm) -- file_open registers a caller's FCB pointer
+; into a free (zero) slot here and returns the slot index; a real
+; FCB's address is never 0, so 0 unambiguously means "free."
+FD_COUNT:       equ     8
 
 ; ----------------------------------------------------------------
 ; Path and drive conventions

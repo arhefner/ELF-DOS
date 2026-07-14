@@ -43,14 +43,18 @@ start:
 
 have_name:
             mov     rf, ra              ; RF = filename
+            mov     rd, wtest_fcb       ; RD = our FCB struct
+            mov     ra, wtest_iobuf     ; RA = our I/O buffer (movs
+                                        ; before the mode load below,
+                                        ; since mov clobbers D)
             ldi     1                   ; mode = read/write
-            call    K_FILE_OPEN         ; D = FCB index, DF=0/1
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    not_found
 
-            plo     rd                  ; stash FCB index (mov below clobbers D)
-            mov     rf, wtest_fcb
+            plo     rd                  ; stash handle (mov below clobbers D)
+            mov     rf, wtest_handle
             glo     rd
-            str     rf                  ; wtest_fcb = FCB index
+            str     rf                  ; wtest_handle = handle
 
             mov     rf, remaining
             ldi     REPEAT_COUNT
@@ -69,11 +73,11 @@ write_loop:
 
             ; BUG FIX (see progs/type.asm): file_write needs RF
             ; pointed at the source buffer (test_line, set above) AND
-            ; D = FCB index at the same time -- fetching the index
-            ; via "mov rf, wtest_fcb" would clobber RF away from
+            ; D = handle at the same time -- fetching the handle
+            ; via "mov rf, wtest_handle" would clobber RF away from
             ; test_line, so RD is used instead.
-            mov     rd, wtest_fcb
-            ldn     rd                  ; D = FCB index, RF untouched
+            mov     rd, wtest_handle
+            ldn     rd                  ; D = handle, RF untouched
             call    K_FILE_WRITE        ; RC = bytes written, DF=0/1
             lbdf    write_error
 
@@ -85,7 +89,7 @@ write_loop:
             lbr     write_loop
 
 write_done:
-            mov     rd, wtest_fcb
+            mov     rd, wtest_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -94,7 +98,7 @@ write_done:
             rtn
 
 write_error:
-            mov     rd, wtest_fcb
+            mov     rd, wtest_handle
             ldn     rd
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -109,7 +113,9 @@ not_found:
             rtn
 
 test_line:      db      "0123456789",10
-wtest_fcb:      db      0
+wtest_fcb:      ds      FCB_LEN
+wtest_iobuf:    ds      FCB_IOBUF_LEN
+wtest_handle:   db      0
 remaining:      db      0
 
             end     start

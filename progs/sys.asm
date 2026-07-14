@@ -101,27 +101,36 @@ have_name:
             str     rf                  ; sys_path_ptr = filename pointer
 
             mov     rf, ra              ; RF = filename
+            mov     rd, sys_fcb_struct  ; RD = our FCB struct
+            mov     ra, sys_iobuf       ; RA = our I/O buffer -- movs
+                                        ; before the mode load below,
+                                        ; since mov clobbers D (this is
+                                        ; safe even though sys_path_ptr
+                                        ; already captured RA's INCOMING
+                                        ; value above, since that capture
+                                        ; already happened before this
+                                        ; point)
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; D = FCB index, DF=0/1
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    open_error
 
-            ; BUG-CLASS GUARD: stash the FCB index before "mov rf, ..."
-            ; clobbers D -- saved_fcb is what K_FILE_CLOSE uses below,
+            ; BUG-CLASS GUARD: stash the handle before "mov rf, ..."
+            ; clobbers D -- saved_handle is what K_FILE_CLOSE uses below,
             ; after sys_install (a leaf worker that clobbers everything)
             ; has long since destroyed D's original value.
-            plo     r8                  ; R8.0 = FCB index (temp)
-            mov     rf, saved_fcb
+            plo     r8                  ; R8.0 = handle (temp)
+            mov     rf, saved_handle
             glo     r8
-            str     rf                  ; saved_fcb = FCB index
+            str     rf                  ; saved_handle = handle
 
-            glo     r8                  ; D = FCB index again, for sys_install
+            glo     r8                  ; D = handle again, for sys_install
             call    sys_install         ; D = result code (0 = success)
             ; BUG-CLASS GUARD (see progs/type.asm/wtest.asm): stash the
             ; result before "mov rf, ..." for K_FILE_CLOSE's own arg
             ; setup clobbers D.
             plo     r8                  ; R8.0 = sys_install's result
 
-            mov     rd, saved_fcb
+            mov     rd, saved_handle
             ldn     rd
             call    K_FILE_CLOSE        ; result/DF here intentionally
                                         ; ignored -- sys_install's own
@@ -175,7 +184,9 @@ open_error:
             ldi     1
             rtn
 
-saved_fcb:      db      0
+sys_fcb_struct: ds      FCB_LEN
+sys_iobuf:      ds      FCB_IOBUF_LEN
+saved_handle:   db      0
 sys_path_ptr:   dw      0
 
 ;==================================================================
@@ -202,7 +213,7 @@ sys_path_ptr:   dw      0
 ; read once here and reused as the first sector written, not
 ; discarded and re-read.
 ;
-; Args:    D = FCB index of an already-open file (mode 0 -- read);
+; Args:    D = handle of an already-open file (mode 0 -- read);
 ;          also reads sys_path_ptr (memory, set by the caller in
 ;          progs/sys.asm's own "have_name" before K_FILE_OPEN clobbers
 ;          RA) for this routine's own directory-entry lookup -- the
@@ -233,10 +244,10 @@ sys_path_ptr:   dw      0
 ;==================================================================
 
             proc    sys_install
-            plo     rc                  ; RC.0 = FCB index (temp)
-            mov     rf, sys_fcb
+            plo     rc                  ; RC.0 = handle (temp)
+            mov     rf, sys_handle
             glo     rc
-            str     rf                  ; sys_fcb = FCB index
+            str     rf                  ; sys_handle = handle
 
 ;------------------------------------------------------------------
 ; Resolve the file's size from its own directory entry -- see this
@@ -248,11 +259,17 @@ sys_path_ptr:   dw      0
             ldn     rf
             plo     rc                  ; RC = filename string pointer
 
-            call    K_GETCURDIR         ; RD = current directory cluster
             mov     rf, rc              ; RF = filename path
             call    K_PATH_RESOLVE      ; RD = parent cluster, RF = final
-                                        ; component, DF = 0/1
-            lbdf    sys_stat_err        ; bad intermediate component
+                                        ; component, RC.0 = resolved
+                                        ; drive (unused here -- SYS's
+                                        ; install target is always the
+                                        ; fixed boot sectors regardless
+                                        ; of drive, see this file's own
+                                        ; header comment), DF = 0/1
+            lbdf    sys_stat_err        ; bad intermediate component, or
+                                        ; an "X:" prefix named an
+                                        ; unmounted drive
 
             ; an empty final component would mean the path names a
             ; directory, not a file -- shouldn't happen (K_FILE_OPEN
@@ -389,7 +406,7 @@ sys_sectors_done:
             phi     rc
             ldi     0
             plo     rc                  ; RC = 512
-            mov     rd, sys_fcb
+            mov     rd, sys_handle
             ldn     rd
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    sys_magic_read_err
@@ -459,7 +476,7 @@ sys_extra_no_borrow:
 
             ; rewind before the write pass -- the magic-check read
             ; above already consumed the first 512 bytes
-            mov     rd, sys_fcb
+            mov     rd, sys_handle
             ldn     rd
             call    K_FILE_SEEK
             lbdf    sys_seek_err
@@ -523,7 +540,7 @@ sys_zero_loop:
             plo     rc                  ; RC = 512 again, the request
                                         ; size (independent of what the
                                         ; zero loop above did to it)
-            mov     rd, sys_fcb
+            mov     rd, sys_handle
             ldn     rd
             call    K_FILE_READ
             lbdf    w_read_err
@@ -765,7 +782,7 @@ sys_confirm_no:
             ldi     1                   ; declined
             rtn
 
-sys_fcb:                db      0
+sys_handle:             db      0
 sys_statname_ptr:       dw      0
 sys_dirent_buf:         ds      DIRENT_LEN
 sys_size_hi:            db      0

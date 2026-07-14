@@ -41,7 +41,14 @@ PWD_MAX_DEPTH:  equ     16
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            call    K_GETCURDIR         ; RD = current directory cluster
+            call    K_GETCURDIR         ; RD = current directory
+                                        ; cluster, D = cur_drive
+            plo     r9                  ; R9.0 = cur_drive (stashed
+                                        ; immediately -- the mov below
+                                        ; clobbers D, gotcha #4)
+            mov     rf, drive
+            glo     r9
+            str     rf                  ; drive = cur_drive
 
             mov     rf, clust
             ghi     rd
@@ -56,8 +63,9 @@ start:
             glo     rd
             lbnz    pwd_walk
 
+            call    print_drive_letter
             call    K_INMSG
-            db      "/",13,10,0
+            db      ":/",13,10,0
             ldi     0
             rtn
 
@@ -131,7 +139,7 @@ pwd_find_self:
 
             ; compare this entry's cluster (dir_result+DIRENT_CLUST)
             ; against clust, high byte then low byte (same SM-based
-            ; equality idiom as file.asm's io_owner check)
+            ; equality idiom used throughout this codebase)
             mov     rf, dir_result
             add16   rf, DIRENT_CLUST
             lda     rf                  ; D = entry cluster high byte,
@@ -212,6 +220,10 @@ pwd_copy_done:
             glo     rd
             lbnz    pwd_loop
 
+            call    print_drive_letter
+            call    K_INMSG
+            db      ":",0
+
             mov     rf, cursor
             lda     rf
             phi     rd
@@ -222,6 +234,22 @@ pwd_copy_done:
             call    K_INMSG
             db      13,10,0
             ldi     0
+            rtn
+
+;------------------------------------------------------------------
+; print_drive_letter: print 'C'+drive (a single character) via a
+; bare, one-shot K_TTY call -- same proven-safe pattern COPY's own
+; overwrite-confirmation prompt and shell.asm's print_prompt already
+; use (see gotcha #14 on why a single call, unlike a large buffer
+; loop, is safe here).
+; Args:    none (reads drive)
+; Returns: nothing
+;------------------------------------------------------------------
+print_drive_letter:
+            mov     rf, drive
+            ldn     rf
+            adi     'C'
+            call    K_TTY
             rtn
 
 pwd_ioerr:
@@ -240,6 +268,8 @@ clust:      dw      0
 parent:     dw      0
 cursor:     dw      0
 depth_left: db      0
+drive:      db      0                   ; K_GETCURDIR's D return
+                                        ; (cur_drive), stashed at entry
 dotdot:     db      "..",0
 dir_result: ds      DIRENT_LEN          ; 135-byte result buffer for K_DIR_READ
 path_buf:   ds      PATH_BUF_LEN

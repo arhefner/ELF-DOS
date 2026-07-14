@@ -181,27 +181,31 @@ usage:      call    K_INMSG
 
 have_name:
             mov     rf, ra              ; RF = filename
+            mov     rd, mr_fcb_struct   ; RD = our FCB struct
+            mov     ra, mr_iobuf        ; RA = our I/O buffer (movs
+                                        ; before the mode load below,
+                                        ; since mov clobbers D)
             ldi     1                   ; mode = write (create/truncate)
-            call    K_FILE_OPEN         ; D = FCB index, DF=0/1
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    open_error
 
-            ; BUG-CLASS GUARD: stash the FCB index before "mov rf, ..."
-            ; clobbers D -- saved_fcb is what K_FILE_CLOSE uses below,
+            ; BUG-CLASS GUARD: stash the handle before "mov rf, ..."
+            ; clobbers D -- saved_handle is what K_FILE_CLOSE uses below,
             ; after mr_receive (a leaf worker that clobbers everything)
             ; has long since destroyed D's original value.
-            plo     r8                  ; R8.0 = FCB index (temp)
-            mov     rf, saved_fcb
+            plo     r8                  ; R8.0 = handle (temp)
+            mov     rf, saved_handle
             glo     r8
-            str     rf                  ; saved_fcb = FCB index
+            str     rf                  ; saved_handle = handle
 
-            glo     r8                  ; D = FCB index again, for mr_receive
+            glo     r8                  ; D = handle again, for mr_receive
             call    mr_receive          ; D = result code (0 = success)
             ; BUG-CLASS GUARD (see progs/type.asm/wtest.asm): stash the
             ; result before "mov rf, ..." for K_FILE_CLOSE's own arg
             ; setup clobbers D.
             plo     r8                  ; R8.0 = mr_receive's result
 
-            mov     rd, saved_fcb
+            mov     rd, saved_handle
             ldn     rd
             call    K_FILE_CLOSE        ; result/DF here intentionally
                                         ; ignored -- mr_receive's own
@@ -237,7 +241,9 @@ open_error:
             ldi     1
             rtn
 
-saved_fcb:      db      0
+mr_fcb_struct:  ds      FCB_LEN
+mr_iobuf:       ds      FCB_IOBUF_LEN
+saved_handle:   db      0
 mr_io_mode:     db      0
 
 ;==================================================================
@@ -245,7 +251,7 @@ mr_io_mode:     db      0
 ; into an already-open FCB, using ELF-DOS's own MAX-derived transfer
 ; protocol.
 ;
-; Args:    D = FCB index of an already-open file (mode 1 -- write)
+; Args:    D = handle of an already-open file (mode 1 -- write)
 ; Returns: D  = 0 on success, MRERR_* on failure (see equ's above)
 ;          DF = 0 on success, DF = 1 on failure (redundant with D,
 ;               kept for consistency with this project's other calls)
@@ -283,10 +289,10 @@ mr_io_mode:     db      0
 
             .link   .align  page
             proc    mr_receive
-            plo     rc                  ; RC.0 = FCB index (temp)
-            mov     rf, mr_fcb
+            plo     rc                  ; RC.0 = handle (temp)
+            mov     rf, mr_handle
             glo     rc
-            str     rf                  ; mr_fcb = FCB index
+            str     rf                  ; mr_handle = handle
 
 ;------------------------------------------------------------------
 ; Handshake: wait for $55 (sync), ACK with $AA.
@@ -304,7 +310,7 @@ mr_shake:   ldi     $aa
 ;------------------------------------------------------------------
 ; Per-block loop.
 ;
-; mr_fcb (not a register) holds the FCB index across K_FILE_WRITE
+; mr_handle (not a register) holds the handle across K_FILE_WRITE
 ; calls: file_write uses R9 as its own internal scratch and leaves it
 ; holding unrelated data on return (see progs/type.asm's own note), so
 ; nothing kept in a register here would reliably survive the call.
@@ -465,11 +471,11 @@ readlp_done:
             plo     rc
             mov     rf, mr_buf
             ; BUG-CLASS GUARD: file_write needs RF pointed at the
-            ; source buffer AND D = FCB index at the same time --
-            ; fetching the index via "mov rf, mr_fcb" would clobber RF
-            ; away from the buffer, so RD is used instead.
-            mov     rd, mr_fcb
-            ldn     rd                  ; D = FCB index, RF/RC untouched
+            ; source buffer AND D = handle at the same time --
+            ; fetching the handle via "mov rf, mr_handle" would clobber
+            ; RF away from the buffer, so RD is used instead.
+            mov     rd, mr_handle
+            ldn     rd                  ; D = handle, RF/RC untouched
             call    K_FILE_WRITE        ; DF = 0/1
             lbdf    mr_wrerr
 
@@ -497,7 +503,7 @@ mr_exit:    ; D = result code (0 = success); set DF to match
 mr_ok:      clc
 mr_ret:     rtn
 
-mr_fcb:         db      0
+mr_handle:      db      0
 mr_cmdbyte:     db      0
 mr_cnt_hi:      db      0
 mr_cnt_lo:      db      0

@@ -42,6 +42,10 @@
             extrn   bpb_num_fats
             extrn   bpb_spf
             extrn   bpb_max_clust
+            extrn   part1_lba
+            extrn   drive_present
+            extrn   drive_bpb_table
+            extrn   active_bpb_drive
 
 ; same-file proc references (required even within the same file)
             extrn   _fat_load_sector
@@ -49,6 +53,7 @@
             extrn   fat_set
             extrn   fat_alloc
             extrn   fat_flush
+            extrn   _switch_drive
             extrn   fls_cluster
             extrn   ffl_sector_idx
             extrn   fat_next_free
@@ -595,6 +600,113 @@ flush_done:
 
 flush_err:
             stc                         ; DF = 1, I/O error
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _switch_drive: make the given drive's BPB fields and FAT cache the
+; "active" ones (part1_lba..fat_csec, fat_dirty/fat_cache) that every
+; other routine in this file -- and dir.asm/file.asm -- reads
+; directly by fixed symbol, unchanged. No-op if the given drive is
+; already active. See kernel_api.inc's own note on why a copy-on-
+; switch design was chosen over indexing drive_bpb_table directly:
+; keeps ~110 existing BPB-field call sites completely untouched.
+;
+; The FAT cache (fat_cache/fat_csec/fat_dirty) is NOT meaningfully
+; tracked per-drive in drive_bpb_table -- only one drive's FAT sector
+; is ever cached in RAM at a time, so a real switch always flushes
+; the OUTGOING drive's dirty cache first (if any, since it depends on
+; the BPB fields this routine is about to overwrite) and forces the
+; incoming drive to start with an empty cache (fat_csec = $FFFF),
+; regardless of whatever stale bytes happen to sit in that drive's own
+; drive_bpb_table entry's BPBBLK_FAT_CSEC field (copied along with the
+; rest of the 23-byte block for layout uniformity, then immediately
+; overwritten here -- never trusted).
+;
+; Args:    D = target drive index (0-3, 0=C..3=F)
+; Returns: DF = 0 on success (drive now active, or already was);
+;          DF = 1 if the drive is not present (drive_present[D] = 0)
+;          -- nothing is changed in that case
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            proc    _switch_drive
+
+            plo     r9                  ; R9.0 = target drive
+            ldi     0
+            phi     r9                  ; R9 = target drive, zero-
+                                        ; extended (used as a clean
+                                        ; 16-bit add16 operand below)
+
+            mov     rf, drive_present
+            add16   rf, r9              ; RF = &drive_present[target]
+            ldn     rf
+            lbz     swd_absent          ; 0 = not present: error
+
+            mov     rf, active_bpb_drive
+            ldn     rf
+            str     r2                  ; M(X) = currently active drive
+            glo     r9
+            sm                          ; D = target - active
+            lbz     swd_ok              ; already active: no-op success
+
+            ; flush the OUTGOING drive's dirty FAT cache, if any,
+            ; BEFORE overwriting the BPB fields fat_flush itself reads
+            call    fat_flush
+
+            ; compute byte offset = target * BPBBLK_LEN into RB, via
+            ; repeated addition (target is always 0-3 -- same "add N
+            ; times" pattern fat_flush's own copy_index * bpb_spf
+            ; arithmetic above already uses)
+            ldi     0
+            phi     rb
+            plo     rb                  ; RB = running offset (0)
+            glo     r9
+            lbz     swd_have_offset     ; target 0: offset stays 0
+            plo     ra                  ; RA.0 = remaining count
+swd_mul_loop:
+            add16   rb, BPBBLK_LEN
+            dec     ra
+            glo     ra
+            lbnz    swd_mul_loop
+
+swd_have_offset:
+            mov     rf, drive_bpb_table
+            add16   rf, rb              ; RF = &drive_bpb_table[target]
+
+            mov     rb, part1_lba       ; RB = active BPB block start
+            ldi     BPBBLK_LEN
+            plo     rc                  ; RC.0 = 23 bytes to copy
+swd_copy_loop:
+            lda     rf
+            str     rb
+            inc     rb
+            dec     rc
+            glo     rc
+            lbnz    swd_copy_loop
+
+            ; never trust the copied fat_csec -- always start the new
+            ; drive with an empty FAT cache (see header comment)
+            mov     rf, fat_csec
+            ldi     $FF
+            str     rf
+            inc     rf
+            str     rf                  ; fat_csec = $FFFF
+
+            mov     rf, fat_dirty
+            ldi     0
+            str     rf                  ; new drive starts clean
+
+            mov     rf, active_bpb_drive
+            glo     r9
+            str     rf                  ; active_bpb_drive = target
+
+swd_ok:
+            clc                         ; DF = 0, success
+            rtn
+
+swd_absent:
+            stc                         ; DF = 1, drive not present
             rtn
 
             endp

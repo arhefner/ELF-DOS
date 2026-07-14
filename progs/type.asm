@@ -35,25 +35,29 @@ start:
 
 have_name:
             mov     rf, ra              ; RF = filename
+            mov     rd, type_fcb        ; RD = our FCB struct
+            mov     ra, type_iobuf      ; RA = our I/O buffer (movs
+                                        ; before the mode load below,
+                                        ; since mov clobbers D)
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; D = FCB index, DF=0/1
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    not_found
 
-            ; BUG FIX: "mov rf, type_fcb" itself clobbers D (its final
-            ; LDI leaves D = type_fcb's own low address byte), so the
-            ; FCB index just returned in D would not survive to the
+            ; BUG FIX: "mov rf, type_handle" itself clobbers D (its
+            ; final LDI leaves D = type_handle's own low address byte),
+            ; so the handle just returned in D would not survive to the
             ; "str rf" below unless stashed first.
-            plo     rd                  ; stash FCB index (mov below clobbers D)
-            mov     rf, type_fcb
-            glo     rd                  ; D = FCB index (reloaded)
-            str     rf                  ; type_fcb = FCB index (see note
+            plo     rd                  ; stash handle (mov below clobbers D)
+            mov     rf, type_handle
+            glo     rd                  ; D = handle (reloaded)
+            str     rf                  ; type_handle = handle (see note
                                         ; below on why this isn't kept
                                         ; in a register)
 
 ;------------------------------------------------------------------
 ; Read/print loop.
 ;
-; type_fcb (not a register) holds the FCB index across K_FILE_READ
+; type_handle (not a register) holds the handle across K_FILE_READ
 ; calls: file_read uses R9 as its own internal scratch and leaves it
 ; holding unrelated data (the bytes-read count) on return, so nothing
 ; kept in a register here would survive the call.
@@ -65,11 +69,11 @@ read_loop:
             ldi     0
             phi     rc                  ; RC = chunk size requested
             ; BUG FIX: file_read needs RF pointed at the destination
-            ; buffer (type_buf, set above) AND D = FCB index at the same
-            ; time -- fetching the index via "mov rf, type_fcb" would
-            ; clobber RF away from type_buf, so RD is used instead.
-            mov     rd, type_fcb
-            ldn     rd                  ; D = FCB index, RF untouched
+            ; buffer (type_buf, set above) AND D = handle at the same
+            ; time -- fetching the handle via "mov rf, type_handle"
+            ; would clobber RF away from type_buf, so RD is used instead.
+            mov     rd, type_handle
+            ldn     rd                  ; D = handle, RF untouched
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    io_error            ; check DF first, before anything below
 
@@ -92,14 +96,14 @@ print_have:
             lbr     print_loop
 
 done:
-            mov     rf, type_fcb
-            ldn     rf                  ; D = FCB index
+            mov     rf, type_handle
+            ldn     rf                  ; D = handle
             call    K_FILE_CLOSE
             ldi     0                   ; exit code 0 = success
             rtn
 
 io_error:
-            mov     rf, type_fcb
+            mov     rf, type_handle
             ldn     rf
             call    K_FILE_CLOSE
             call    K_INMSG
@@ -113,7 +117,9 @@ not_found:
             ldi     1
             rtn
 
-type_fcb:       db      0
+type_fcb:       ds      FCB_LEN
+type_iobuf:     ds      FCB_IOBUF_LEN
+type_handle:    db      0
 type_buf:       ds      TYPE_CHUNK_LEN
 
             end     start

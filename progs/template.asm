@@ -5,9 +5,10 @@
 ; progs" itself -- see the Makefile's PROG_SRCS filter):
 ;   cp progs/template.asm progs/mynewprog.asm
 ;
-; A program is loaded via prog_load/prog_exec (see kernel/loader.asm)
-; at the fixed address PROG_BASE ($2000). Its entry point is always
-; PROG_BASE + $06, immediately after the 6-byte header below.
+; A program is loaded via prog_run (see kernel/loader.asm) at the
+; fixed address PROG_BASE (see include/kernel_api.inc for its current
+; value). Its entry point is always PROG_BASE + $06, immediately after
+; the 6-byte header below.
 ;
 ; At entry:
 ;   RA = pointer to the null-terminated command tail -- everything

@@ -30,7 +30,12 @@
             extrn   file_init
             extrn   mem_top
             extrn   mem_base
-            extrn   cur_dir
+            extrn   drive_present
+            extrn   drive_cur_dir
+            extrn   cur_drive
+            extrn   shell_drive
+            extrn   shell_elba
+            extrn   shell_eoff
             extrn   part1_lba
 
             extrn   file_open
@@ -46,8 +51,12 @@
             extrn   dir_open
             extrn   dir_read
             extrn   path_resolve
-            extrn   prog_load
-            extrn   prog_exec
+            extrn   prog_run
+            extrn   prog_run_shell
+            extrn   _find_dirent
+            extrn   file_dirent
+            extrn   dir_cur_lba
+            extrn   dir_last_off
 
 ; Kernel version -- single source of truth for the header bytes below,
 ; which programs read directly at the fixed KERNEL_HDR_VER address (see
@@ -87,6 +96,13 @@ KERNEL_VER_MINOR:   equ     1
 ;
 ; Verify this table's actual addresses against kernel_api.inc after
 ; any change here with: link02 -s ... | grep '^k_'
+;
+; Pre-release exception (see kernel_api.inc's own header comment):
+; 2026-07-13 renumbered this whole table from scratch (removed
+; K_BPB_INIT/K_PROG_LOAD/K_PROG_EXEC, added K_SHELL_INIT/
+; K_GETSHELLDRIVE) rather than only appending, since every program in
+; this repo is rebuilt from source and nothing external depends on
+; today's addresses yet. Don't repeat a full renumber after release.
 ;==================================================================
 kernel_main:            ; $0106 - K_INIT (boot entry, reserved)
             lbr     kernel_init
@@ -98,20 +114,32 @@ k_file_write:   lbr     file_write          ; $0112
 k_file_seek:    lbr     file_seek           ; $0115
 k_dir_open:     lbr     dir_open            ; $0118
 k_dir_read:     lbr     dir_read            ; $011B
-k_prog_load:    lbr     prog_load           ; $011E
-k_prog_exec:    lbr     prog_exec           ; $0121
-k_type:         lbr     f_type              ; $0124 (BIOS passthrough)
-k_msg:          lbr     f_msg               ; $0127 (BIOS passthrough)
-k_inmsg:        lbr     f_inmsg             ; $012A (BIOS passthrough)
-k_getdev:       lbr     f_getdev            ; $012D (BIOS passthrough)
-k_gettod:       lbr     f_gettod            ; $0130 (BIOS passthrough)
-k_settod:       lbr     f_settod            ; $0133 (BIOS passthrough)
-k_inputl:       lbr     f_inputl            ; $0136 (BIOS passthrough)
-k_boot:         lbr     f_boot              ; $0139 (BIOS passthrough)
-k_tty:          lbr     f_tty               ; $013C (BIOS passthrough)
-k_setbd:        lbr     f_setbd             ; $013F (BIOS passthrough)
-k_getcurdir:    lbr     kernel_getcurdir    ; $0142
-k_setcurdir:    lbr     kernel_setcurdir    ; $0145
+
+; K_PROG_LOAD/K_PROG_EXEC REMOVED 2026-07-13 (see kernel_api.inc's own
+; removal note) -- collapsed into the internal-only prog_run
+; (kernel/loader.asm), called directly by run_loop below, never
+; through this table.
+k_type:         lbr     f_type              ; $011E (BIOS passthrough)
+k_msg:          lbr     f_msg               ; $0121 (BIOS passthrough)
+k_inmsg:        lbr     f_inmsg             ; $0124 (BIOS passthrough)
+k_getdev:       lbr     f_getdev            ; $0127 (BIOS passthrough)
+k_gettod:       lbr     f_gettod            ; $012A (BIOS passthrough)
+k_settod:       lbr     f_settod            ; $012D (BIOS passthrough)
+k_inputl:       lbr     f_inputl            ; $0130 (BIOS passthrough)
+k_boot:         lbr     f_boot              ; $0133 (BIOS passthrough)
+k_tty:          lbr     f_tty               ; $0136 (BIOS passthrough)
+k_setbd:        lbr     f_setbd             ; $0139 (BIOS passthrough)
+k_getcurdir:    lbr     kernel_getcurdir    ; $013C
+k_setcurdir:    lbr     kernel_setcurdir    ; $013F
+
+; K_SETDRIVE: the only call that ever changes cur_drive -- see
+; kernel_setdrive's own header comment and kernel_api.inc's note on
+; the DOS-style CD/drive-switch decoupling.
+k_setdrive:     lbr     kernel_setdrive     ; $0142
+
+; K_GETSHELLDRIVE: see kernel_getshelldrive's own header comment below.
+k_getshelldrive: lbr    kernel_getshelldrive ; $0145
+
 k_path_resolve: lbr     path_resolve        ; $0148
 k_file_delete:  lbr     file_delete         ; $014B
 k_dir_create:   lbr     dir_create          ; $014E
@@ -119,18 +147,19 @@ k_dir_remove:   lbr     dir_remove          ; $0151
 k_file_rename:  lbr     file_rename         ; $0154
 k_read:         lbr     f_read              ; $0157 (BIOS passthrough)
 
-; K_FAT_INIT/K_FILE_INIT: boot-only, called exactly once each by
-; boot/krnboot.asm's relocated init code (see kernel_init's own header
-; comment below, and krnboot.asm's, for the full story) -- exist as
-; jump-table slots only because krnboot.asm is linked completely
-; separately from kernel.bin and has no other way to reach these
-; kernel-resident routines. Not meant to be called by ordinary
-; programs. K_BPB_INIT (still at $015A, the same append-only slot)
-; no longer calls a real bpb_init -- see k_bpb_init_stub's own header
-; comment (further down in this file) for why.
-k_bpb_init:     lbr     k_bpb_init_stub     ; $015A
-k_fat_init:     lbr     fat_init            ; $015D
-k_file_init:    lbr     file_init           ; $0160
+; K_FAT_INIT/K_FILE_INIT/K_SHELL_INIT: boot-only, called exactly once
+; each by boot/krnboot.asm's relocated init code (see kernel_init's
+; own header comment below, and krnboot.asm's, for the full story) --
+; exist as jump-table slots only because krnboot.asm is linked
+; completely separately from kernel.bin and has no other way to reach
+; these kernel-resident routines. Not meant to be called by ordinary
+; programs. K_BPB_INIT REMOVED 2026-07-13 (see kernel_api.inc's own
+; removal note) -- its slot's k_bpb_init_stub had already been a
+; no-op for a while; grep confirmed zero remaining callers, so it's
+; now gone outright rather than kept as a stub forever.
+k_fat_init:     lbr     fat_init            ; $015A
+k_file_init:    lbr     file_init           ; $015D
+k_shell_init:   lbr     kernel_shell_init   ; $0160
 
 ; K_SECWRITE/K_SECREAD: raw 512-byte sector read/write by LBA, bypassing
 ; the FAT16 filesystem entirely -- direct passthroughs to the same BIOS
@@ -167,7 +196,16 @@ k_stat:         lbr     file_stat           ; $0169
 ; to the block's real address automatically, same as any other
 ; relocatable reference.
                 dw      part1_lba           ; $016C: BPB_DATA_PTR
-                ; next free jump-table address: $016E
+
+; DRIVE_DATA_PTR: same DATA-slot mechanism as BPB_DATA_PTR above, for
+; the multi-partition boot-time scan (2026-07-13). Points at
+; drive_present[0..DRIVE_COUNT-1], drive_bpb_table[0..DRIVE_COUNT-1],
+; and shell_drive/shell_elba/shell_eoff, all contiguous -- see
+; kernel_api.inc's own DRIVE_DATA_PTR comment. boot/krnboot.asm's
+; relocated partition-scan loop and K_SHELL_INIT both reach their own
+; piece of this through the one pointer.
+                dw      drive_present       ; $016E: DRIVE_DATA_PTR
+                ; next free jump-table address: $0170
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
@@ -185,16 +223,17 @@ k_stat:         lbr     file_stat           ; $0169
 ; which has 400+ bytes of unused padding after its own load loop).
 ; What's left here is only the part that genuinely can't move: writes
 ; to kernel-resident (relocatable) data, which krnboot.asm has no
-; fixed-address way to reach (unlike the K_BPB_INIT/K_FAT_INIT/
-; K_FILE_INIT calls above, which only needed a stable jump-table
+; fixed-address way to reach (unlike the K_FAT_INIT/K_FILE_INIT/
+; K_SHELL_INIT calls above, which only needed a stable jump-table
 ; address, not a data address).
 ;
 ; On entry:
 ;   SCRT initialized (R3=PC, R4=call, R5=ret)
 ;   R2 = stack at top of RAM (set by bootstrap)
-;   All other registers: undefined (bpb_init/fat_init/file_init have
-;   already run, via krnboot.asm's own K_BPB_INIT/K_FAT_INIT/
-;   K_FILE_INIT calls, by the time this point is reached)
+;   All other registers: undefined (the multi-partition scan, fat_init,
+;   file_init, and kernel_shell_init have already run, via krnboot.asm's
+;   own K_FAT_INIT/K_FILE_INIT/K_SHELL_INIT calls, by the time this
+;   point is reached)
 ;------------------------------------------------------------------
 kernel_init:
             ; record top of RAM in mem_top
@@ -216,12 +255,26 @@ kernel_init:
             inc     rf
             str     rf                  ; mem_base = 0 until first program loads
 
-            ; current directory = root (cluster 0 is the FAT16 root sentinel)
-            mov     rf, cur_dir
+            ; current directory (every drive) = root; active drive = C:
+            ; (cluster 0 is the FAT16 root sentinel, drive index 0 is
+            ; C: -- see kernel.inc's DRIVE_COUNT and the "Multi-drive
+            ; state" data section below). Explicitly zeroed here even
+            ; though the static image already encodes 0, matching this
+            ; routine's existing practice for mem_base above.
+            mov     rf, drive_cur_dir
+            ldi     DRIVE_COUNT*2
+            plo     rc                  ; RC.0 = bytes to zero
+kinit_dcd_zero:
             ldi     0
             str     rf
             inc     rf
-            str     rf
+            dec     rc
+            glo     rc
+            lbnz    kinit_dcd_zero
+
+            mov     rf, cur_drive
+            ldi     0
+            str     rf                  ; cur_drive = C: (0)
 
 ;------------------------------------------------------------------
 ; run_loop: alternately load+run the shell (which resolves one
@@ -230,38 +283,49 @@ kernel_init:
 ; sitting at PROG_BASE -- see kernel.inc's RUN_PATH/RUN_TAIL_PTR
 ; comment for why the shell can't do this hand-off itself. Never
 ; returns.
+;
+; As of 2026-07-13, the shell no longer hands back a bare, possibly-
+; not-found path: progs/shell.asm now confirms a command exists
+; (trying the active drive, then shell_drive as a fallback for a bare
+; name) via K_STAT before ever writing RUN_PATH, printing its own
+; "File not found." and re-prompting itself if nothing matched. So
+; the only way prog_run below can still fail is "exists but isn't a
+; valid program" -- a genuinely different, rarer case than before.
 ;------------------------------------------------------------------
 run_loop:
-            mov     rf, shell_path
-            call    prog_load
-            lbdf    kern_shell_err      ; shell itself missing/corrupt: fatal
-
-            call    prog_exec           ; runs the shell; it always
+            call    prog_run_shell      ; loads+runs "C:/bin/shell" --
+                                        ; see kernel/loader.asm: reads
+                                        ; the cached shell_elba/eoff
+                                        ; sector directly instead of a
+                                        ; full directory scan, falling
+                                        ; back to a real path-based
+                                        ; load if that cached location
+                                        ; is no longer valid. Always
                                         ; returns with RUN_PATH/
-                                        ; RUN_TAIL_PTR filled in
-
-            mov     rf, RUN_PATH
-            call    prog_load
-            lbdf    run_bad_command     ; not found / bad magic
+                                        ; RUN_TAIL_PTR filled in on
+                                        ; success.
+            lbdf    kern_shell_err      ; shell itself missing/corrupt/
+                                        ; unloadable: fatal
 
             mov     rf, RUN_TAIL_PTR
             lda     rf                  ; D = tail pointer high byte
             phi     ra
             ldn     rf                  ; D = tail pointer low byte
             plo     ra                  ; RA = command tail pointer
-            call    prog_exec           ; D = exit code (unused for now)
+
+            mov     rf, RUN_PATH        ; RF = resolved path (RA
+                                        ; already set above -- mov
+                                        ; only touches RF/D, not RA)
+            call    prog_run            ; D = exit code (unused), DF=0/1
+            lbdf    run_bad_program     ; exists (the shell already
+                                        ; confirmed that) but isn't a
+                                        ; valid EDF program
             lbr     run_loop
 
-run_bad_command:
+run_bad_program:
             call    f_inmsg
-            db      "Bad command.",13,10,0
+            db      "Invalid program file.",13,10,0
             lbr     run_loop
-
-; local literal, placed after every reachable path above already
-; terminates via a branch, so control flow never falls through into
-; it (same convention used for local literals elsewhere in this
-; project, e.g. file_rename's ren_dot/ren_dotdot)
-shell_path: db      "/bin/shell",0
 
 kern_shell_err:
             call    f_inmsg
@@ -269,25 +333,62 @@ kern_shell_err:
 kern_halt:  lbr     kern_halt
 
 ;------------------------------------------------------------------
-; kernel_getcurdir: return the current directory cluster
+; kernel_getcurdir: return the ACTIVE drive's current directory
 ; Args:    none
-; Returns: RD = cur_dir (0 = FAT16 root)
+; Returns: RD = drive_cur_dir[cur_drive] (0 = that drive's root)
+;          D  = cur_drive (0-3, 0=C..3=F)
 ;------------------------------------------------------------------
 kernel_getcurdir:
-            mov     rf, cur_dir
-            lda     rf                  ; D = cur_dir high byte
+            mov     rf, cur_drive
+            ldn     rf
+            plo     r9                  ; R9.0 = cur_drive (stashed
+                                        ; immediately -- the mov below
+                                        ; clobbers D, gotcha #4)
+            ldi     0
+            phi     r9                  ; R9 = cur_drive, zero-extended
+                                        ; (needed as a clean 16-bit
+                                        ; add16 operand below)
+
+            glo     r9
+            shl                         ; D = cur_drive * 2 (entry size)
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = cur_drive * 2
+
+            mov     rf, drive_cur_dir
+            add16   rf, r8              ; RF = &drive_cur_dir[cur_drive]
+            lda     rf
             phi     rd
-            ldn     rf                  ; D = cur_dir low byte
-            plo     rd
+            ldn     rf
+            plo     rd                  ; RD = drive_cur_dir[cur_drive]
+
+            glo     r9                  ; D = cur_drive (return value)
             rtn
 
 ;------------------------------------------------------------------
-; kernel_setcurdir: set the current directory cluster
-; Args:    RD = new current directory cluster
+; kernel_setcurdir: set a drive's OWN remembered current directory.
+; Deliberately does NOT change which drive is active, even if D names
+; a drive other than cur_drive -- classic DOS semantics: "CD D:\foo"
+; while C: is active updates D:'s own directory without switching to
+; it. The only way the active drive changes is kernel_setdrive, below.
+; Args:    D = drive index (0-3), RD = new directory cluster for
+;          that drive
 ; Returns: nothing
 ;------------------------------------------------------------------
 kernel_setcurdir:
-            mov     rf, cur_dir
+            plo     r9                  ; R9.0 = drive index (mov
+                                        ; below clobbers D, gotcha #4)
+            ldi     0
+            phi     r9
+
+            glo     r9
+            shl                         ; D = drive * 2 (entry size)
+            plo     r8
+            ldi     0
+            phi     r8
+
+            mov     rf, drive_cur_dir
+            add16   rf, r8              ; RF = &drive_cur_dir[drive]
             ghi     rd
             str     rf
             inc     rf
@@ -296,19 +397,116 @@ kernel_setcurdir:
             rtn
 
 ;------------------------------------------------------------------
-; k_bpb_init_stub: K_BPB_INIT's jump-table slot no longer points at a
-; real routine -- bpb_init's body moved to boot/krnboot.asm's own
-; inlined copy as part of the multi-sector krnboot expansion, and
-; krnboot itself (the only caller K_BPB_INIT ever had) now reaches
-; those fields directly via BPB_DATA_PTR instead of this call. Per
-; this project's append-only jump-table rule (slots are never removed,
-; so any future code that somehow still calls $015A gets defined
-; behavior, not garbage), the slot stays and points here instead: a
-; trivial always-succeeds no-op.
+; kernel_setdrive: change the active drive. The ONLY place cur_drive
+; is ever written -- kernel_setcurdir/CD never touch it (see above).
+; Rejects a drive with no mounted partition rather than silently
+; activating an empty/garbage BPB block; the caller (the shell's own
+; bare "C:"/"D:"/"E:"/"F:" dispatch, see progs/shell.asm) is expected
+; to report that as an error.
+; Args:    D = drive index (0-3) to make active
+; Returns: DF = 0 on success, DF = 1 if that drive is not present
+;          (drive_present[D] = 0) -- cur_drive is left unchanged
 ;------------------------------------------------------------------
-k_bpb_init_stub:
+kernel_setdrive:
+            plo     r9                  ; R9.0 = drive index
+            ldi     0
+            phi     r9
+
+            mov     rf, drive_present
+            add16   rf, r9              ; RF = &drive_present[drive]
+            ldn     rf
+            lbz     ksd_absent          ; 0 = not present: error
+
+            mov     rf, cur_drive
+            glo     r9
+            str     rf                  ; cur_drive = drive
             clc
             rtn
+
+ksd_absent:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; kernel_getshelldrive: return which drive the shell binary was found
+; on at boot (see kernel_shell_init below) -- almost always 0 (C:) in
+; practice. Used by progs/shell.asm to build a fallback
+; "<shell_drive>:/bin/<name>" search candidate for a bare command name
+; not found on the active drive.
+; Args:    none
+; Returns: D = shell_drive (0-3)
+;------------------------------------------------------------------
+kernel_getshelldrive:
+            mov     rf, shell_drive
+            ldn     rf
+            rtn
+
+;------------------------------------------------------------------
+; kernel_shell_init: locate "C:/bin/shell"'s own directory entry and
+; cache its (drive, sector LBA, byte offset within that sector) for
+; run_loop's fast reload path (see kernel/loader.asm's
+; prog_run_shell) -- boot-only, called once by boot/krnboot.asm via
+; K_SHELL_INIT, before kernel_init's own zero-init has run (safe: the
+; literal path below has an explicit "C:" prefix, so path_resolve
+; never needs cur_drive/drive_cur_dir to resolve it -- the same
+; reasoning boot_init2's other init calls already rely on).
+; Args:    none
+; Returns: DF = 0 on success (shell_drive/shell_elba/shell_eoff
+;          populated), DF = 1 if "C:/bin/shell" doesn't exist or
+;          isn't a file
+;------------------------------------------------------------------
+kernel_shell_init:
+            mov     rf, kshell_path
+            call    _find_dirent        ; RD = parent cluster (unused
+                                        ; here), file_dirent = matched
+                                        ; entry, dir_cur_lba/
+                                        ; dir_last_off = its own
+                                        ; on-disk location
+            lbdf    kshell_init_err
+
+            ; reject a directory (shouldn't happen for a real file
+            ; named "shell", but stay consistent with every other
+            ; "must be a file" check in this project)
+            mov     rf, file_dirent
+            add16   rf, DIRENT_ATTR
+            ldn     rf
+            ani     ATTR_DIR
+            lbnz    kshell_init_err
+
+            mov     rf, shell_drive
+            ldi     0                   ; always C: -- the only drive
+                                        ; kshell_path ever names
+            str     rf
+
+            mov     rf, shell_elba
+            mov     rd, dir_cur_lba
+            lda     rd
+            str     rf
+            inc     rf
+            lda     rd
+            str     rf
+            inc     rf
+            ldn     rd
+            str     rf                  ; shell_elba = dir_cur_lba
+                                        ; (3 bytes)
+
+            mov     rf, shell_eoff
+            mov     rd, dir_last_off
+            lda     rd
+            str     rf
+            inc     rf
+            ldn     rd
+            str     rf                  ; shell_eoff = dir_last_off
+                                        ; (2 bytes)
+
+            clc
+            rtn
+
+kshell_init_err:
+            stc
+            rtn
+
+kshell_path:    db      "C:/bin/shell",0
 
 ;==================================================================
 ; Global kernel data
@@ -383,22 +581,21 @@ dir_buf:        ds      SECTOR_SIZE
                 public  dir_buf
 
 ; ----------------------------------------------------------------
-; Shared file I/O sector buffer
-;
-; One 512-byte buffer shared across all FCBs.  This limits true
-; simultaneous sector-level access to one file at a time, which
-; is sufficient for a single-tasking shell.
+; fd_table -- FD_COUNT pointers into caller-allocated FCB memory
+; (2026-07-15). Replaces the old fixed-size fcb_table (FCB_COUNT=3
+; full 32-byte FCBs) and the single shared io_buf (arbitrated by a
+; global io_owner byte) -- FCB storage AND each FCB's own 512-byte
+; I/O buffer now live in the caller's own memory (a program, or this
+; kernel's own prog_run for its one internal need, see loader.asm).
+; file_open registers a caller's FCB pointer into a free (zero) slot
+; here and returns the slot index as the handle, exactly as before;
+; file_close/file_read/file_write/file_seek resolve that same index
+; back through this table to the real FCB pointer. A free slot holds
+; 0, which a real FCB address never is.
 ; ----------------------------------------------------------------
-io_buf:         ds      SECTOR_SIZE
+fd_table:       ds      FD_COUNT * 2
 
-                public  io_buf
-
-; ----------------------------------------------------------------
-; FCB table -- FCB_COUNT slots of FCB_LEN bytes each
-; ----------------------------------------------------------------
-fcb_table:      ds      FCB_COUNT * FCB_LEN
-
-                public  fcb_table
+                public  fd_table
 
 ; ----------------------------------------------------------------
 ; Memory map -- exported to user programs at load time
@@ -417,16 +614,71 @@ mem_base:       dw      0
                 public  mem_base
 
 ; ----------------------------------------------------------------
-; Shell state
+; Multi-drive state (C:/D:/E:/F: = drive index 0-3, 2026-07-13)
+;
+; drive_present/drive_bpb_table: populated once at boot by
+; boot/krnboot.asm's partition-scan loop via DRIVE_DATA_PTR (see
+; kernel_api.inc) -- MUST stay contiguous in exactly this order
+; (nothing interleaved), since DRIVE_DATA_PTR is one pointer to
+; drive_present's start and krnboot reaches drive_bpb_table through
+; it by a fixed offset (DRIVE_COUNT bytes past DRIVE_DATA_PTR), the
+; same convention BPB_DATA_PTR already uses for the single active BPB
+; block above. _switch_drive (fat.asm) copies one drive's
+; drive_bpb_table entry at a time into that active block on demand --
+; see kernel_api.inc's own note on why a copy, not direct indexing,
+; was chosen.
+;
+; drive_cur_dir: each drive's own remembered current-directory
+; cluster, independent of which drive is active -- classic DOS
+; semantics (kernel_setcurdir above never touches cur_drive). Zeroed
+; (root) at boot by kernel_init, not by krnboot -- this is session
+; state, not disk geometry.
+;
+; cur_drive: which drive a path with no "X:" prefix resolves against,
+; and what the shell prompt/PWD show. Only ever changed by
+; kernel_setdrive above.
+;
+; active_bpb_drive: _switch_drive's own bookkeeping (which drive's
+; block is currently copied into the active BPB fields) -- not meant
+; to be read by anything else. $FF = none yet, forcing a real switch
+; on the first path_resolve call of the session; relies on the static
+; kernel image itself encoding $FF here (same convention fat_csec's
+; own "dw $FFFF" already uses), not on kernel_init.
+;
+; shell_drive/shell_elba/shell_eoff (2026-07-13): where the shell
+; binary's own directory entry lives -- a fixed-size (drive, sector
+; LBA, byte offset) reference, the same shape FCB_ELBA/FCB_EOFF
+; already use, NOT a path string. Populated once at boot by
+; K_SHELL_INIT (kernel_shell_init above) via DRIVE_DATA_PTR's extended
+; reach (contiguous right after drive_bpb_table -- see
+; kernel_api.inc's own comment). kernel/loader.asm's prog_run_shell
+; reads shell_elba's own sector directly on every shell reload instead
+; of re-walking a directory scan every command cycle, falling back to
+; an ordinary path-based load if that cached location no longer
+; describes a live file (see prog_run_shell's own header comment).
 ; ----------------------------------------------------------------
-cur_dir:        dw      0               ; current directory cluster (0 = root)
+drive_present:      ds      DRIVE_COUNT             ; 4 bytes
+drive_bpb_table:    ds      DRIVE_COUNT*BPBBLK_LEN  ; 92 bytes
+shell_drive:        db      0                       ; 1 byte
+shell_elba:         ds      LBA_SIZE                ; 3 bytes
+shell_eoff:         dw      0                       ; 2 bytes
+drive_cur_dir:      ds      DRIVE_COUNT*2           ; 8 bytes
+cur_drive:          db      0
+active_bpb_drive:   db      $FF
                                         ; (line_buf moved to the fixed
                                         ; address LINE_BUF in kernel.inc,
                                         ; reusing the dead ROM boot stack
                                         ; at $0080-$00FF instead of
                                         ; reserving space here)
 
-                public  cur_dir
+                public  drive_present
+                public  drive_bpb_table
+                public  shell_drive
+                public  shell_elba
+                public  shell_eoff
+                public  drive_cur_dir
+                public  cur_drive
+                public  active_bpb_drive
 
                 endp
 
