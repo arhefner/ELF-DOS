@@ -391,6 +391,34 @@ SHELL_DATA_OFF: equ     DRIVE_COUNT + DRIVE_COUNT*BPBBLK_LEN
                                                 ; this many bytes after
                                                 ; DRIVE_DATA_PTR's target
 
+; K_BATCH_START/K_BATCH_READLINE: minimal flat (non-nested) batch
+; script execution (2026-07-14). The shell (progs/shell.asm) is
+; reloaded fresh from disk every command cycle, so it has no memory of
+; its own that survives from one line to the next -- these two calls
+; let the KERNEL hold that state instead (a dedicated FCB+I/O buffer,
+; the same reason cur_dir/cur_drive live in the kernel too), giving
+; the shell a trivial contract: call K_BATCH_READLINE once at the top
+; of every cycle; DF=0 means a batch line is ready in LINE_BUF (use it
+; instead of prompting the console), DF=1 means read from the console
+; as normal (no batch active, or one just ended).
+;
+; K_BATCH_START: begin executing a batch script.
+; Args:    RF = pointer to a null-terminated path, already resolved
+;          (and confirmed to exist) by the caller -- see
+;          progs/shell.asm's own K_STAT-based existence check.
+; Returns: DF = 0 on success, DF = 1 if a batch is already active
+;          (nesting isn't supported) or the file couldn't be opened.
+;
+; K_BATCH_READLINE: fetch the next line of the active batch script.
+; Args:    none
+; Returns: DF = 0 with LINE_BUF holding the next line (null-terminated,
+;          CR/LF stripped) if a line was available; DF = 1 if no batch
+;          is active, or the batch just reached EOF (auto-closed, so
+;          the very next call also returns DF=1 until a new
+;          K_BATCH_START).
+K_BATCH_START:      equ     $0170       ; -> batch_start
+K_BATCH_READLINE:   equ     $0173       ; -> batch_readline
+
 ; Raw FAT16 VBR/BPB and MBR partition-table field offsets, restated
 ; from kernel.inc for the same reason as BPBBLK_*/BPB_DATA_PTR above --
 ; krnboot's own relocated bpb_init body needs these to parse the raw
@@ -409,4 +437,4 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $0170
+; next free jump-table slot address: $0176

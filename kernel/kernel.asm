@@ -33,6 +33,7 @@
             extrn   drive_present
             extrn   drive_cur_dir
             extrn   cur_drive
+            extrn   _switch_drive
             extrn   shell_drive
             extrn   shell_elba
             extrn   shell_eoff
@@ -48,6 +49,8 @@
             extrn   dir_remove
             extrn   file_rename
             extrn   file_stat
+            extrn   batch_start
+            extrn   batch_readline
             extrn   dir_open
             extrn   dir_read
             extrn   path_resolve
@@ -205,7 +208,14 @@ k_stat:         lbr     file_stat           ; $0169
 ; relocated partition-scan loop and K_SHELL_INIT both reach their own
 ; piece of this through the one pointer.
                 dw      drive_present       ; $016E: DRIVE_DATA_PTR
-                ; next free jump-table address: $0170
+
+; K_BATCH_START/K_BATCH_READLINE: minimal flat batch-script execution
+; (2026-07-14) -- see kernel_api.inc's own comment and kernel/batch.asm
+; for the full design (state has to live here, not in the shell, since
+; the shell is reloaded fresh from disk every command cycle).
+k_batch_start:  lbr     batch_start         ; $0170
+k_batch_readline: lbr   batch_readline      ; $0173
+                ; next free jump-table address: $0176
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
@@ -334,16 +344,92 @@ kern_halt:  lbr     kern_halt
 
 ;------------------------------------------------------------------
 ; kernel_getcurdir: return the ACTIVE drive's current directory
+;
+; BUG FIX (2026-07-15): must activate cur_drive's own BPB/FAT cache
+; via _switch_drive BEFORE returning -- the cluster this hands back is
+; only meaningful relative to whichever drive's BPB is currently
+; active, and nothing guaranteed that matched cur_drive by the time a
+; caller got here. In particular, prog_run_shell's own fast-path
+; reload (kernel/loader.asm) ALWAYS reactivates shell_drive
+; (hardcoded C) on every single shell reload regardless of cur_drive,
+; and a program can itself be loaded from a drive other than
+; cur_drive via the shell's own shell_drive fallback search
+; (progs/shell.asm) -- so by the time execution reaches, say,
+; print_prompt's or PWD's own K_GETCURDIR call, the active drive could
+; easily be C even though cur_drive is D. Every known caller
+; (print_prompt in progs/shell.asm, progs/pwd.asm, progs/dir.asm's own
+; bare-listing path) calls K_GETCURDIR first and then K_DIR_OPEN/
+; K_DIR_READ directly -- neither of which switches drives itself
+; (only path_resolve does) -- so a stale active drive here silently
+; corrupts every one of them, surfacing as "Error reading directory
+; structure" (PWD) or the prompt's own pp_ioerr fallback. Fixing it
+; once, here, transparently fixes all three (and any future caller)
+; with no changes needed on their end.
+;
+; REGRESSION FIX (2026-07-15, same day): the fix above initially called
+; _switch_drive directly, with no register protection -- but
+; _switch_drive's own documented clobber list (R7, R8, R9, RA, RB, RC,
+; RD, RF) is far broader than this routine's own historical, never-
+; formally-documented-but-real footprint (only R8/R9/RD/RF). Two real
+; callers depend on the old narrow footprint: progs/dir.asm calls
+; K_GETCURDIR as its very first instruction, BEFORE reading its own
+; command tail out of RA -- with RA now clobbered by _switch_drive,
+; dir.asm treated garbage as a path argument and printed its own
+; "Directory not found." for a bare "DIR" with no argument at all
+; (confirmed on hardware, 2026-07-14). progs/shell.asm's own
+; shell_drive-fallback comparison (resolving a bare command name) also
+; keeps a value alive in RB across this exact call, corrupting the
+; fallback candidate path. Fixed by saving/restoring every register
+; _switch_drive might touch that this routine doesn't already need as
+; scratch (R8/R9/RD/RF are already fully overwritten by this routine's
+; own logic either way, so only RA/RB/RC/R7 need protecting) --
+; restores this routine's external behavior to exactly what callers
+; were already (silently) relying on, while still getting the new
+; BPB-activation side effect.
+;
 ; Args:    none
 ; Returns: RD = drive_cur_dir[cur_drive] (0 = that drive's root)
 ;          D  = cur_drive (0-3, 0=C..3=F)
+; Modifies: R8, R9, RD, RF only (RA/RB/RC/R7 explicitly protected, same
+;          footprint as before this whole fix)
 ;------------------------------------------------------------------
 kernel_getcurdir:
+            push    ra
+            push    rb
+            push    rc
+            push    r7
+
+            mov     rf, cur_drive
+            ldn     rf                  ; D = cur_drive
+            call    _switch_drive       ; make the active BPB/FAT cache
+                                        ; actually match cur_drive
+                                        ; before handing back a cluster
+                                        ; number that's only meaningful
+                                        ; relative to it. DF ignored --
+                                        ; cur_drive is only ever set to
+                                        ; an already-present drive (see
+                                        ; kernel_setdrive's own
+                                        ; drive_present check), so this
+                                        ; should never fail in practice.
+                                        ; Cheap when already active (a
+                                        ; documented no-op check in
+                                        ; _switch_drive itself), so this
+                                        ; costs nothing in the common
+                                        ; case.
+
+            pop     r7
+            pop     rc
+            pop     rb
+            pop     ra
+
             mov     rf, cur_drive
             ldn     rf
-            plo     r9                  ; R9.0 = cur_drive (stashed
-                                        ; immediately -- the mov below
-                                        ; clobbers D, gotcha #4)
+            plo     r9                  ; R9.0 = cur_drive (reloaded
+                                        ; fresh -- _switch_drive above
+                                        ; documents R9 among its
+                                        ; clobbers, and the mov here
+                                        ; would clobber D regardless,
+                                        ; gotcha #4)
             ldi     0
             phi     r9                  ; R9 = cur_drive, zero-extended
                                         ; (needed as a clean 16-bit

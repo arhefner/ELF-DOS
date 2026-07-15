@@ -46,6 +46,30 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
+            ; a batch script (see K_BATCH_START below) is remembered by
+            ; the KERNEL, not this program -- this program is reloaded
+            ; fresh every single cycle, so it has no memory of its own
+            ; that would survive from one batch line to the next.
+            ; Checking here, first, means every later branch that loops
+            ; back to "start" (empty line, drive switch, file-not-
+            ; found, ...) naturally advances to the next batch line for
+            ; free, with no special-casing needed anywhere else in this
+            ; file.
+            call    K_BATCH_READLINE
+            lbdf    start_interactive   ; no batch active: read the
+                                        ; console as normal
+
+            ; a batch line is ready in LINE_BUF -- echo it the same way
+            ; an interactive line would look ("C:/> <line>"), so batch
+            ; and interactive output are indistinguishable
+            call    print_prompt
+            mov     rf, LINE_BUF
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+            lbr     start_have_line
+
+start_interactive:
             call    print_prompt
 
             mov     rf, LINE_BUF
@@ -58,6 +82,7 @@ start:
             call    K_INMSG
             db      13,10,0
 
+start_have_line:
             ; skip leading whitespace
             mov     rf, LINE_BUF
             call    f_ltrim             ; RF = first non-space char
@@ -254,8 +279,32 @@ not_found:
             lbr     start
 
 resolved:
+            ; a resolved path ending in ".bat" (case-insensitive) is a
+            ; batch script, not an EDF program -- start it directly
+            ; from here instead of handing off to the kernel's
+            ; run_loop, which would try (and fail) to load it as a
+            ; binary. Any trailing command-tail text is simply
+            ; discarded for now -- v1 batch scripts take no arguments.
+            call    check_batch_ext
+            lbnf    is_batch
+
             ldi     0                   ; exit code 0
             rtn
+
+is_batch:
+            mov     rf, RUN_PATH
+            call    K_BATCH_START
+            lbdf    batch_nested
+
+            lbr     start               ; batch now active -- the next
+                                        ; trip through "start" pulls
+                                        ; its first line via
+                                        ; K_BATCH_READLINE
+
+batch_nested:
+            call    K_INMSG
+            db      "Nested batch not supported.",13,10,0
+            lbr     start
 
 ;------------------------------------------------------------------
 ; write_bin_name: append "/bin/" + the command name (sh_name) at RF,
@@ -325,6 +374,72 @@ check_exists:
             rtn
 
 chk_no:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; check_batch_ext: does RUN_PATH end in ".bat" (case-insensitive)?
+; Args:    none (reads RUN_PATH)
+; Returns: DF = 0 if it does, DF = 1 otherwise
+;------------------------------------------------------------------
+check_batch_ext:
+            mov     rf, RUN_PATH
+            ldi     0
+            plo     r9                  ; R9.0 = length so far (RUN_PATH
+                                        ; is well under 256 bytes, see
+                                        ; RUN_PATH_LEN, so one byte is
+                                        ; enough)
+cbe_scan:
+            ldn     rf
+            lbz     cbe_scanned
+            inc     rf
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     cbe_scan
+cbe_scanned:
+            ; RF -> the NUL terminator; a name under 4 characters can't
+            ; possibly end in ".bat"
+            glo     r9
+            smi     4
+            lbnf    cbe_no
+
+            dec     rf                  ; walk back to the last 4
+            dec     rf                  ; characters
+            dec     rf
+            dec     rf
+
+            ldn     rf                  ; '.' is not a letter -- compare
+            xri     '.'                 ; it directly, with no case-fold
+            lbnz    cbe_no              ; mask (which would corrupt it --
+            inc     rf                  ; see the mask's own reasoning
+                                        ; below)
+
+            ldn     rf
+            ani     $DF                 ; uppercase-fold: safe for a
+                                        ; single-letter comparison
+                                        ; against one fixed target --
+                                        ; only 'B'/'b' (0x42/0x62) clear
+                                        ; to 0x42 under this mask
+            xri     'B'
+            lbnz    cbe_no
+            inc     rf
+
+            ldn     rf
+            ani     $DF
+            xri     'A'
+            lbnz    cbe_no
+            inc     rf
+
+            ldn     rf
+            ani     $DF
+            xri     'T'
+            lbnz    cbe_no
+
+            clc
+            rtn
+
+cbe_no:
             stc
             rtn
 
