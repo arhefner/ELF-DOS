@@ -363,15 +363,13 @@ presolve_find:
             lbnz    presolve_find       ; no match: keep scanning
 
             ; must be a directory
-            mov     rf, path_dirent
-            add16   rf, DIRENT_ATTR
+            mov     rf, path_dirent+DIRENT_ATTR
             ldn     rf
             ani     ATTR_DIR
             lbz     presolve_err        ; not a directory: reject
 
             ; advance presolve_clust to this entry's cluster
-            mov     rf, path_dirent
-            add16   rf, DIRENT_CLUST
+            mov     rf, path_dirent+DIRENT_CLUST
             lda     rf
             phi     rd
             ldn     rf

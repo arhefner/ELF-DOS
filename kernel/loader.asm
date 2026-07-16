@@ -168,8 +168,7 @@
             phi     rd
             ldn     rf
             plo     rd                  ; RD = mem_top
-            mov     rf, LOADER_ARGS
-            add16   rf, 2
+            mov     rf, LOADER_ARGS+2
             ghi     rd
             str     rf
             inc     rf

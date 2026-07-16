@@ -560,8 +560,7 @@ kernel_shell_init:
             ; reject a directory (shouldn't happen for a real file
             ; named "shell", but stay consistent with every other
             ; "must be a file" check in this project)
-            mov     rf, file_dirent
-            add16   rf, DIRENT_ATTR
+            mov     rf, file_dirent+DIRENT_ATTR
             ldn     rf
             ani     ATTR_DIR
             lbnz    kshell_init_err

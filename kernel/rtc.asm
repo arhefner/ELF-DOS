@@ -100,8 +100,7 @@ rtc_no_rtc:
             proc    _pack_fat_datetime
 
             ; --- packed date = ((year-8) << 9) | (month << 5) | day ---
-            mov     rf, cur_time
-            add16   rf, 2
+            mov     rf, cur_time+2
             ldn     rf                  ; D = cur_time[2] (year, 0=1972)
             smi     8                   ; D = year - 8 (FAT epoch 1980)
             lbdf    pfd_year_ok         ; DF=1: no borrow, year >= 1980
@@ -155,8 +154,7 @@ pfd_year_ok:
             mov     r9, rd
 
             ; --- packed time = (hour<<11) | (minute<<5) | (sec>>1) ---
-            mov     rf, cur_time
-            add16   rf, 3
+            mov     rf, cur_time+3
             ldn     rf                  ; D = cur_time[3] (hour, 0-23)
             plo     rd
             ldi     0
@@ -173,8 +171,7 @@ pfd_year_ok:
             shl16   rd
             shl16   rd                  ; RD = hour << 11 (11 shifts)
 
-            mov     rf, cur_time
-            add16   rf, 4
+            mov     rf, cur_time+4
             ldn     rf                  ; D = cur_time[4] (minute, 0-59)
             plo     r7
             ldi     0
@@ -196,8 +193,7 @@ pfd_year_ok:
             or
             plo     rd                  ; RD |= (minute << 5)
 
-            mov     rf, cur_time
-            add16   rf, 5
+            mov     rf, cur_time+5
             ldn     rf                  ; D = cur_time[5] (second, 0-59)
             shr                         ; D = second >> 1 (0-29)
             str     r2

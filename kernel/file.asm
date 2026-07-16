@@ -103,8 +103,8 @@
             extrn   fo_iobuf
             extrn   fo_drive
             extrn   fr_request
-            extrn   dirent_patch_buf
             extrn   fcrw_slot
+            extrn   fcrw_iobuf
             extrn   _fclose_rewrite_size
             extrn   _file_create
             extrn   _delete_located_entry
@@ -334,8 +334,7 @@ fopen_loop:
 
 
             ; must NOT be a directory
-            mov     rf, file_dirent
-            add16   rf, DIRENT_ATTR
+            mov     rf, file_dirent+DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_DIR
             lbnz    fopen_err           ; it's a directory: reject
@@ -376,8 +375,7 @@ fopen_flags_done:
             inc     rb
 
             ; FCB_SCLUST = first cluster from dirent
-            mov     rf, file_dirent
-            add16   rf, DIRENT_CLUST
+            mov     rf, file_dirent+DIRENT_CLUST
             lda     rf                  ; D = cluster high byte
             str     rb
             inc     rb
@@ -386,8 +384,7 @@ fopen_flags_done:
             inc     rb                  ; FCB_SCLUST written
 
             ; FCB_CCLUST = same start cluster
-            mov     rf, file_dirent
-            add16   rf, DIRENT_CLUST
+            mov     rf, file_dirent+DIRENT_CLUST
             lda     rf
             str     rb
             inc     rb
@@ -409,8 +406,7 @@ fopen_flags_done:
             inc     rb
 
             ; FCB_FSIZE = size from dirent (4 bytes, big-endian copy)
-            mov     rf, file_dirent
-            add16   rf, DIRENT_SIZE
+            mov     rf, file_dirent+DIRENT_SIZE
             lda     rf
             str     rb
             inc     rb
@@ -2183,6 +2179,24 @@ fclose_bad_index:
             glo     rd
             str     rf                  ; fcrw_slot = FCB slot base
 
+            ; resolve this FCB's own iobuf and reuse IT below instead
+            ; of a dedicated scratch buffer -- see fcrw_iobuf's own
+            ; comment for why this is safe. RD is still the fresh
+            ; incoming FCB base here, untouched since entry.
+            mov     rf, rd
+            add16   rf, FCB_IOBUF
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = this FCB's iobuf address
+
+            mov     rf, fcrw_iobuf
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf                  ; fcrw_iobuf = FCB's iobuf address
+
             ; load FCB_ELBA into R7/R8 for f_ideread
             mov     rf, rd
             add16   rf, FCB_ELBA
@@ -2195,7 +2209,11 @@ fclose_bad_index:
             ldi     0
             phi     r8                  ; R8.1 = 0 (drive/head)
 
-            mov     rf, dirent_patch_buf
+            mov     r9, fcrw_iobuf
+            lda     r9
+            phi     rf
+            ldn     r9
+            plo     rf                  ; RF = FCB's iobuf (reloaded fresh)
             call    f_ideread
             lbdf    fcrw_err
 
@@ -2207,7 +2225,7 @@ fclose_bad_index:
             ldn     rf
             plo     rd                  ; RD = FCB slot base
 
-            ; RF = dirent_patch_buf + FCB_EOFF + DE_SIZE
+            ; RF = FCB's iobuf + FCB_EOFF + DE_SIZE
             mov     rf, rd
             add16   rf, FCB_EOFF
             lda     rf                  ; D = eoff high byte
@@ -2215,7 +2233,11 @@ fclose_bad_index:
             ldn     rf                  ; D = eoff low byte
             plo     r9                  ; R9 = FCB_EOFF value
 
-            mov     rf, dirent_patch_buf
+            mov     r8, fcrw_iobuf
+            lda     r8
+            phi     rf
+            ldn     r8
+            plo     rf                  ; RF = FCB's iobuf (reloaded fresh)
             add16   rf, r9              ; RF = entry's address in the buffer
             add16   rf, DE_SIZE         ; RF -> entry's 4-byte size field
 
@@ -2261,7 +2283,11 @@ fclose_bad_index:
             ldn     r9
             plo     r8                  ; R8 = FCB_EOFF value
 
-            mov     rf, dirent_patch_buf
+            mov     r9, fcrw_iobuf
+            lda     r9
+            phi     rf
+            ldn     r9
+            plo     rf                  ; RF = FCB's iobuf (reloaded fresh)
             add16   rf, r8
             add16   rf, DE_CLUSTER      ; RF -> entry's 2-byte cluster field
 
@@ -2297,7 +2323,11 @@ fclose_bad_index:
             ldn     rf
             plo     rd                  ; RD = FCB_EOFF value
 
-            mov     rf, dirent_patch_buf
+            mov     rb, fcrw_iobuf
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = FCB's iobuf (reloaded fresh)
             add16   rf, rd
             add16   rf, DE_WRTTIME      ; RF -> entry's WrtTime field
                                         ; (WrtDate immediately follows)
@@ -2332,7 +2362,11 @@ fclose_bad_index:
             ldi     0
             phi     r8
 
-            mov     rf, dirent_patch_buf
+            mov     r9, fcrw_iobuf
+            lda     r9
+            phi     rf
+            ldn     r9
+            plo     rf                  ; RF = FCB's iobuf (reloaded fresh)
             call    f_idewrite
             lbdf    fcrw_err
 
@@ -2385,8 +2419,7 @@ fcrw_err:
             ; rejected by _find_dirent -- nothing further to check here
 
             ; must NOT be a directory
-            mov     rf, file_dirent
-            add16   rf, DIRENT_ATTR
+            mov     rf, file_dirent+DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_DIR
             lbnz    fdel_err            ; it's a directory: reject
@@ -2394,8 +2427,7 @@ fcrw_err:
             ; capture the first cluster now, from file_dirent (a copy,
             ; independent of dir_buf) -- safe to read even after
             ; dir_buf itself gets modified below
-            mov     rf, file_dirent
-            add16   rf, DIRENT_CLUST
+            mov     rf, file_dirent+DIRENT_CLUST
             lda     rf                  ; D = cluster high byte
             phi     r9
             ldn     rf                  ; D = cluster low byte
@@ -3017,13 +3049,11 @@ dcr_dot_pad:
             glo     r9
             lbnz    dcr_dot_pad
 
-            mov     rf, dir_buf
-            add16   rf, DE_ATTR
+            mov     rf, dir_buf+DE_ATTR
             ldi     ATTR_DIR
             str     rf
 
-            mov     rf, dir_buf
-            add16   rf, DE_CLUSTER
+            mov     rf, dir_buf+DE_CLUSTER
             mov     r9, dcr_new_clust
             lda     r9
             phi     ra
@@ -3037,8 +3067,7 @@ dcr_dot_pad:
 
             ; '..' entry at dir_buf+32 -- DE_NAME is 11 bytes total:
             ; 2 dots + 9 trailing spaces
-            mov     rf, dir_buf
-            add16   rf, DIR_ENT_SIZE
+            mov     rf, dir_buf+DIR_ENT_SIZE
             ldi     '.'
             str     rf
             inc     rf
@@ -3055,15 +3084,11 @@ dcr_dotdot_pad:
             glo     r9
             lbnz    dcr_dotdot_pad
 
-            mov     rf, dir_buf
-            add16   rf, DIR_ENT_SIZE
-            add16   rf, DE_ATTR
+            mov     rf, dir_buf+DIR_ENT_SIZE+DE_ATTR
             ldi     ATTR_DIR
             str     rf
 
-            mov     rf, dir_buf
-            add16   rf, DIR_ENT_SIZE
-            add16   rf, DE_CLUSTER
+            mov     rf, dir_buf+DIR_ENT_SIZE+DE_CLUSTER
             mov     r9, dcr_parent
             lda     r9
             phi     ra
@@ -3081,32 +3106,26 @@ dcr_dotdot_pad:
             mov     r9, rd              ; R9 = packed date (stash)
             mov     ra, r8              ; RA = packed time (stash)
 
-            mov     rf, dir_buf
-            add16   rf, DE_WRTTIME
+            mov     rf, dir_buf+DE_WRTTIME
             glo     ra
             str     rf
             inc     rf
             ghi     ra
             str     rf
-            mov     rf, dir_buf
-            add16   rf, DE_WRTDATE
+            mov     rf, dir_buf+DE_WRTDATE
             glo     r9
             str     rf
             inc     rf
             ghi     r9
             str     rf
 
-            mov     rf, dir_buf
-            add16   rf, DIR_ENT_SIZE
-            add16   rf, DE_WRTTIME
+            mov     rf, dir_buf+DIR_ENT_SIZE+DE_WRTTIME
             glo     ra
             str     rf
             inc     rf
             ghi     ra
             str     rf
-            mov     rf, dir_buf
-            add16   rf, DIR_ENT_SIZE
-            add16   rf, DE_WRTDATE
+            mov     rf, dir_buf+DIR_ENT_SIZE+DE_WRTDATE
             glo     r9
             str     rf
             inc     rf
@@ -3182,8 +3201,7 @@ dcr_zero_loop:
             ; max 255) bounds how many sectors a cluster can ever have,
             ; so sector-within-cluster addressing never needs to carry
             ; into the higher LBA bytes
-            mov     rf, dcr_sect_lba
-            add16   rf, 2
+            mov     rf, dcr_sect_lba+2
             ldn     rf
             adi     1
             str     rf                  ; dcr_sect_lba's low byte += 1
@@ -3319,8 +3337,7 @@ dcr_err:
             lbdf    drm_err
 
             ; must BE a directory
-            mov     rf, file_dirent
-            add16   rf, DIRENT_ATTR
+            mov     rf, file_dirent+DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_DIR
             lbz     drm_err             ; not a directory: reject
@@ -3328,8 +3345,7 @@ dcr_err:
             ; capture the target's first cluster now, from file_dirent
             ; (a copy, independent of dir_buf) -- safe to read even
             ; after the empty-check scan below overwrites dir_buf
-            mov     rf, file_dirent
-            add16   rf, DIRENT_CLUST
+            mov     rf, file_dirent+DIRENT_CLUST
             lda     rf                  ; D = cluster high byte
             phi     r9
             ldn     rf                  ; D = cluster low byte
@@ -3584,8 +3600,7 @@ ren_check_sep_done:
             ; copy, independent of dir_buf) -- straight into
             ; fc_new_attr/fc_new_cluster/fc_new_size, since nothing
             ; else touches those until _file_create reads them below ---
-            mov     rf, file_dirent
-            add16   rf, DIRENT_ATTR
+            mov     rf, file_dirent+DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             plo     rb                  ; stash it -- BUG FIX: "mov r9,
                                         ; fc_new_attr" below itself
@@ -3597,8 +3612,7 @@ ren_check_sep_done:
             glo     rb                  ; D = attribute byte (reloaded)
             str     r9
 
-            mov     rf, file_dirent
-            add16   rf, DIRENT_CLUST
+            mov     rf, file_dirent+DIRENT_CLUST
             mov     r9, fc_new_cluster
             lda     rf
             str     r9
@@ -3606,8 +3620,7 @@ ren_check_sep_done:
             ldn     rf
             str     r9
 
-            mov     rf, file_dirent
-            add16   rf, DIRENT_SIZE
+            mov     rf, file_dirent+DIRENT_SIZE
             mov     r9, fc_new_size
             lda     rf
             str     r9
@@ -5100,17 +5113,24 @@ fo_drive:       db      0           ; path_resolve's resolved drive
                                     ; created-file paths)
 fr_request:     dw      0
 
-; dirent_patch_buf/fcrw_slot: scratch for _fclose_rewrite_size.
-; A dedicated 512-byte buffer, deliberately NOT any FCB's own IOBUF --
-; reusing a live FCB's buffer here would corrupt another still-open
-; FCB's legitimately cached sector, since the entry being patched can
-; live in a completely unrelated sector.
-dirent_patch_buf: ds    SECTOR_SIZE
+; fcrw_slot/fcrw_iobuf: scratch for _fclose_rewrite_size. No dedicated
+; 512-byte buffer here -- the routine reuses the closing FCB's own
+; IOBUF instead, safe only because file_write in this project always
+; writes through immediately (no deferred-dirty-buffer design), so by
+; the time file_close reaches here the FCB's iobuf can only hold a
+; stale read cache, and nothing reads through the FCB again once this
+; returns. fcrw_iobuf holds that resolved buffer address, kept in
+; memory (not a register) across the several BIOS/kernel calls in
+; this routine, none of which are proven to preserve any given
+; register -- same reasoning as fcrw_slot itself.
 fcrw_slot:      dw      0           ; FCB slot base, kept in memory
                                     ; (not a register) across
                                     ; f_ideread/f_idewrite, since only
                                     ; RA/RC/RD are confirmed preserved
                                     ; by those calls
+fcrw_iobuf:     dw      0           ; this FCB's own IOBUF address,
+                                    ; resolved once at entry, reused
+                                    ; instead of a dedicated buffer
 
 ; fc_*: scratch for _file_create/_gen_short_name (new-file creation).
 ; fc_shortname/fc_needs_lfn/fc_namelen/fc_lfncount/fc_checksum hold
@@ -5201,8 +5221,8 @@ ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
                 public  fo_handle
                 public  fo_drive
                 public  fr_request
-                public  dirent_patch_buf
                 public  fcrw_slot
+                public  fcrw_iobuf
                 public  fc_shortname
                 public  fc_needs_lfn
                 public  fc_namelen
