@@ -40,6 +40,7 @@
             extrn   batch_iobuf
             extrn   batch_handle
             extrn   batch_scratch
+            extrn   brl_count
 
 ; ----------------------------------------------------------------
 ; batch_start: begin executing a batch script.
@@ -106,15 +107,30 @@ bst_reject:
             ani     FCB_F_OPEN
             lbz     brl_inactive        ; not open: no batch active
 
+            mov     rf, brl_count
             ldi     0
-            plo     r9                  ; R9.0 = characters written to
-                                        ; LINE_BUF so far this call
+            str     rf                  ; brl_count = characters written to
+                                        ; LINE_BUF so far this call. Kept
+                                        ; in MEMORY, not a register --
+                                        ; file_read's own header documents
+                                        ; R9 (and every other register
+                                        ; except D/DF) as clobbered, so no
+                                        ; register survives the call to it
+                                        ; below. This was the real bug
+                                        ; behind the batch-script garbage
+                                        ; output found on hardware
+                                        ; 2026-07-15: R9 used to hold this
+                                        ; count across that exact call, and
+                                        ; file_read stomped it on every
+                                        ; single byte read. See CLAUDE.md
+                                        ; gotcha #10.
 
 brl_loop:
             ; bounds check BEFORE reading another byte, so LINE_BUF's
             ; 128-byte buffer (see kernel.inc) is never overrun --
             ; leaves room for the forced NUL terminator
-            glo     r9
+            mov     rf, brl_count
+            ldn     rf                  ; D = brl_count
             smi     126
             lbdf    brl_term
 
@@ -148,19 +164,34 @@ brl_loop:
             xri     10                  ; LF?
             lbz     brl_term            ; line complete
 
-            ; append the byte to LINE_BUF
+            ; append the byte to LINE_BUF at offset brl_count. R9 is
+            ; rebuilt fresh from memory right here, immediately before
+            ; use -- add16 itself doesn't clobber its second operand,
+            ; only D/DF, so this is safe as long as nothing between this
+            ; reload and the add16 below can touch R9 (nothing does).
+            ldi     0
+            phi     r9
+            mov     rb, brl_count
+            ldn     rb
+            plo     r9                  ; R9 = brl_count (16-bit)
             mov     rf, LINE_BUF
-            add16   rf, r9
+            add16   rf, r9              ; RF = LINE_BUF + brl_count
             mov     rb, batch_scratch
-            ldn     rb                  ; D = the byte (reload once
-                                        ; more -- add16 clobbered it)
+            ldn     rb                  ; D = the byte (reload -- add16
+                                        ; clobbered it)
             str     rf
-            glo     r9
+            mov     rb, brl_count
+            ldn     rb
             adi     1
-            plo     r9
+            str     rb                  ; brl_count += 1
             lbr     brl_loop
 
 brl_term:
+            ldi     0
+            phi     r9
+            mov     rb, brl_count
+            ldn     rb
+            plo     r9
             mov     rf, LINE_BUF
             add16   rf, r9
             ldi     0
@@ -172,7 +203,8 @@ brl_eof:
             ; if any characters were accumulated this call, return them
             ; as a final, unterminated line -- the NEXT call will hit
             ; EOF again with a fresh (zero) count and close for real
-            glo     r9
+            mov     rf, brl_count
+            ldn     rf
             lbnz    brl_term
 
             mov     ra, batch_handle
@@ -213,10 +245,17 @@ batch_handle:   db      0           ; fd_table index while a batch's
 batch_scratch:  db      0           ; 1-byte read scratch for
                                     ; batch_readline's byte-at-a-time
                                     ; loop
+brl_count:      db      0           ; characters written to LINE_BUF so
+                                    ; far in the current batch_readline
+                                    ; call -- kept in memory rather than
+                                    ; a register, since file_read (called
+                                    ; once per byte) documents R9 among
+                                    ; its clobbered registers
 
                 public  batch_fcb
                 public  batch_iobuf
                 public  batch_handle
                 public  batch_scratch
+                public  brl_count
 
             endp
