@@ -571,8 +571,27 @@ dns_in_cluster:
 
             call    _cluster_to_lba     ; R7/R8 = LBA of first sector
 
-            ; add dir_sect within cluster
-            glo     rc                  ; D = dir_sect
+            ; add dir_sect within cluster. BUG FIX (2026-07-15,
+            ; hardware-found): this used to read dir_sect via "glo rc",
+            ; trusting RC to still hold the value stashed into it
+            ; at the top of this proc -- but _cluster_to_lba's own
+            ; documented "Modifies" list includes RC (its own internal
+            ; shift-count scratch), so by the time it returns here,
+            ; RC.0 is always 0 (its shift loop's own terminal value),
+            ; not the real dir_sect. Every sector-within-a-cluster read
+            ; silently computed the SAME LBA as sector 0 as a result --
+            ; invisible on every card tested before this one because
+            ; spc=1 (one sector per cluster) meant dir_sect was always
+            ; 0 here anyway; a 512MB card's spc=16 finally made this
+            ; reachable with a genuinely nonzero dir_sect, hanging any
+            ; directory listing needing more than one sector-worth of
+            ; entries (16 slots) in a single cluster -- including the
+            ; boot-time "C:/bin/shell" lookup once /bin grew past 8-9
+            ; files. Re-reading fresh from dir_sect's own memory
+            ; location instead of trusting a register survives any
+            ; callee's clobber list, documented or not.
+            mov     rf, dir_sect
+            ldn     rf                  ; D = dir_sect (fresh, correct)
             str     r2
             glo     r7
             add                         ; R7.0 += dir_sect, DF = carry
