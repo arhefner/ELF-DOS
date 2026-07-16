@@ -2,90 +2,128 @@
 
 A FAT16, DOS-like operating system for the RCA CDP1802 processor, targeting
 Elf/OS-compatible hardware. It boots from an SD card via an MBR partition
-table, brings up a small resident kernel, and hands off to a command shell
-where every command — `VER`, `DIR`, `CD`, `TYPE`, ... — is an ordinary
-loadable `.EXE`, not a built-in.
+table (up to 4 FAT16 partitions, addressable as drive letters `C:`-`F:`),
+brings up a small resident kernel, and hands off to a command shell where
+every command — `DIR`, `CD`, `TYPE`, `COPY`, ... — is an ordinary loadable
+executable, not a built-in.
 
 ## Status
 
-Actively in development. Currently working, confirmed on real hardware:
+Actively in development. Currently working, confirmed on real hardware
+unless noted otherwise.
 
-- Boot chain: MBR -> `krnboot` -> kernel init (BPB/partition parsing).
+### Boot and filesystem
+
+- Boot chain: MBR -> `krnboot` -> kernel init, scanning up to 4 FAT16
+  partitions on the boot device and making each one addressable as a drive
+  letter (`C:`-`F:`). Current-directory state is tracked per drive (classic
+  DOS semantics — `CD D:\games` while `C:` is active updates `D:`'s own
+  remembered directory without switching to it).
 - FAT16 directory listing, including long file names (LFN).
 - File open/read/close/write, including creating a brand-new file (with
-  full long file name (LFN) generation for names that aren't already
-  clean 8.3 short names) and append mode -- extending or overwriting an
-  existing file, growing its cluster chain across multiple clusters via
-  `fat_alloc`/`fat_set`/`fat_flush`, and rewriting the directory entry's
-  size/cluster fields on close -- confirmed on hardware.
-- Multi-component and absolute paths (e.g. `TYPE /cfg/env.dat`), via
-  `K_PATH_RESOLVE` (`kernel/path.asm`), used by `file_open`, `CD`, and
-  `DIR` (which can now list a directory without changing into it) --
-  confirmed on hardware.
-- `PWD`: prints the current directory's full path from root, by walking
-  up via each level's `..` entry and recovering its own name from its
-  parent's listing (the reverse of path resolution).
-- A handful of shell utilities: `VER`, `DIR`, `CD`, `TYPE`, `PWD`, plus
-  `WTEST`/`ATEST` (write/append-mode test/exercise tools).
-- Last-write file timestamps: every file create/write records the current
-  time (from the RTC when present, via `kernel/rtc.asm`; a fixed default
-  otherwise), and `DIR` shows it as an `MM/DD/YYYY HH:MM` column --
-  confirmed on hardware.
-- `COPY <source> <destination>`: single file to single file (no
-  wildcards/trees), composed entirely from existing `file_open`/
-  `file_read`/`file_write`/`file_close` -- no new kernel primitive needed.
-  Confirmed on hardware (surfaced and led to fixing three real `file_open`/
-  `prog_load` bugs -- see `CLAUDE.md`). If `<destination>` is an existing
-  directory, the source is copied into it under its own name. If the
-  resolved destination file already exists, prompts to confirm the
-  overwrite (Y/N). Confirmed on hardware.
-- `DEL <filename>`: deletes a file (refuses directories) via the new
-  `K_FILE_DELETE` kernel call (`kernel/file.asm`'s `file_delete`), which
-  marks the directory entry deleted on disk *before* freeing its cluster
-  chain, so an interruption mid-delete leaves at worst a recoverable
-  cluster leak rather than a live entry pointing at freed clusters, and
-  cleans up the file's LFN entries alongside its short entry. Confirmed
-  on hardware.
-- `MD <path>`: creates an empty subdirectory (single-level only -- the
-  parent must already exist). Confirmed on hardware.
-- `RD <path>`: removes an empty subdirectory (refuses non-empty
-  directories, `.`/`..`, and the root). Confirmed on hardware.
-- `REN <path> <newname>`: renames a file or directory within its own
-  parent directory (no cross-directory move). Confirmed on hardware.
-- `REBOOT`: warm-reboots via the BIOS boot vector (reloads MBR/krnboot/
-  kernel fresh from disk). Not yet hardware-tested.
+  full LFN generation for names that aren't already clean 8.3 short names),
+  overwrite, and append mode — growing a file's cluster chain across
+  multiple clusters and rewriting its directory entry's size/cluster fields
+  on close.
+- Multi-component, absolute, and cross-drive paths (e.g. `TYPE /cfg/env.dat`,
+  `TYPE D:/cfg/env.dat`), resolved centrally by `K_PATH_RESOLVE`
+  (`kernel/path.asm`).
+- Last-write file timestamps: every create/write records the current time
+  (from the RTC when present, a fixed default otherwise), shown by `DIR`/
+  `STAT` as an `MM/DD/YYYY HH:MM` column.
 
-Not yet supported (see `CLAUDE.md` for the fuller running notes):
+### Shell
 
-- `SETTIME` (or similar) to set/correct the clock -- deliberately deferred
-  alongside the rest of the small-utility-command backlog below.
-- Multiple partitions / drive letters (`C:`, `D:`, ...).
-- More shell utilities: `MEM`, `ATTRIB`, etc.
-- Batch/script support.
+- **Zero built-in commands.** Every command is a standalone executable in
+  `/bin` (bare-named, no extension); the shell itself is an ordinary
+  loadable program (`/bin/shell`), not kernel-resident code — the kernel
+  just runs a small, permanently-resident loop that alternately loads and
+  runs the shell (which reads one command line, resolves it, and returns)
+  and whatever it resolved.
+- **Executable search**: a bare command name is looked up in the active
+  drive's own `/bin`, falling back to the boot drive's `/bin` if not found
+  there (so other drives don't each need their own copy of every command);
+  a name containing `/` is loaded directly as a full path.
+- **Command-line parsing**: the shell tokenizes each line into an
+  argc/argv pair (matching C's `main(argc, argv)` convention) before
+  handing off to a program, with shell-style quoting (`"..."` keeps
+  embedded spaces in one argument) and backslash-escaping (`\X` for a
+  literal `X`, e.g. `\"`, `\\`, or `\ ` for a literal space outside quotes).
+- **Batch scripts**: a resolved command path ending in `.bat` runs as a
+  flat (non-nested) batch script — each line executed and echoed in turn,
+  same as typing it interactively.
+- A bare drive letter (`C:`, `D:`, ...) switches the active drive — the one
+  narrow exception to "no built-in commands," since it's shell syntax, not
+  a program.
+
+### Commands
+
+| Command | Description |
+|---|---|
+| `DIR [path]` | List a directory (defaults to current) |
+| `CD <path>` | Change the current directory (per-drive) |
+| `PWD` | Print the current directory's full path |
+| `TYPE <file>` | Print a file's contents |
+| `MORE <file>` | Page through a file's contents, screen at a time |
+| `HEXDUMP <file>` | `hexdump -C`-style hex/ASCII dump of a file |
+| `COPY <src> <dst>` | Copy a file (into a directory, or with overwrite prompt) |
+| `DEL <file>` | Delete a file |
+| `REN <path> <newname>` | Rename a file or directory |
+| `MD <path>` / `RD <path>` | Create / remove an empty subdirectory |
+| `STAT <path>` | Show a file or directory's metadata |
+| `EDLIN <file>` | Minimal `edlin`-style line editor (`L`/`I`/`A`/`D`/`E`/`Q`) |
+| `ARGS [args...]` | Print argv, one entry per line (tokenizer test aid) |
+| `ECHO [-n] [args...]` | Print arguments, space-separated |
+| `MR` / `MS [-u\|-b] <file>` | Receive / send a file over the serial port |
+| `SYS <kernel-full.bin>` | Install a new kernel from the running system |
+| `MON` | Drop into the ROM monitor |
+| `VER` | Print the ELF-DOS version |
+| `REBOOT` | Warm-reboot (reloads MBR/krnboot/kernel from disk) |
+
+`WTEST`/`ATEST`/`WBTEST` are internal regression-test tools (write/append/
+large-write exercise) rather than everyday commands, but build and install
+the same as everything else in `progs/`.
+
+### Not yet supported
+
+See `CLAUDE.md` for the fuller running notes and roadmap.
+
+- I/O redirection (`>`, `>>`, `<`).
+- Enhanced batch scripting (argument substitution, comments, labels/`GOTO`).
+- Command history (needs a raw-input replacement for the console's
+  line-read routine to handle arrow-key escape sequences).
+- Filename wildcards.
+- `SETTIME`/`SETDATE` to set/correct the clock.
+- More shell utilities (`MEM`, `ATTRIB`, etc).
 
 ## Architecture
 
 - **Kernel API jump table** at a fixed address (`$0106`), one 3-byte `lbr`
-  per call. Slots are append-only, so a program built against an older
-  kernel keeps working after the kernel is rebuilt. Programs include
+  per call. Slots are append-only pre-release convention going forward
+  (the table underwent one deliberate full renumbering before any external
+  code depended on it — see `CLAUDE.md`), so a program built against an
+  older kernel keeps working after the kernel is rebuilt. Programs include
   `include/kernel_api.inc`, which restates just the constants they need
   (call addresses, program header layout, directory-entry layout) rather
   than sharing the kernel's own internal headers — program code never
   depends on kernel internals that could change across updates.
-- **Shell has zero built-in commands.** Every command is a standalone
-  executable in `progs/`, loaded and run via the kernel's loader
-  (`prog_load`/`prog_exec`).
-- **The shell itself is an ordinary loadable program** (`/bin/shell`
-  on-device), not kernel-resident code. The kernel just runs a small,
-  permanently-resident loop that alternately loads and runs the shell
-  (which reads one command line, resolves it to a path, and returns)
-  and whatever it resolved. Executables are found by bare name (no
-  extension) — a name given on its own is looked up in `/bin`; a name
-  containing `/` is loaded directly as a full path.
+- **Command-line ABI**: a program receives `RA` = pointer to its argv table
+  and `RC` = argc at entry (`argv[0]` is its own invocation name). Both are
+  register-passed rather than a fixed address a program's own code would
+  have to reference by name, so the kernel is free to relocate the
+  underlying storage in a future rebuild without breaking already-built
+  programs.
 - **Program binaries** are a small custom format: `'EDF'` magic + version
-  byte + 2 reserved bytes, then code. Programs load at a fixed
-  `PROG_BASE` above the kernel's own memory, and receive their command-
-  line tail via a register at entry (DOS-PSP style).
+  byte + 2 reserved bytes, then code. Programs load at a fixed `PROG_BASE`
+  above the kernel's own memory (chosen to double as the boot loader's own
+  load address, since that sector is dead once boot completes).
+- **Batch script state lives in the kernel**, not the shell: the shell is
+  reloaded from disk on every single command cycle and has no memory of
+  its own between lines, so "which file, how far in" is tracked in a
+  small kernel-resident FCB instead.
+- **Multi-partition support**: up to 4 drives, each with its own BPB/FAT
+  cache, swapped in on demand (`_switch_drive`, `kernel/fat.asm`) whenever
+  a path names a different drive than the one currently active.
 
 See `CLAUDE.md` for the full architectural contract, toolchain gotchas
 specific to Asm/02 1802 assembly, and the conventions for working in this
@@ -96,10 +134,10 @@ codebase.
 ```
 boot/       MBR and second-stage boot loader (krnboot)
 kernel/     Kernel proper: BPB/partition init, FAT, directory, file I/O,
-            RTC/timestamps, program loader
+            RTC/timestamps, program loader, batch-script execution
 include/    Shared headers: BIOS calls, kernel-internal structures,
             the kernel API jump-table contract, opcode macros
-progs/      Shell command programs (VER, DIR, CD, TYPE, PWD, REBOOT, ...),
+progs/      Shell command programs (DIR, CD, TYPE, COPY, EDLIN, ...),
             including the shell itself (shell.asm, run as /bin/shell)
 sys/        Host-side tool for writing images to a target device
 ```
@@ -137,4 +175,6 @@ extension), matching the on-device layout exactly, so the directory can
 be copied wholesale rather than file-by-file — e.g.
 `mcopy -i /dev/sdX@@1M bin/* ::BIN/`. This includes the shell itself
 (`bin/shell`), which the kernel loads by the exact path `/bin/shell` at
-boot.
+boot. A kernel already installed can also be updated from the *running*
+system itself via `MR` (receive `kernel-full.bin` over serial) + `SYS`
+(install it) + `REBOOT`, with no card swap needed.
