@@ -68,52 +68,42 @@ DST_BUF_LEN:    equ     132
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = command tail = "<source> <destination>"
-            ldn     ra
-            lbz     usage_error
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] = source, argv[2] =
+            ; destination -- the shell's own tokenizer already handles
+            ; quoting/escaping and multiple/trailing spaces, so no
+            ; hand-rolled splitting is needed here anymore.
+            glo     rc
+            smi     3
+            lbnf    usage_error         ; argc < 3: source and/or
+                                        ; destination missing
 
-            ; find the space separating the two arguments
-            mov     rf, ra
-scan_src_end:
-            ldn     rf
-            lbz     usage_error         ; only one token: no destination
-            xri     ' '
-            lbz     have_src_end
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[1] (source)
+            mov     rf, src_ptr
+            ghi     rd
+            str     rf
             inc     rf
-            lbr     scan_src_end
-have_src_end:
-            ldi     0
-            str     rf                  ; null-terminate source in place
+            glo     rd
+            str     rf                  ; src_ptr = source pointer
+
+            mov     rb, ra
+            add16   rb, 4               ; RB = &argv[2]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[2] (destination)
+            mov     rf, dst_ptr
+            ghi     rd
+            str     rf
             inc     rf
-
-            ; skip any additional spaces before the destination
-skip_spaces:
-            ldn     rf
-            xri     ' '
-            lbnz    have_dst
-            inc     rf
-            lbr     skip_spaces
-have_dst:
-            ldn     rf
-            lbz     usage_error         ; nothing after the spaces
-
-            ; save both pointers in memory: RA is still the (now
-            ; null-terminated) source string, RF the destination
-            ; string; both get clobbered by the K_FILE_OPEN calls
-            ; below, so neither can stay in a register
-            mov     rb, src_ptr
-            ghi     ra
-            str     rb
-            inc     rb
-            glo     ra
-            str     rb                  ; src_ptr = source string pointer
-
-            mov     rb, dst_ptr
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; dst_ptr = destination string ptr
+            glo     rd
+            str     rf                  ; dst_ptr = destination pointer
 
 ;------------------------------------------------------------------
 ; If dst_ptr names an existing directory, redirect the real

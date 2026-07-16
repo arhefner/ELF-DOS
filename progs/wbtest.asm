@@ -38,16 +38,19 @@ LAST_CHUNK_LEN:     equ     20      ; 63828 - (997*64) = 20
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ldn     ra
-            lbnz    have_name
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] is the filename argument.
+            glo     rc
+            smi     2
+            lbnf    usage               ; argc < 2: no filename given
 
-            call    K_INMSG
-            db      "Usage: WBTEST <filename>",13,10,0
-            ldi     1                   ; exit code 1 = error
-            rtn
-
-have_name:
-            mov     rf, ra              ; RF = filename
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1] (filename)
             mov     rd, wbtest_fcb      ; RD = our FCB struct
             mov     ra, wbtest_iobuf    ; RA = our I/O buffer (movs
                                         ; before the mode load below,
@@ -180,6 +183,12 @@ open_error:
             call    K_INMSG
             db      "Cannot create file.",13,10,0
             ldi     1
+            rtn
+
+usage:
+            call    K_INMSG
+            db      "Usage: WBTEST <filename>",13,10,0
+            ldi     1                   ; exit code 1 = error
             rtn
 
 write_error:

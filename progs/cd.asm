@@ -45,17 +45,20 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = command tail = the path argument
-            ldn     ra
-            lbnz    have_arg
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] is the path argument.
+            glo     rc
+            smi     2
+            lbnf    usage               ; argc < 2: no path given
 
-            call    K_INMSG
-            db      "Usage: CD <directory>",13,10,0
-            ldi     1                   ; exit code 1 = error
-            rtn
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1] (the path argument)
 
-have_arg:
-            mov     rf, ra              ; RF = path argument
             call    K_PATH_RESOLVE      ; RD = parent cluster, RF = final
                                         ; component, RC.0 = resolved
                                         ; drive, DF = 0/1
@@ -148,6 +151,12 @@ not_dir:
             call    K_INMSG
             db      "Not a directory.",13,10,0
             ldi     1
+            rtn
+
+usage:
+            call    K_INMSG
+            db      "Usage: CD <directory>",13,10,0
+            ldi     1                   ; exit code 1 = error
             rtn
 
 arg_ptr:    dw      0

@@ -73,28 +73,49 @@ LINE_BUF:       equ     $0080       ; shell command input buffer (128 bytes)
 ; if this ever changes.
 LOADER_ARGS:    equ     PROG_BASE-4
 
-; RUN_TAIL_PTR/RUN_PATH: the shell-as-a-program handoff protocol. The
-; kernel can't let the shell load and run a child command itself -- the
-; shell runs FROM PROG_BASE, so loading a child there would overwrite
-; the shell's own currently-executing code before the child's own
-; "rtn" could ever return into it (the same reason the collapsed
-; prog_run/prog_run_shell, kernel/loader.asm, have no jump-table slot
-; at all -- nothing could ever call them safely except the kernel's
-; own run_loop). Instead, the shell's only job each round is: read a
-; command line, resolve it to a path AND CONFIRM IT EXISTS (bare name
-; -> "/bin/"+name on the active drive, falling back to the shell's own
-; drive if not found there; a name containing '/' -> used as-is,
-; checked once, no fallback), write that path + the tail's location
-; here, and return normally -- the KERNEL's own small run_loop
-; (kernel_init, see kernel.asm) is what actually calls prog_run for
-; the real command, staying safely in kernel memory throughout. Fixed
-; addresses, not normal linked symbols, for the same reason
-; LOADER_ARGS is fixed: progs/shell.asm is assembled and linked
+; RUN_ARGC/RUN_ARGV_TABLE/RUN_PATH: the shell-as-a-program handoff
+; protocol. The kernel can't let the shell load and run a child command
+; itself -- the shell runs FROM PROG_BASE, so loading a child there
+; would overwrite the shell's own currently-executing code before the
+; child's own "rtn" could ever return into it (the same reason the
+; collapsed prog_run/prog_run_shell, kernel/loader.asm, have no
+; jump-table slot at all -- nothing could ever call them safely except
+; the kernel's own run_loop). Instead, the shell's only job each round
+; is: read a command line, tokenize it (quoting/escapes-aware -- see
+; progs/shell.asm), resolve argv[0] to a path AND CONFIRM IT EXISTS
+; (bare name -> "/bin/"+name on the active drive, falling back to the
+; shell's own drive if not found there; a name containing '/' -> used
+; as-is, checked once, no fallback), write that path + the argument
+; count + the argument table here, and return normally -- the KERNEL's
+; own small run_loop (kernel_init, see kernel.asm) is what actually
+; calls prog_run for the real command, staying safely in kernel memory
+; throughout. Fixed addresses, not normal linked symbols, for the same
+; reason LOADER_ARGS is fixed: progs/shell.asm is assembled and linked
 ; completely separately from the kernel and needs an address stable
 ; across kernel rebuilds.
-RUN_TAIL_PTR:   equ     PROG_BASE-6     ; 2 bytes: pointer into LINE_BUF
-                                        ; where the command tail starts
-RUN_PATH:       equ     PROG_BASE-70    ; 64-byte buffer: resolved path
+;
+; IMPORTANT: these three are kernel/shell-internal plumbing ONLY.
+; Ordinary programs never reference RUN_ARGC/RUN_ARGV_TABLE/RUN_PATH by
+; name -- they only ever see the RA (argv pointer)/RC (argc) register
+; values built from them at entry (see the "Command line" section
+; below). This is deliberate: a fixed address baked into a program's
+; own compiled code breaks every already-deployed copy of that program
+; the moment the address ever needs to move (this project has been
+; burned by that twice already -- see the toolchain-gotchas history in
+; /CLAUDE.md for the PROG_BASE moves and the kernel jump-table
+; renumber). Routing argc/argv through registers instead means a
+; future kernel rebuild can freely relocate any of these three without
+; requiring a single program to be rebuilt.
+RUN_ARGC:       equ     PROG_BASE-6     ; word: argument count (argv[0]
+                                        ; is the program name, so this
+                                        ; is always >= 1 on success)
+RUN_ARGV_TABLE: equ     PROG_BASE-38    ; ARGV_MAX_ARGS 2-byte pointers,
+                                        ; argv[0..argc-1], each pointing
+                                        ; to a null-terminated token
+                                        ; inside LINE_BUF
+ARGV_MAX_ARGS:  equ     16              ; RUN_ARGV_TABLE's own capacity,
+                                        ; for bounds-checking writes to it
+RUN_PATH:       equ     PROG_BASE-102   ; 64-byte buffer: resolved path
                                         ; to load next
 RUN_PATH_LEN:   equ     64              ; RUN_PATH's own size, for
                                         ; bounds-checking writes to it

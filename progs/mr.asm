@@ -119,26 +119,41 @@ MRERR_WRITE:        equ     3           ; K_FILE_WRITE failed
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = command tail = "[-u|-b ]<filename>". Check for an
-            ; optional UART/bit-bang selector flag before anything else
-            ; -- if present, advance RA past it and record the choice
-            ; in mr_io_mode (memory, since mr_receive -- a separate
-            ; proc -- needs to read it once at block-entry time,
-            ; outside the tight loop itself). Defaults to MR_IO_UART
-            ; when no flag is given.
-            ldn     ra
-            lbz     usage
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough).
+            ; argv[0] is this program's own name. argv[1] may be an
+            ; optional "-u"/"-b" flag -- now a clean, standalone token
+            ; (the shell's own tokenizer already split on whitespace,
+            ; so no per-character space-boundary check is needed
+            ; anymore, just a direct 2-character-plus-NUL comparison);
+            ; the filename is argv[2] if a flag was given, else
+            ; argv[1]. mr_io_mode (memory) records the choice, since
+            ; mr_receive -- a separate proc -- needs to read it once at
+            ; block-entry time, outside the tight loop itself. Defaults
+            ; to MR_IO_UART when no flag is given.
+            glo     rc
+            smi     2
+            lbnf    usage               ; argc < 2: nothing at all
 
-            mov     rf, ra
-            lda     rf                  ; D = 1st char
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[1] pointer
+
+            mov     rf, rd
+            ldn     rf                  ; D = argv[1][0]
             xri     '-'
             lbnz    not_flag
-            lda     rf                  ; D = 2nd char (u or b)
+
+            inc     rf
+            ldn     rf                  ; D = argv[1][1]
             plo     r8                  ; R8.0 = the flag letter (temp)
-            ldn     rf                  ; D = 3rd char (not advanced --
-                                        ; still need it as the space to
-                                        ; skip below)
-            xri     ' '
+
+            inc     rf
+            ldn     rf                  ; D = argv[1][2] -- must be NUL
+                                        ; for "-u"/"-b" to be exactly
+                                        ; this whole token
             lbnz    not_flag
 
             glo     r8                  ; D = flag letter again
@@ -148,39 +163,57 @@ start:
             xri     'b'
             lbz     flag_bitbang
             lbr     not_flag            ; unrecognized letter -- fall
-                                        ; back to treating the whole
-                                        ; tail as a (probably invalid)
-                                        ; filename, same as no flag
+                                        ; back to treating argv[1]
+                                        ; itself as the (probably
+                                        ; invalid) filename
 
-flag_uart:  inc     rf                  ; skip the space itself
-            mov     ra, rf              ; RA now points at the filename
+flag_uart:
+            glo     rc
+            smi     3
+            lbnf    usage               ; flag given but argc < 3: no
+                                        ; filename after it
+            mov     rb, ra
+            add16   rb, 4               ; RB = &argv[2]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[2] (filename)
             mov     rf, mr_io_mode
             ldi     MR_IO_UART
             str     rf
-            lbr     have_check
+            lbr     have_name_ptr
 
 flag_bitbang:
-            inc     rf
-            mov     ra, rf
+            glo     rc
+            smi     3
+            lbnf    usage
+            mov     rb, ra
+            add16   rb, 4               ; RB = &argv[2]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[2] (filename)
             mov     rf, mr_io_mode
             ldi     MR_IO_BITBANG
             str     rf
-            lbr     have_check
+            lbr     have_name_ptr
 
-not_flag:   mov     rf, mr_io_mode
+not_flag:
+            ; RD already holds argv[1]'s pointer, untouched by the
+            ; flag-character checks above -- that's the filename
+            mov     rf, mr_io_mode
             ldi     MR_IO_UART          ; default
             str     rf
+            lbr     have_name_ptr
 
-have_check: ldn     ra
-            lbnz    have_name
-
-usage:      call    K_INMSG
+usage:
+            call    K_INMSG
             db      "Usage: MR [-u|-b] <filename>",13,10,0
             ldi     1                   ; exit code 1 = error
             rtn
 
-have_name:
-            mov     rf, ra              ; RF = filename
+have_name_ptr:
+            mov     rf, rd              ; RF = filename
             mov     rd, mr_fcb_struct   ; RD = our FCB struct
             mov     ra, mr_iobuf        ; RA = our I/O buffer (movs
                                         ; before the mode load below,

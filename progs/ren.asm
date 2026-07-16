@@ -24,37 +24,34 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = command tail = "<path> <newname>"
-            ldn     ra
-            lbz     usage_error
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] = path, argv[2] = newname --
+            ; the shell's own tokenizer already handles quoting/
+            ; escaping and multiple/trailing spaces, so no hand-rolled
+            ; splitting is needed here anymore. No call happens between
+            ; reading both arguments and using them, so both go
+            ; straight into the registers K_FILE_RENAME itself expects
+            ; with no memory stash needed.
+            glo     rc
+            smi     3
+            lbnf    usage_error         ; argc < 3: path and/or newname
+                                        ; missing
 
-            ; find the space separating the two arguments
-            mov     rf, ra
-scan_path_end:
-            ldn     rf
-            lbz     usage_error         ; only one token: no newname
-            xri     ' '
-            lbz     have_path_end
-            inc     rf
-            lbr     scan_path_end
-have_path_end:
-            ldi     0
-            str     rf                  ; null-terminate path in place
-            inc     rf
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1] (path)
 
-            ; skip any additional spaces before the newname
-skip_spaces:
-            ldn     rf
-            xri     ' '
-            lbnz    have_newname
-            inc     rf
-            lbr     skip_spaces
-have_newname:
-            ldn     rf
-            lbz     usage_error         ; nothing after the spaces
+            mov     rb, ra
+            add16   rb, 4               ; RB = &argv[2]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[2] (newname)
 
-            mov     rd, rf              ; RD = newname pointer
-            mov     rf, ra              ; RF = path pointer
             call    K_FILE_RENAME       ; DF = 0/1
             lbdf    ren_error
 

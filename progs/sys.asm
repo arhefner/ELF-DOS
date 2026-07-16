@@ -78,38 +78,42 @@ SYSERR_STAT:        equ     10  ; directory-entry lookup failed (not
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = command tail = the kernel-full.bin filename
-            ldn     ra
-            lbnz    have_name
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] is the filename argument.
+            glo     rc
+            smi     2
+            lbnf    usage               ; argc < 2: no filename given
 
-            call    K_INMSG
-            db      "Usage: SYS <kernel-full.bin>",13,10,0
-            ldi     1                   ; exit code 1 = error
-            rtn
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1] (filename)
 
-have_name:
             ; stash the filename pointer for sys_install's own later
-            ; directory-entry lookup -- RA is not guaranteed to survive
-            ; the K_FILE_OPEN call below (gotcha #8: assume clobbered
+            ; directory-entry lookup -- not guaranteed to survive the
+            ; K_FILE_OPEN call below (gotcha #8: assume clobbered
             ; unless proven otherwise), so it has to be saved before
             ; that call, not read back out afterward.
-            mov     rf, sys_path_ptr
-            ghi     ra
-            str     rf
-            inc     rf
-            glo     ra
-            str     rf                  ; sys_path_ptr = filename pointer
+            mov     rb, sys_path_ptr
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; sys_path_ptr = filename pointer
 
-            mov     rf, ra              ; RF = filename
             mov     rd, sys_fcb_struct  ; RD = our FCB struct
             mov     ra, sys_iobuf       ; RA = our I/O buffer -- movs
                                         ; before the mode load below,
                                         ; since mov clobbers D (this is
-                                        ; safe even though sys_path_ptr
-                                        ; already captured RA's INCOMING
-                                        ; value above, since that capture
+                                        ; safe even though RA held the
+                                        ; incoming argv pointer above --
+                                        ; sys_path_ptr's own capture
                                         ; already happened before this
-                                        ; point)
+                                        ; point, and RF still holds the
+                                        ; filename pointer independently)
             ldi     0                   ; mode = read
             call    K_FILE_OPEN         ; D = handle, DF=0/1
             lbdf    open_error
@@ -184,6 +188,12 @@ open_error:
             ldi     1
             rtn
 
+usage:
+            call    K_INMSG
+            db      "Usage: SYS <kernel-full.bin>",13,10,0
+            ldi     1                   ; exit code 1 = error
+            rtn
+
 sys_fcb_struct: ds      FCB_LEN
 sys_iobuf:      ds      FCB_IOBUF_LEN
 saved_handle:   db      0
@@ -215,9 +225,9 @@ sys_path_ptr:   dw      0
 ;
 ; Args:    D = handle of an already-open file (mode 0 -- read);
 ;          also reads sys_path_ptr (memory, set by the caller in
-;          progs/sys.asm's own "have_name" before K_FILE_OPEN clobbers
-;          RA) for this routine's own directory-entry lookup -- the
-;          same "caller sets a memory location before calling, callee
+;          progs/sys.asm's own start before K_FILE_OPEN clobbers RF)
+;          for this routine's own directory-entry lookup -- the same
+;          "caller sets a memory location before calling, callee
 ;          reads it" convention already used for mr_io_mode/ms_io_mode.
 ; Returns: D  = 0 on success, SYSERR_* on failure (see equ's above)
 ;          DF = 0 on success, DF = 1 on failure (redundant with D,
@@ -226,8 +236,8 @@ sys_path_ptr:   dw      0
 ;          separately preserved -- this is a leaf worker, not a
 ;          register-preserving subroutine. Does not close the FCB;
 ;          the caller does that once, after this returns, regardless
-;          of success or failure -- see progs/mr.asm's start/have_name
-;          for the identical pattern this mirrors.
+;          of success or failure -- see progs/mr.asm's start/
+;          have_name_ptr for the identical pattern this mirrors.
 ;
 ; No hand-written short branches or page-alignment needed here (unlike
 ; mr_receive/ms_send) -- nothing in this routine is a per-byte hot

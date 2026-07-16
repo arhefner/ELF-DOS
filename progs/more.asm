@@ -42,16 +42,19 @@ MORE_PAGE_LINES: equ    23
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ldn     ra
-            lbnz    have_name
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] is the filename argument.
+            glo     rc
+            smi     2
+            lbnf    usage               ; argc < 2: no filename given
 
-            call    K_INMSG
-            db      "Usage: MORE <filename>",13,10,0
-            ldi     1                   ; exit code 1 = error
-            rtn
-
-have_name:
-            mov     rf, ra              ; RF = filename
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1] (filename)
             mov     rd, more_fcb        ; RD = our FCB struct
             mov     ra, more_iobuf      ; RA = our I/O buffer (movs
                                         ; before the mode load below,
@@ -200,6 +203,12 @@ not_found:
             call    K_INMSG
             db      "File not found.",13,10,0
             ldi     1
+            rtn
+
+usage:
+            call    K_INMSG
+            db      "Usage: MORE <filename>",13,10,0
+            ldi     1                   ; exit code 1 = error
             rtn
 
 more_fcb:       ds      FCB_LEN

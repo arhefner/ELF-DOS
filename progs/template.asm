@@ -11,15 +11,33 @@
 ; the 6-byte header below.
 ;
 ; At entry:
-;   RA = pointer to the null-terminated command tail -- everything
-;        typed after the program's own name, trimmed (an empty
-;        string, not a null pointer, if no arguments were given).
-;        Save it somewhere if you need it after making any kernel/
-;        BIOS call, since those may clobber RA.
+;   RA = pointer to the argv table -- an array of RC 16-bit big-endian
+;        pointers, argv[0..argc-1], each to a null-terminated string.
+;        argv[0] is the program's own invocation name (matching C's
+;        main(argc, argv) convention). Arguments are split by the
+;        shell with quoting ("..." keeps embedded spaces in one
+;        token) and backslash-escaping (\X -> literal X, inside or
+;        outside quotes).
+;   RC = argc (word) -- always >= 1 on a successful hand-off, since
+;        argv[0] is always present.
 ;   R2 = kernel's stack pointer -- safe to use normally (call/rtn,
 ;        push/pop); the kernel restores it after the program exits
 ;        regardless of what happens in between.
 ;   D, DF, and every other register: undefined.
+;
+; Like any register, RA/RC are only guaranteed valid until the first
+; kernel/BIOS call the program makes -- stash to memory (or another
+; register) immediately if either is needed after that. To read
+; argv[N] (N a small compile-time constant): compute its address as
+; RA + N*2 (add16 supports a constant operand), then dereference the
+; 2-byte pointer stored there with the standard lda/phi/ldn/plo
+; sequence, e.g. for argv[1]:
+;   mov     rb, ra
+;   add16   rb, 2               ; RB = &argv[1]
+;   lda     rb
+;   phi     rf
+;   ldn     rb
+;   plo     rf                  ; RF = argv[1]
 ;
 ; To exit, just 'rtn' back to the kernel -- D = exit code by
 ; convention (0 = success; other values are program-defined; no

@@ -33,16 +33,19 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ldn     ra
-            lbnz    have_path
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] is the path argument.
+            glo     rc
+            smi     2
+            lbnf    usage               ; argc < 2: no path given
 
-            call    K_INMSG
-            db      "Usage: STAT <path>",13,10,0
-            ldi     1                   ; exit code 1 = error
-            rtn
-
-have_path:
-            mov     rf, ra              ; RF = path
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1] (path)
             mov     rd, stat_result     ; RD = result buffer
             call    K_STAT              ; DF = 0/1, buffer filled on success
             lbdf    stat_not_found
@@ -235,6 +238,12 @@ stat_cluster:
             db      13,10,0
 
             ldi     0                   ; exit code 0 = success
+            rtn
+
+usage:
+            call    K_INMSG
+            db      "Usage: STAT <path>",13,10,0
+            ldi     1                   ; exit code 1 = error
             rtn
 
 stat_not_found:

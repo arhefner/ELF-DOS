@@ -21,23 +21,31 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = command tail = the directory name/path argument
-            ldn     ra
-            lbnz    have_name
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] is the path argument.
+            glo     rc
+            smi     2
+            lbnf    usage               ; argc < 2: no path given
 
-            call    K_INMSG
-            db      "Usage: RD <path>",13,10,0
-            ldi     1                   ; exit code 1 = error
-            rtn
-
-have_name:
-            mov     rf, ra              ; RF = path
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1] (path)
             call    K_DIR_REMOVE        ; DF = 0/1
             lbdf    rd_error
 
             call    K_INMSG
             db      "Directory removed.",13,10,0
             ldi     0                   ; exit code 0 = success
+            rtn
+
+usage:
+            call    K_INMSG
+            db      "Usage: RD <path>",13,10,0
+            ldi     1                   ; exit code 1 = error
             rtn
 
 rd_error:

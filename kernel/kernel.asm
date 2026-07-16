@@ -18,8 +18,8 @@
 ; loaded at /bin/shell. kernel_init's own run_loop (see below) does
 ; nothing but alternately load+run the shell (which resolves one
 ; command line and returns) and whatever it resolved -- see
-; kernel.inc's RUN_PATH/RUN_TAIL_PTR comment for the full handoff
-; protocol and why the shell can't do this itself.
+; kernel.inc's RUN_PATH/RUN_ARGC/RUN_ARGV_TABLE comment for the full
+; handoff protocol and why the shell can't do this itself.
 ;
 
 #include    include/opcodes.def
@@ -290,9 +290,9 @@ kinit_dcd_zero:
 ; run_loop: alternately load+run the shell (which resolves one
 ; command line and returns) and whatever it resolved. Lives entirely
 ; here, in kernel memory, so it's safe regardless of what's currently
-; sitting at PROG_BASE -- see kernel.inc's RUN_PATH/RUN_TAIL_PTR
-; comment for why the shell can't do this hand-off itself. Never
-; returns.
+; sitting at PROG_BASE -- see kernel.inc's RUN_PATH/RUN_ARGC/
+; RUN_ARGV_TABLE comment for why the shell can't do this hand-off
+; itself. Never returns.
 ;
 ; As of 2026-07-13, the shell no longer hands back a bare, possibly-
 ; not-found path: progs/shell.asm now confirms a command exists
@@ -312,20 +312,27 @@ run_loop:
                                         ; load if that cached location
                                         ; is no longer valid. Always
                                         ; returns with RUN_PATH/
-                                        ; RUN_TAIL_PTR filled in on
-                                        ; success.
+                                        ; RUN_ARGC/RUN_ARGV_TABLE filled
+                                        ; in on success.
             lbdf    kern_shell_err      ; shell itself missing/corrupt/
                                         ; unloadable: fatal
 
-            mov     rf, RUN_TAIL_PTR
-            lda     rf                  ; D = tail pointer high byte
-            phi     ra
-            ldn     rf                  ; D = tail pointer low byte
-            plo     ra                  ; RA = command tail pointer
+            mov     ra, RUN_ARGV_TABLE  ; RA = argv table's address --
+                                        ; a fixed constant (the shell
+                                        ; always builds the table here),
+                                        ; so unlike argc below there's
+                                        ; no dynamic relay slot to read,
+                                        ; just the address itself
 
-            mov     rf, RUN_PATH        ; RF = resolved path (RA
+            mov     rf, RUN_ARGC
+            lda     rf                  ; D = argc high byte
+            phi     rc
+            ldn     rf                  ; D = argc low byte
+            plo     rc                  ; RC = argc
+
+            mov     rf, RUN_PATH        ; RF = resolved path (RA/RC
                                         ; already set above -- mov
-                                        ; only touches RF/D, not RA)
+                                        ; only touches RF/D)
             call    prog_run            ; D = exit code (unused), DF=0/1
             lbdf    run_bad_program     ; exists (the shell already
                                         ; confirmed that) but isn't a

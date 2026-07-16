@@ -57,7 +57,8 @@
             extrn   prog_iobuf
             extrn   prog_handle
             extrn   prog_size
-            extrn   prun_tail
+            extrn   prun_argv
+            extrn   prun_argc
             extrn   saved_sp
 
 ; ----------------------------------------------------------------
@@ -191,12 +192,12 @@ pfl_bad_magic:
 
 ; ----------------------------------------------------------------
 ; _prog_exec_now: run the program currently loaded at PROG_BASE.
-; Args:    RA = pointer to the null-terminated command tail (see
-;          include/kernel_api.inc) -- passed straight through
-;          untouched, since this proc has no reason to use RA itself;
-;          the caller must set it immediately before calling, since
-;          anything else called in between (like _prog_finish_load)
-;          may clobber it.
+; Args:    RA = pointer to the argv table, RC = argc (see
+;          include/kernel_api.inc) -- both passed straight through
+;          untouched, since this proc has no reason to use either
+;          itself; the caller must set them immediately before
+;          calling, since anything else called in between (like
+;          _prog_finish_load) may clobber them.
 ; Returns: D = program exit code (convention to be defined)
 ;          DF = 0 normally
 ;
@@ -234,23 +235,33 @@ pfl_bad_magic:
 ; Args:   RF = pointer to null-terminated path, already fully
 ;              resolved (and confirmed to exist) by the caller -- no
 ;              searching is done here
-;         RA = pointer to the null-terminated command tail
+;         RA = pointer to the argv table, RC = argc
 ; Returns: D = program exit code
 ;          DF = 0 on success, DF = 1 on error (not found, load error,
 ;          bad magic) -- nothing is run in that case
 ; ----------------------------------------------------------------
             proc    prog_run
 
-            ; stash the command tail pointer immediately, in memory --
-            ; the load sequence below (file_open/file_read/file_close)
-            ; may clobber RA, and it's only needed again at the very
-            ; end, right before _prog_exec_now
-            mov     rb, prun_tail
+            ; stash the incoming argv pointer/argc immediately, in
+            ; memory -- the load sequence below (file_open/file_read/
+            ; file_close) clobbers both (file_open's very first
+            ; instruction uses RC as scratch for its own mode
+            ; argument, and RA gets reused as prog_run's own I/O
+            ; buffer pointer right below), and neither is needed again
+            ; until the very end, right before _prog_exec_now
+            mov     rb, prun_argv
             ghi     ra
             str     rb
             inc     rb
             glo     ra
-            str     rb                  ; prun_tail = RA
+            str     rb                  ; prun_argv = RA
+
+            mov     rb, prun_argc
+            ghi     rc
+            str     rb
+            inc     rb
+            glo     rc
+            str     rb                  ; prun_argc = RC
 
             ; CALLER-ALLOCATED FCBs (2026-07-15): file_open needs the
             ; caller's own FCB/I-O-buffer pointers (RD/RA) -- prog_run
@@ -284,12 +295,18 @@ pfl_bad_magic:
             call    _prog_finish_load
             lbdf    prun_err
 
-            mov     rf, prun_tail
-            lda     rf                  ; D = tail pointer high byte
+            mov     rf, prun_argv
+            lda     rf                  ; D = argv pointer high byte
             phi     ra
-            ldn     rf                  ; D = tail pointer low byte
-            plo     ra                  ; RA = command tail pointer
-                                        ; (reloaded)
+            ldn     rf                  ; D = argv pointer low byte
+            plo     ra                  ; RA = argv pointer (reloaded)
+
+            mov     rf, prun_argc
+            lda     rf                  ; D = argc high byte
+            phi     rc
+            ldn     rf                  ; D = argc low byte
+            plo     rc                  ; RC = argc (reloaded)
+
             call    _prog_exec_now      ; D = exit code, DF = 0
             rtn
 
@@ -563,9 +580,9 @@ kshell_path:    db      "C:/bin/shell",0
 ; binaries (see prog_run's own comment on why it can't use a
 ; program-supplied FCB the way ordinary file I/O does). prog_handle
 ; is the fd_table index file_open (or prog_run_shell's own direct
-; registration) returned for prog_fcb. prun_tail is prog_run's own
-; stash for the caller's command-tail pointer across the load
-; sequence (see its own comment).
+; registration) returned for prog_fcb. prun_argv/prun_argc are
+; prog_run's own stash for the caller's argv pointer/argc across the
+; load sequence (see its own comment).
 ;------------------------------------------------------------------
             proc    _loader_data
 
@@ -573,14 +590,16 @@ prog_fcb:       ds      FCB_LEN
 prog_iobuf:     ds      SECTOR_SIZE
 prog_handle:    db      0
 prog_size:      dw      0           ; bytes actually loaded (for mem_base calc)
-prun_tail:      dw      0           ; prog_run's own command-tail stash
+prun_argv:      dw      0           ; prog_run's own argv-pointer stash
+prun_argc:      dw      0           ; prog_run's own argc stash
 saved_sp:       dw      0           ; kernel's R2 across _prog_exec_now's call
 
                 public  prog_fcb
                 public  prog_iobuf
                 public  prog_handle
                 public  prog_size
-                public  prun_tail
+                public  prun_argv
+                public  prun_argc
                 public  saved_sp
 
             endp

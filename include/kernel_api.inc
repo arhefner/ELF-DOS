@@ -32,14 +32,26 @@
 ; programs (calling it would re-run kernel boot init while a program
 ; is already running).
 ;
-; Command line: at program entry, RA holds a pointer to the null-
-; terminated command tail (everything typed after the program name,
-; trimmed -- NOT including the name itself, same convention as a DOS
-; PSP command tail; empty string, not a null pointer, if no arguments
-; were given). Passed in a register rather than a fixed address since
-; it's only needed once, at entry -- unlike mem_base/mem_top below,
-; which a program may need to consult at any point during its run
-; (e.g. from within a heap allocator), and so use a fixed address.
+; Command line: at program entry, RA holds a pointer to the argument
+; table (argv) and RC holds the argument count (argc). argv is an
+; array of RC 16-bit big-endian pointers, argv[0..argc-1], each
+; pointing to a null-terminated string. argv[0] is the program's own
+; invocation name (matching real C's main(argc, argv) convention, so
+; the eventual ELFC C startup code needs no special-casing); argc is
+; therefore always >= 1 on a successful hand-off. Arguments are
+; tokenized by the shell with quoting ("..." keeps embedded spaces in
+; one token) and backslash-escaping (\X produces a literal X, inside or
+; outside quotes -- covers \" for a literal quote, \\ for a literal
+; backslash, and \<space> for a literal space in an unquoted token).
+;
+; Both RA and RC are passed in registers rather than fixed addresses
+; since they're only needed once, at entry -- unlike mem_base/mem_top
+; below, which a program may need to consult at any point during its
+; run (e.g. from within a heap allocator), and so use a fixed address
+; instead. Like any register, neither is guaranteed to survive a
+; kernel/BIOS call -- stash to memory (or another register) immediately
+; if either is needed after the first such call (see
+; progs/template.asm's own header comment for the canonical example).
 ;
 ; This file is deliberately independent of kernel.inc (which is for
 ; the kernel's own internal structures -- FCB/BPB/directory-entry
@@ -55,16 +67,20 @@ PROG_BASE:      equ     $3E00       ; user programs load here (see kernel.inc;
                                     ; completes, so program loads reuse it)
 LOADER_ARGS:    equ     PROG_BASE-4 ; word 0 = mem_base, word 1 = mem_top
 
-; LINE_BUF/RUN_TAIL_PTR/RUN_PATH: the shell-as-a-program handoff
-; protocol (see kernel.inc's own copy of this comment for the full
-; reasoning). Only progs/shell.asm has a real reason to touch these --
-; ordinary programs should not -- but they're restated here rather than
-; given a separate include file, matching this file's existing
-; precedent for PROG_BASE/LOADER_ARGS.
+; LINE_BUF/RUN_ARGC/RUN_ARGV_TABLE/RUN_PATH: the shell-as-a-program
+; handoff protocol (see kernel.inc's own copy of this comment for the
+; full reasoning). Only progs/shell.asm has a real reason to touch
+; these -- ordinary programs should not, and never reference them by
+; name; they only ever see the RA/RC register values built from them
+; at entry (see the "Command line" section above) -- but they're
+; restated here rather than given a separate include file, matching
+; this file's existing precedent for PROG_BASE/LOADER_ARGS.
 LINE_BUF:       equ     $0080       ; shell command input buffer (128 bytes)
-RUN_TAIL_PTR:   equ     PROG_BASE-6     ; 2 bytes: pointer into LINE_BUF
-                                        ; where the command tail starts
-RUN_PATH:       equ     PROG_BASE-70    ; 64-byte buffer: resolved path
+RUN_ARGC:       equ     PROG_BASE-6     ; word: argument count
+RUN_ARGV_TABLE: equ     PROG_BASE-38    ; ARGV_MAX_ARGS 2-byte pointers,
+                                        ; argv[0..argc-1]
+ARGV_MAX_ARGS:  equ     16              ; RUN_ARGV_TABLE's own capacity
+RUN_PATH:       equ     PROG_BASE-102   ; 64-byte buffer: resolved path
                                         ; to load next
 RUN_PATH_LEN:   equ     64              ; RUN_PATH's own size, for
                                         ; bounds-checking writes to it
@@ -109,8 +125,8 @@ K_DIR_READ:     equ     $011B
 ; cleanup). Neither could ever be safely called by a program while it
 ; was running -- loading a second program to PROG_BASE overwrites the
 ; caller's own currently-executing code, the exact constraint that
-; already forced the shell hand-off protocol (RUN_PATH/RUN_TAIL_PTR)
-; in the first place. Confirmed via repo-wide grep that the only
+; already forced the shell hand-off protocol (RUN_PATH/RUN_ARGC/
+; RUN_ARGV_TABLE) in the first place. Confirmed via repo-wide grep that the only
 ; callers were kernel.asm's own run_loop, via direct same-link-unit
 ; calls, never through this table. Collapsed internally into a single
 ; kernel-private routine (prog_run, kernel/loader.asm) with no

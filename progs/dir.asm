@@ -38,11 +38,29 @@
 ;------------------------------------------------------------------
 start:
             call    K_GETCURDIR         ; RD = current directory cluster
+                                        ; (RA/RC survive this call --
+                                        ; see kernel_getcurdir's own
+                                        ; documented RA/RB/RC/R7
+                                        ; protection, added specifically
+                                        ; because this program reads RA
+                                        ; right after this call)
 
-            ldn     ra                  ; D = first byte of command tail
-            lbz     dir_open_target     ; empty: list current directory
+            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
+            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
+            ; program's own name; argv[1] (if present) is the path
+            ; argument -- optional here, unlike most other programs,
+            ; since DIR with no argument lists the current directory.
+            glo     rc
+            smi     2
+            lbnf    dir_open_target     ; argc < 2: no path given, list
+                                        ; the current directory
 
-            mov     rf, ra              ; RF = path argument
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1] (path argument)
             call    K_PATH_RESOLVE      ; RD = parent cluster, RF = final
                                         ; component, DF = 0/1
             lbdf    not_found           ; bad intermediate component

@@ -10,18 +10,20 @@
 ; own currently-executing code before it could safely return (the
 ; same reason kernel.asm's loader never exposes a jump-table call any
 ; program could invoke on itself). Instead, this program's job is:
-; read a command line, resolve it to a path AND CONFIRM IT EXISTS
-; (bare name -> "/bin/"+name on the active drive, falling back to
-; the shell's own drive if not found there; a name containing '/' ->
-; used as-is, checked once, no fallback -- see the resolution section
-; below for the full search, and K_GETSHELLDRIVE's own doc in
-; kernel_api.inc for why the fallback exists), write that path plus
-; the tail's location into the fixed RUN_PATH/RUN_TAIL_PTR addresses,
-; and return -- the kernel's own run_loop does the actual loading and
-; running, safely, from kernel memory. A command that doesn't exist
-; anywhere is reported ("File not found.") entirely here, without
-; ever involving run_loop. See kernel.inc's own comment on RUN_PATH/
-; RUN_TAIL_PTR for the full hand-off protocol.
+; read a command line, tokenize it into an argv table (quoting and
+; backslash-escaping aware -- see not_drive_cmd below), resolve
+; argv[0] to a path AND CONFIRM IT EXISTS (bare name -> "/bin/"+name
+; on the active drive, falling back to the shell's own drive if not
+; found there; a name containing '/' -> used as-is, checked once, no
+; fallback -- see the resolution section below for the full search,
+; and K_GETSHELLDRIVE's own doc in kernel_api.inc for why the fallback
+; exists), write that path plus the argument count and table into the
+; fixed RUN_PATH/RUN_ARGC/RUN_ARGV_TABLE addresses, and return -- the
+; kernel's own run_loop does the actual loading and running, safely,
+; from kernel memory. A command that doesn't exist anywhere is
+; reported ("File not found.") entirely here, without ever involving
+; run_loop. See kernel.inc's own comment on RUN_PATH/RUN_ARGC/
+; RUN_ARGV_TABLE for the full hand-off protocol.
 ;
 ; No built-in commands, with one narrow exception: a bare drive letter
 ; ("C:"/"D:"/"E:"/"F:") is shell syntax, not really a command, and is
@@ -59,10 +61,8 @@ start:
             lbdf    start_interactive   ; no batch active: read the
                                         ; console as normal
 
-            ; a batch line is ready in LINE_BUF -- echo it the same way
-            ; an interactive line would look ("C:/> <line>"), so batch
-            ; and interactive output are indistinguishable
             call    print_prompt
+
             mov     rf, LINE_BUF
             call    K_MSG
             call    K_INMSG
@@ -139,40 +139,204 @@ bad_drive:
             lbr     start
 
 not_drive_cmd:
-            mov     ra, rf              ; RA = start of the program name
+            ; RF = start of the trimmed line (program name onward).
+            ; Tokenize the whole line in place inside LINE_BUF, quoting
+            ; ("...", spaces preserved) and backslash-escaping (\X ->
+            ; literal X, inside or outside quotes) aware, building the
+            ; argv table (RUN_ARGV_TABLE) and counting argc as it goes.
+            ; No kernel/BIOS calls happen anywhere in this loop, so
+            ; register state is safe to carry across iterations with no
+            ; memory stashing needed (unlike most of the rest of this
+            ; file). See kernel.inc's RUN_ARGC/RUN_ARGV_TABLE comment
+            ; for the full hand-off protocol this feeds.
+            ;
+            ; Registers: RF = read cursor, RD = write cursor (always
+            ; <= RF, since quote chars are dropped and every escape
+            ; collapses 2 source bytes into 1 output byte -- safe to
+            ; write back into LINE_BUF in place), RB = next argv-table
+            ; slot to fill, R9.0 = argc, R8.0 = in_quotes flag (0/$FF)
+            ; for the token currently being scanned.
+            mov     rd, rf
+            mov     rb, RUN_ARGV_TABLE
+            ldi     0
+            plo     r9
 
-            ; find the end of the program name (first space or NUL)
-            mov     rf, ra
-name_scan:
+tok_next:
+tok_skip_ws:
             ldn     rf
-            lbz     name_end
             xri     ' '
-            lbz     name_end
+            lbnz    tok_check_end
             inc     rf
-            lbr     name_scan
-name_end:
-            ; RF -> the space or NUL right after the program name
-            ldn     rf
-            lbz     have_tail           ; NUL: no arguments, RF already there
+            lbr     tok_skip_ws
 
-            ; there's a space: null-terminate the program name in place
-            ; (LINE_BUF is scratch for this one command line anyway) and
-            ; advance past it to the argument text
+tok_check_end:
+            ldn     rf
+            lbz     tok_done            ; end of line: no more tokens
+
+            glo     r9
+            smi     ARGV_MAX_ARGS
+            lbdf    tok_done            ; already have ARGV_MAX_ARGS
+                                        ; tokens -- ignore anything left
+                                        ; on the line rather than
+                                        ; overflowing the table
+
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+            inc     rb                  ; argv_table[argc] = RD (this
+                                        ; token's first byte), RB ->
+                                        ; next slot
+
+            ldi     0
+            plo     r8                  ; in_quotes = false
+
+tok_char:
+            ldn     rf
+            lbz     tok_end_token       ; end of line ends the token
+                                        ; too -- also correctly closes
+                                        ; an unterminated quote here,
+                                        ; since this check runs before
+                                        ; the in_quotes check below
+
+            glo     r8
+            lbnz    tok_special         ; in quotes: space doesn't end
+                                        ; the token, fall into the
+                                        ; quote/backslash/ordinary
+                                        ; dispatch below directly
+
+            ldn     rf
+            xri     ' '
+            lbz     tok_space_end       ; not in quotes, hit a space:
+                                        ; token ends
+            lbr     tok_special         ; BUG FIX (hardware-found): not
+                                        ; a space either -- must jump
+                                        ; to tok_special explicitly.
+                                        ; Without this branch, the "not
+                                        ; a space" case fell straight
+                                        ; through into tok_space_end's
+                                        ; own body below (inc rf + jump
+                                        ; to tok_end_token), silently
+                                        ; skipping every ordinary
+                                        ; character instead of copying
+                                        ; it and ending the "token"
+                                        ; after every single character
+                                        ; -- exactly matching the
+                                        ; hardware symptom (argc=7 for
+                                        ; a 4-word line, mostly-zeroed
+                                        ; LINE_BUF where real content
+                                        ; should have been copied).
+
+tok_space_end:
+            ; BUG FIX (hardware-found): consume the space HERE, before
+            ; falling into tok_end_token below, instead of the
+            ; original design (leave RF pointing AT the space, for
+            ; tok_skip_ws to consume on the next pass). For a token
+            ; with no quote/escape shrinkage (e.g. a plain word like
+            ; "args"), the write cursor RD equals the read cursor RF
+            ; at exactly this point -- so tok_end_token's NUL-
+            ; terminator write (via RD) would land on the SAME byte
+            ; this space occupies, silently turning the space into a
+            ; second NUL before anything ever got a chance to read it
+            ; as a real space. The very next check (either here or in
+            ; tok_end_token) would then see that NUL and conclude the
+            ; whole line had ended, capping every multi-argument
+            ; command at just argv[0] -- confirmed via a "TOK argc="
+            ; hardware diagnostic showing 1 regardless of how many
+            ; words were actually typed. Advancing RF past the space
+            ; NOW means RD (which hasn't moved yet) can never coincide
+            ; with RF again for the rest of this token's cleanup, so
+            ; the terminator write is always safe.
+            inc     rf
+            lbr     tok_end_token
+
+tok_special:
+            ldn     rf
+            xri     '"'
+            lbnz    tok_check_bs
+            glo     r8
+            xri     $FF
+            plo     r8                  ; toggle in_quotes (0 <-> $FF)
+            inc     rf                  ; consume the quote char itself
+                                        ; -- not copied to the output
+            lbr     tok_char
+
+tok_check_bs:
+            ldn     rf
+            xri     '\'
+            lbnz    tok_ordinary
+
+            inc     rf                  ; skip the backslash
+            ldn     rf
+            lbz     tok_bs_eol          ; trailing lone backslash at
+                                        ; end of line: nothing to
+                                        ; escape -- treat the backslash
+                                        ; itself as literal
+
+            str     rd                  ; write the escaped char
+                                        ; literally (D is still fresh
+                                        ; from the ldn two lines up --
+                                        ; lbz doesn't touch D whether
+                                        ; taken or not)
+            inc     rd
+            inc     rf
+            lbr     tok_char
+
+tok_bs_eol:
+            ldi     '\'
+            str     rd
+            inc     rd
+            lbr     tok_end_token       ; RF is already at the NUL
+
+tok_ordinary:
+            ldn     rf
+            str     rd
+            inc     rd
+            inc     rf
+            lbr     tok_char
+
+tok_end_token:
+            ; Reached three ways: (1) tok_char's own "*RF is NUL"
+            ; check -- RF already at the true end of line; (2)
+            ; tok_space_end above -- RF already advanced past the
+            ; space that ended this token; (3) tok_bs_eol -- RF
+            ; already at the true end of line. In every case RF now
+            ; either points past where RD is about to write, or *RF is
+            ; already 0 (so writing another 0 there changes nothing)
+            ; -- so a plain post-write read of *RF below is always
+            ; safe (see tok_space_end's own comment for the hardware
+            ; bug this design replaced, where that wasn't true).
+            ldi     0
+            str     rd                  ; NUL-terminate this token
+            inc     rd
+
+            glo     r9
+            adi     1
+            plo     r9                  ; argc++
+
+            ldn     rf
+            lbz     tok_done            ; that was the last char on
+                                        ; the line
+            lbr     tok_next
+
+tok_done:
+            ; publish argc, and reload RA = argv[0]'s pointer -- the
+            ; path-resolution code right below (scan_slash/have_slash/
+            ; no_slash) already expects RA to hold the program name's
+            ; pointer exactly as before, so it needs no changes at all
+            mov     rf, RUN_ARGC
             ldi     0
             str     rf
             inc     rf
-            call    f_ltrim             ; RF = start of the trimmed command tail
+            glo     r9
+            str     rf
 
-have_tail:
-            ; RF = pointer to the command tail (possibly an empty
-            ; string). Publish it now, before RF/RD get reused as
-            ; scratch below for path resolution.
-            mov     rb, RUN_TAIL_PTR
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; RUN_TAIL_PTR = tail pointer
+            mov     rf, RUN_ARGV_TABLE
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra
 
 ;------------------------------------------------------------------
 ; Resolve RA (the null-terminated program name) into RUN_PATH, and --
@@ -189,8 +353,8 @@ have_tail:
 ; duplicated everywhere. Both copy loops are bounds-checked against
 ; RUN_PATH_LEN so an unusually long name truncates safely instead of
 ; overrunning past RUN_PATH's own 64-byte allocation (which sits just
-; below RUN_TAIL_PTR -- an unbounded copy here would silently corrupt
-; the tail pointer already written above).
+; below RUN_ARGV_TABLE -- an unbounded copy here would silently
+; corrupt the argument table already written by the tokenizer above).
 ;------------------------------------------------------------------
             mov     rf, ra
 scan_slash:
