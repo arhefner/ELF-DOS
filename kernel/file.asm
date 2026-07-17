@@ -111,6 +111,7 @@
             extrn   _mark_entry_deleted
             extrn   _is_dot_or_dotdot
             extrn   _find_dirent
+            extrn   _scan_dir_for_name
             extrn   fc_elba
             extrn   fc_eoff
             extrn   fc_shortname
@@ -296,42 +297,17 @@ fopen_found:
             ldn     rf
             lbz     fopen_err
 
-            ; save the resolved final-component pointer into fo_name,
-            ; using RB (not RF) as the store-address register so RD
-            ; (still the resolved parent cluster from path_resolve)
-            ; and RF (the pointer value being saved) survive untouched
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = final component pointer
-
-
-            ; RD is still the resolved parent cluster from path_resolve
-            call    dir_open
-
-
-fopen_loop:
-            mov     rf, file_dirent
-            call    dir_read
-            lbdf    fopen_notfound      ; end of directory: no match --
-                                        ; dir_eptr/dir_cur_lba/dir_clust/
-                                        ; dir_sect now describe the '$00'
+            ; RD is still the resolved parent cluster from
+            ; path_resolve, RF is still the final component --
+            ; _scan_dir_for_name's own argument convention (it stashes
+            ; fo_name = RF itself internally, so no separate save is
+            ; needed here the way the old hand-rolled loop needed)
+            call    _scan_dir_for_name
+            lbdf    fopen_notfound      ; not found -- dir_eptr/
+                                        ; dir_cur_lba/dir_clust/dir_sect
+                                        ; now describe the '$00'
                                         ; terminator's sector, reused
                                         ; directly by _file_create below
-
-            ; compare entry name against fo_name (now the final
-            ; path component resolved above, not the raw input)
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = saved name pointer
-            mov     rf, file_dirent     ; RF = entry name
-            call    f_strcmp
-            lbnz    fopen_loop          ; no match: keep looking
-
 
             ; must NOT be a directory
             mov     rf, file_dirent+DIRENT_ATTR
@@ -2749,33 +2725,116 @@ idd_dotdot: db      "..",0
             endp
 
 ; ----------------------------------------------------------------
+; _scan_dir_for_name: scan a directory (given its already-resolved
+; cluster) for an exact name match. Shared search core reused by
+; _find_dirent below (a "must find" wrapper -- see its own header) AND
+; directly by file_open/dir_create/file_rename's own "must NOT find"
+; collision/lookup checks, all four of which need the identical
+; dir_open+dir_read+f_strcmp loop and differ only in what they do with
+; a match or a clean not-found result. Introduced 2026-07-17 as part
+; of the kernel size-reduction pass that finishes what _find_dirent's
+; own original consolidation (2026-07-12) deliberately deferred -- see
+; that routine's own history in project memory for why those three
+; callers couldn't just call _find_dirent itself: each needs the
+; resolved parent cluster on BOTH outcomes (found and not-found), not
+; just on success, which _find_dirent's own simple DF=0/1 contract
+; (built for "must find" callers, where not-found is always a hard
+; error) couldn't distinguish from "path itself failed to resolve."
+; Taking the search name as an explicit RF argument (rather than
+; assuming it's already in fo_name, as the original _find_dirent did)
+; is what makes this usable by file_rename's new-name check too, which
+; searches for ren_new_name, not fo_name.
+; Args:    RD = directory's own cluster (already resolved by the
+;          caller, e.g. via path_resolve), RF = pointer to the
+;          null-terminated name to search for
+; Returns: DF = 0 on a match -- file_dirent holds the matched entry;
+;          RD = the SAME parent cluster passed in, reloaded fresh (so
+;          a caller doesn't need to keep its own copy alive across the
+;          call). DF = 1 if no match was found (real end-of-directory)
+;          -- dir_eptr/dir_cur_lba/dir_clust/dir_sect describe the
+;          '$00' terminator's own sector, ready for _file_create to
+;          insert a new entry there directly. Either way, fo_name is
+;          left holding the SAME value passed in via RF -- callers
+;          that already keep their search name there (file_open,
+;          dir_create) see no change; file_rename's new-name check
+;          passes ren_new_name instead, and relies on fo_name ending
+;          up equal to it afterward (see ren_insert's own comment).
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+
+            proc    _scan_dir_for_name
+
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; fo_name = name pointer
+
+            mov     rb, sdn_parent
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; sdn_parent = parent cluster
+                                        ; (RD is about to be reused as
+                                        ; dir_open's own argument, then
+                                        ; clobbered further by dir_read/
+                                        ; f_strcmp inside the loop)
+
+            ; RD is still the parent cluster -- dir_open's own arg
+            call    dir_open
+
+sdn_loop:
+            mov     rf, file_dirent
+            call    dir_read
+            lbdf    sdn_notfound        ; end of directory: no match
+                                        ; (dir.asm's scan state left
+                                        ; describing the terminator)
+
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = saved name pointer
+            mov     rf, file_dirent     ; RF = entry name
+            call    f_strcmp
+            lbnz    sdn_loop            ; no match: keep looking
+
+            ; found -- reload the parent cluster into RD for the caller
+            mov     rf, sdn_parent
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            clc                         ; DF = 0, found
+            rtn
+
+sdn_notfound:
+            stc                         ; DF = 1, not found
+            rtn
+
+sdn_parent: dw      0
+
+            endp
+
+; ----------------------------------------------------------------
 ; _find_dirent: resolve a (possibly multi-component, possibly drive-
 ; prefixed) path via path_resolve, then scan its parent directory for
-; an exact name match.
-; Consolidates the path_resolve+dir_open/dir_read+f_strcmp search core
-; duplicated across file_delete, dir_remove's locate-target,
-; file_rename's locate-old-name, and file_stat -- each of these is a
-; "must find" caller (DF=0 is the only success outcome, DF=1 is always
-; a hard error regardless of the reason).
-;
-; Deliberately NOT used (yet) by dir_create's or file_rename's own
-; "must NOT find" collision checks, or by file_open: those callers
-; need the resolved parent cluster specifically on the "not found"
-; outcome (dir_create to insert the new entry / write its ".." field;
-; file_open to populate FCB_ELBA/FCB_EOFF from dir.asm's own live scan
-; state after its own free-FCB-slot prologue), which this routine's
-; simple DF=0/1 contract can't unambiguously distinguish from "path
-; itself failed to resolve" without a real design pass of its own
-; (deferred -- see project memory). file_rename's new-name check
-; doesn't even need a fresh path_resolve at all (it reuses ren_parent,
-; already resolved for the old name) so it isn't a candidate for this
-; routine regardless.
+; an exact name match. A thin wrapper around _scan_dir_for_name (see
+; its own header for the shared search core) for "must find" callers
+; -- file_delete, dir_remove's locate-target, file_rename's locate-
+; old-name, and file_stat -- where DF=0 is the only success outcome
+; and DF=1 is always a hard error regardless of the specific reason
+; (bad path component, empty final component, or a real not-found all
+; collapse to the same "fail" outcome these callers want).
 ;
 ; Args:    RF = pointer to null-terminated path string
 ; Returns: DF = 0 on success -- RD = resolved parent cluster;
 ;          file_dirent holds the matched entry; dir_last_off/
 ;          dir_cur_lba/dir_buf describe its parent-directory sector
-;          (same convention _file_create relies on).
+;          (same convention _file_create relies on); fo_name holds the
+;          resolved final path component.
 ;          DF = 1 on error (bad intermediate path component, empty
 ;          final component, or no match found) -- on a clean "no
 ;          match" specifically, dir_eptr/dir_cur_lba/dir_clust/
@@ -2805,57 +2864,17 @@ idd_dotdot: db      "..",0
             ldn     rf
             lbz     fdd_err             ; empty final component
 
-            ; save both return values into memory immediately -- RD is
-            ; about to be clobbered by f_strcmp inside the scan loop
-            ; below, and fdd_parent needs to survive to be handed back
-            ; to the caller on a successful match
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = final component ptr
-
-            mov     rb, fdd_parent
-            ghi     rd
-            str     rb
-            inc     rb
-            glo     rd
-            str     rb                  ; fdd_parent = parent cluster
-
-            ; RD is still the resolved parent cluster from path_resolve
-            call    dir_open
-
-fdd_loop:
-            mov     rf, file_dirent
-            call    dir_read
-            lbdf    fdd_err             ; end of directory: not found
-                                        ; (dir.asm's scan state left
-                                        ; describing the terminator)
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = saved name pointer
-            mov     rf, file_dirent     ; RF = entry name
-            call    f_strcmp
-            lbnz    fdd_loop            ; no match: keep looking
-
-            ; found -- reload the parent cluster into RD for the caller
-            mov     rf, fdd_parent
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            clc                         ; DF = 0, found
+            ; RD is still the resolved parent cluster from
+            ; path_resolve, RF is still the final component -- exactly
+            ; _scan_dir_for_name's own argument convention. DF comes
+            ; back already correct for this routine's own contract:
+            ; 0=found, 1=not found -- no translation needed.
+            call    _scan_dir_for_name
             rtn
 
 fdd_err:
-            stc                         ; DF = 1, error/not found
+            stc                         ; DF = 1, error
             rtn
-
-fdd_parent: dw      0
 
             endp
 
@@ -2965,32 +2984,28 @@ fdd_parent: dw      0
 
             ; reload the parent cluster fresh from memory -- RD has
             ; been clobbered several times since path_resolve returned
+            ; -- then the final component pointer into RF: together,
+            ; _scan_dir_for_name's own argument convention
             mov     rf, dcr_parent
             lda     rf
             phi     rd
             ldn     rf
-            plo     rd
-            call    dir_open
+            plo     rd                  ; RD = parent cluster
 
-dcr_loop:
-            mov     rf, file_dirent
-            call    dir_read
-            lbdf    dcr_notfound        ; end of directory: no collision
-                                        ; -- dir_eptr/dir_cur_lba/
-                                        ; dir_clust/dir_sect now describe
-                                        ; the '$00' terminator's sector,
-                                        ; reused by _file_create below
-                                        ; (same convention file_open's
+            mov     rb, fo_name
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = final component pointer
+
+            call    _scan_dir_for_name
+            lbdf    dcr_notfound        ; not found -- dir_eptr/
+                                        ; dir_cur_lba/dir_clust/dir_sect
+                                        ; now describe the '$00'
+                                        ; terminator's sector, reused
+                                        ; by _file_create below (same
+                                        ; convention file_open's
                                         ; fopen_notfound relies on)
-
-            mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = saved name pointer
-            mov     rf, file_dirent     ; RF = entry name
-            call    f_strcmp
-            lbnz    dcr_loop            ; no match: keep looking
 
             ; name already exists (file or directory): reject
             lbr     dcr_err
@@ -3663,28 +3678,29 @@ ren_check_sep_done:
             ; collision. If none, this naturally leaves dir.asm's live
             ; state describing the '$00' terminator -- exactly what
             ; _file_create needs -- so it's used immediately below,
-            ; before anything else can disturb it. ---
+            ; before anything else can disturb it. RD = parent
+            ; cluster, RF = new name -- _scan_dir_for_name's own
+            ; argument convention (fo_name ends up holding
+            ; ren_new_name's own value afterward, which is exactly
+            ; what ren_insert's own next step already expects -- see
+            ; its comment). ---
             mov     rf, ren_parent
             lda     rf
             phi     rd
             ldn     rf
-            plo     rd
-            call    dir_open
+            plo     rd                  ; RD = parent cluster
 
-ren_new_loop:
-            mov     rf, file_dirent
-            call    dir_read
-            lbdf    ren_insert          ; end of directory: no
-                                        ; collision, proceed
+            mov     rb, ren_new_name
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = new name pointer
 
-            mov     rf, ren_new_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, file_dirent
-            call    f_strcmp
-            lbnz    ren_new_loop        ; no match: keep looking
+            call    _scan_dir_for_name
+            lbdf    ren_insert          ; not found -- no collision,
+                                        ; proceed (dir.asm's scan state
+                                        ; already describes the '$00'
+                                        ; terminator)
 
             ; new name already exists: reject (nothing destructive
             ; has happened yet)

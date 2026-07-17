@@ -85,6 +85,15 @@ RUN_PATH:       equ     PROG_BASE-102   ; 64-byte buffer: resolved path
 RUN_PATH_LEN:   equ     64              ; RUN_PATH's own size, for
                                         ; bounds-checking writes to it
 
+; RUN_REDIR_OUT/RUN_REDIR_OUT_APPEND/RUN_REDIR_IN: I/O redirection relay
+; -- same mechanism as RUN_PATH above (kernel/shell-internal only, see
+; kernel.inc's own copy of this comment for the full reasoning). Each is
+; a pointer into LINE_BUF (not a copied buffer), 0 = no redirect of that
+; kind.
+RUN_REDIR_OUT:      equ     PROG_BASE-105
+RUN_REDIR_OUT_APPEND: equ   PROG_BASE-106
+RUN_REDIR_IN:       equ     PROG_BASE-108
+
 K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
 
 ; FCB_LEN/FCB_IOBUF_LEN: sizes only, not the field layout (which stays
@@ -278,7 +287,21 @@ K_INMSG:        equ     $0124       ; -> f_inmsg
 K_GETDEV:       equ     $0127       ; -> f_getdev
 K_GETTOD:       equ     $012A       ; -> f_gettod
 K_SETTOD:       equ     $012D       ; -> f_settod
-K_INPUTL:       equ     $0130       ; -> f_inputl
+K_INPUTL:       equ     $0130       ; -> f_inputl (RF=buffer, RC=max
+                                    ; length; returns DF=0 with a real
+                                    ; line in RF, or DF=1 if input has
+                                    ; been redirected from a now-
+                                    ; exhausted source -- e.g. `<NUL`,
+                                    ; or a real file fully read -- in
+                                    ; which case RF is still an empty
+                                    ; string but the caller now has a
+                                    ; way to tell that apart from a
+                                    ; genuine blank line. Always DF=0
+                                    ; for live console input -- there's
+                                    ; no "EOF" from a keyboard. Check
+                                    ; DF if looping on this could
+                                    ; otherwise spin forever once input
+                                    ; redirection is exhausted.)
 K_BOOT:         equ     $0133       ; -> f_boot
 K_TTY:          equ     $0136       ; -> f_tty
 K_SETBD:        equ     $0139       ; -> f_setbd

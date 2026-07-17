@@ -36,10 +36,33 @@
 ; insert-mode terminator and letting blank lines be entered as content.
 ; A is just I with the target pre-set to line_count+1 -- same shared
 ; validate/prompt/loop, one implementation of the actual mechanics.
+;
+; v1.1 additions: L now takes an optional [n] or [n1,n2] range (a bare
+; [n] lists just that one line, matching D's own single-number
+; convention; no range still lists the whole file -- there's no paging
+; UI on this hardware yet, so that's more useful here than DOS's
+; classic 23-line default window). <n> (bare line number) now actually
+; supports real edlin's own core behavior -- display the line, then
+; prompt for a replacement; Enter alone leaves it unchanged, any real
+; text replaces it. Replacement is implemented as insert-then-delete
+; (insert the new text before the old line, then delete the old line,
+; now shifted one position down) rather than delete-then-insert,
+; deliberately -- if the buffer is too full for the replacement text,
+; insert fails first and the original line is never touched, instead
+; of being lost. New S[text] command: case-sensitive literal substring
+; search over an optional [n] or [n1,n2] range (default: whole file),
+; stops at and displays the first matching line, sets cur_line to it.
+; D's own delete mechanics were factored out into a callable
+; ed_delete_range (Args: ed_d_first/ed_d_last, already validated) so
+; the new single-line-edit path can reuse them without duplicating the
+; buffer/line-table shifting logic -- D's own command handler is
+; otherwise byte-for-byte unchanged, just restructured from an inline
+; jump into a call+return.
+;
 ; See the project plan file for the full design writeup and what's
-; deliberately deferred (S/R/C/M/T/#, multi-line ranges beyond a plain
-; n/n,m pair, in-place bare-number replace, dirty-flag tracking,
-; chunked saves).
+; still deliberately deferred: R(eplace), C(opy), M(ove), T(ransfer
+; file), the "?" confirm-prompt flag, multi-line ranges beyond a plain
+; n/n,m pair, dirty-flag tracking, chunked saves.
 ;
 
 #include    include/opcodes.def
@@ -760,6 +783,16 @@ ed_cmdloop:
             ldi     0
             phi     rc
             call    K_INPUTL
+            lbdf    ed_eof_quit         ; DF=1: redirected input is
+                                        ; exhausted (e.g. `<NUL`, or a
+                                        ; real script that's run out)
+                                        ; -- stop here instead of
+                                        ; spinning forever re-reading
+                                        ; nothing; unsaved edits are
+                                        ; abandoned, matching Q's own
+                                        ; no-save exit (there's no live
+                                        ; user left to confirm a Y/N
+                                        ; prompt with)
             call    K_INMSG
             db      13,10,0
 
@@ -803,6 +836,11 @@ ed_cmdloop:
             ani     $DF
             xri     'Q'
             lbz     ed_cmd_q
+
+            ldn     rf
+            ani     $DF
+            xri     'S'
+            lbz     ed_cmd_s
 
 ed_unknown_cmd:
             call    K_INMSG
@@ -977,6 +1015,92 @@ ed_bare_number:
             call    ed_print_line
             call    K_INMSG
             db      13,10,0
+
+            ; prompt for a replacement -- Enter alone leaves the line
+            ; unchanged (matches real edlin's own single-line-edit
+            ; behavior); any real text replaces it
+            call    K_INMSG
+            db      ": ",0
+            mov     rf, ed_input_buf
+            ldi     127
+            plo     rc
+            ldi     0
+            phi     rc
+            call    K_INPUTL
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, ed_input_buf
+            ldn     rf
+            lbz     ed_cmdloop          ; empty: leave line unchanged
+
+            ; replace line n1 by inserting the new text just before it,
+            ; then deleting the old line (now shifted to n1+1) --
+            ; insert-then-delete, not delete-then-insert, so a "buffer
+            ; full" failure leaves the original line completely intact
+            ; instead of losing it
+            mov     rf, ed_n1
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = n1 (1-based, already
+                                        ; range-validated above)
+            mov     rf, ed_i_target
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, ed_input_buf
+            call    ed_strlen
+            mov     rf, ed_i_text_len
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            call    ed_insert_one
+            lbdf    ed_edit_toolong
+
+            mov     rf, ed_n1
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            add16   rd, 1               ; RD = n1+1 (old line's new
+                                        ; 1-based position, after the
+                                        ; insert shifted it down)
+            mov     rf, ed_d_first
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            mov     rf, ed_d_last
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            call    ed_delete_range
+
+            mov     rf, ed_cur_line
+            mov     rd, ed_n1
+            lda     rd
+            str     rf
+            inc     rf
+            ldn     rd
+            str     rf                  ; cur_line = n1 (the edited
+                                        ; line's final position)
+
+            lbr     ed_cmdloop
+
+ed_edit_toolong:
+            call    K_INMSG
+            db      "Buffer full.",13,10,0
             lbr     ed_cmdloop
 
 ;==================================================================
@@ -984,11 +1108,117 @@ ed_bare_number:
 ;==================================================================
 
 ed_cmd_l:
+            mov     rf, ed_have_n1
+            ldn     rf
+            lbz     ed_l_full           ; no range: list every line
+                                        ; (this hardware has no paging
+                                        ; UI yet, so "all lines" is more
+                                        ; useful here than DOS's classic
+                                        ; 23-line default window)
+
+            mov     rf, ed_n1
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = n1 (1-based)
+
+            ghi     rd
+            lbnz    ed_l_n1_ok
+            glo     rd
+            lbz     ed_l_err            ; n1 == 0: invalid
+ed_l_n1_ok:
+            mov     rf, ed_line_count
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = line_count
+
+            ; line_count >= n1 ?
+            glo     rd
+            str     r2
+            glo     r8
+            sm
+            ghi     rd
+            str     r2
+            ghi     r8
+            smb
+            lbnf    ed_l_err
+
+            sub16   rd, 1               ; RD = n1 - 1 (0-based start)
+            mov     rf, ed_list_i
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, ed_have_n2
+            ldn     rf
+            lbz     ed_l_single         ; only n1: list just that line
+
+            mov     rf, ed_n2
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = n2 (1-based)
+
+            ghi     rd
+            lbnz    ed_l_n2_ok
+            glo     rd
+            lbz     ed_l_err            ; n2 == 0: invalid
+ed_l_n2_ok:
+            ; line_count >= n2 ?
+            glo     rd
+            str     r2
+            glo     r8
+            sm
+            ghi     rd
+            str     r2
+            ghi     r8
+            smb
+            lbnf    ed_l_err
+
+            mov     rf, ed_list_last
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     ed_list_loop
+
+ed_l_single:
+            mov     rf, ed_n1
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ed_list_last
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     ed_list_loop
+
+ed_l_full:
             mov     rf, ed_list_i
             ldi     0
             str     rf
             inc     rf
             str     rf
+            mov     rf, ed_list_last
+            mov     rd, ed_line_count
+            lda     rd
+            str     rf
+            inc     rf
+            ldn     rd
+            str     rf
+            lbr     ed_list_loop
+
+ed_l_err:
+            call    K_INMSG
+            db      "Line number out of range.",13,10,0
+            lbr     ed_cmdloop
 
 ed_list_loop:
             mov     rf, ed_list_i
@@ -996,7 +1226,7 @@ ed_list_loop:
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, ed_line_count
+            mov     rf, ed_list_last
             lda     rf
             phi     r8
             ldn     rf
@@ -1010,7 +1240,7 @@ ed_list_loop:
             str     r2
             ghi     rd
             smb
-            lbdf    ed_cmdloop          ; list_i >= line_count: done
+            lbdf    ed_cmdloop          ; list_i >= list_last: done
 
             mov     rf, ed_list_i
             lda     rf
@@ -1148,6 +1378,14 @@ ed_i_loop:
             ldi     0
             phi     rc
             call    K_INPUTL
+            lbdf    ed_i_done           ; DF=1: redirected input
+                                        ; exhausted mid-insert -- treat
+                                        ; it the same as the "."
+                                        ; terminator (end insert mode,
+                                        ; return to the command prompt)
+                                        ; rather than silently
+                                        ; inserting blank lines until
+                                        ; the buffer fills
             call    K_INMSG
             db      13,10,0
 
@@ -1794,14 +2032,26 @@ ed_d_validate:
             ghi     r9
             smb
             lbnf    ed_d_err
-            lbr     ed_d_do
+            call    ed_delete_range
+            call    K_INMSG
+            db      "Deleted.",13,10,0
+            lbr     ed_cmdloop
 
 ed_d_err:
             call    K_INMSG
             db      "Line number out of range.",13,10,0
             lbr     ed_cmdloop
 
-ed_d_do:
+;------------------------------------------------------------------
+; ed_delete_range: delete lines ed_d_first..ed_d_last (1-based,
+; inclusive) -- both must already be validated (1 <= first <= last <=
+; line_count) by the caller. Also called directly by the bare-number
+; single-line-edit path above (with first == last), reusing the exact
+; same buffer/line-table shifting logic rather than duplicating it.
+; Args:    ed_d_first, ed_d_last
+; Returns: nothing (ed_cur_line updated to a sane post-delete value)
+;------------------------------------------------------------------
+ed_delete_range:
             ; start_off = ed_lines[first-1]
             mov     rf, ed_d_first
             lda     rf
@@ -2219,9 +2469,7 @@ ed_d_cur_is_count:
             glo     rd
             str     rf
 
-            call    K_INMSG
-            db      "Deleted.",13,10,0
-            lbr     ed_cmdloop
+            rtn
 
 ;==================================================================
 ; E - save and exit
@@ -2344,6 +2592,433 @@ ed_save_open_err:
             rtn
 
 ;==================================================================
+; S - search
+;==================================================================
+
+; [range]S<text> -- case-sensitive literal substring search. Range
+; defaults to the whole file; a bare [n] searches from n to the end
+; (unlike D/the bare-number edit, where a lone number means "just that
+; one line" -- for a search, "start from here" is the more useful
+; reading). Stops at and displays the FIRST matching line, setting
+; cur_line to it; "Not found." if nothing matches. Only the first
+; occurrence in the whole range is reported -- there's no "search
+; again" state yet (re-running S re-scans from the range start).
+ed_cmd_s:
+            inc     rf                  ; skip the 'S' letter itself
+            call    f_ltrim             ; skip an optional space before
+                                        ; the search text ("S text" or
+                                        ; "Stext" both work)
+            mov     rd, ed_s_text_ptr
+            ghi     rf
+            str     rd
+            inc     rd
+            glo     rf
+            str     rd
+
+            ldn     rf
+            lbz     ed_s_no_text        ; nothing to search for
+
+            call    ed_strlen           ; RD = length (RF now points at
+                                        ; the text's own NUL terminator
+                                        ; -- unused below, ed_s_text_ptr
+                                        ; was already saved above)
+            mov     r8, rd              ; stash before the range-calc
+                                        ; code below reuses RD heavily
+            mov     rf, ed_s_text_len
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
+
+            ; first = have_n1 ? n1 : 1
+            mov     rf, ed_have_n1
+            ldn     rf
+            lbz     ed_s_first_default
+
+            mov     rf, ed_n1
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            ghi     rd
+            lbnz    ed_s_first_ok
+            glo     rd
+            lbz     ed_s_err            ; n1 == 0: invalid
+ed_s_first_ok:
+            mov     rf, ed_s_first
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     ed_s_first_done
+
+ed_s_first_default:
+            mov     rf, ed_s_first
+            ldi     0
+            str     rf
+            inc     rf
+            ldi     1
+            str     rf
+
+ed_s_first_done:
+            ; last = have_n2 ? n2 : line_count
+            mov     rf, ed_have_n2
+            ldn     rf
+            lbz     ed_s_last_default
+
+            mov     rf, ed_n2
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ed_s_last
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     ed_s_range_ready
+
+ed_s_last_default:
+            mov     rf, ed_s_last
+            mov     rd, ed_line_count
+            lda     rd
+            str     rf
+            inc     rf
+            ldn     rd
+            str     rf
+
+ed_s_range_ready:
+            ; validate: 1 <= first <= last <= line_count
+            mov     rf, ed_s_first
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = first
+            mov     rf, ed_s_last
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = last
+
+            ; last >= first ?
+            glo     rd
+            str     r2
+            glo     r8
+            sm
+            ghi     rd
+            str     r2
+            ghi     r8
+            smb
+            lbnf    ed_s_err
+
+            mov     rf, ed_line_count
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+
+            ; line_count >= last ?
+            glo     r8
+            str     r2
+            glo     r9
+            sm
+            ghi     r8
+            str     r2
+            ghi     r9
+            smb
+            lbnf    ed_s_err
+
+            ; scan lines [first-1 .. last-1] (0-based)
+            mov     rf, ed_s_first
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            sub16   rd, 1
+            mov     rf, ed_s_scan_i
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+ed_s_scan_loop:
+            mov     rf, ed_s_scan_i
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = scan_i (0-based)
+            add16   rd, 1               ; RD = 1-based line number
+            mov     rf, ed_s_last
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+
+            ; 1-based scan number > last ? -> done, not found
+            glo     r8
+            str     r2
+            glo     rd
+            sm
+            ghi     r8
+            str     r2
+            ghi     rd
+            smb
+            lbdf    ed_s_not_found
+
+            mov     rf, ed_s_scan_i
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    ed_line_info        ; sets ed_li_ptr/ed_li_len for
+                                        ; this candidate line
+
+            call    ed_line_contains
+            lbnf    ed_s_found
+
+            mov     rf, ed_s_scan_i
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            add16   rd, 1
+            mov     rf, ed_s_scan_i
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     ed_s_scan_loop
+
+ed_s_found:
+            mov     rf, ed_s_scan_i
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            add16   rd, 1               ; RD = 1-based line number
+            mov     rf, ed_cur_line
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, ed_num_buf
+            call    f_uintout
+            ldi     0
+            str     rf
+            mov     rf, ed_num_buf
+            call    K_MSG
+            call    K_INMSG
+            db      ": ",0
+
+            mov     rf, ed_s_scan_i
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    ed_print_line
+            call    K_INMSG
+            db      13,10,0
+            lbr     ed_cmdloop
+
+ed_s_not_found:
+            call    K_INMSG
+            db      "Not found.",13,10,0
+            lbr     ed_cmdloop
+
+ed_s_no_text:
+            call    K_INMSG
+            db      "Search text required.",13,10,0
+            lbr     ed_cmdloop
+
+ed_s_err:
+            call    K_INMSG
+            db      "Line number out of range.",13,10,0
+            lbr     ed_cmdloop
+
+;------------------------------------------------------------------
+; ed_line_contains: does the line described by ed_li_ptr/ed_li_len
+; (haystack) contain the text at ed_s_text_ptr/ed_s_text_len (needle,
+; must be non-empty -- callers guarantee this) as a substring, tried
+; at every possible starting offset (naive search, lines here are at
+; most 127 bytes so this is cheap)?
+; Args:    ed_li_ptr/ed_li_len, ed_s_text_ptr/ed_s_text_len
+; Returns: DF = 0 if found, DF = 1 if not
+;------------------------------------------------------------------
+ed_line_contains:
+            mov     rf, ed_lc_outer
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+
+elc_outer_loop:
+            ; remaining = haystack_len - outer (can't borrow: outer
+            ; only ever advances while remaining >= needle_len, so it
+            ; never exceeds haystack_len before this loop exits)
+            mov     rf, ed_li_len
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = haystack_len
+            mov     rf, ed_lc_outer
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = outer
+
+            glo     r8
+            str     r2
+            glo     rd
+            sm
+            plo     rc
+            ghi     r8
+            str     r2
+            ghi     rd
+            smb
+            phi     rc                  ; RC = remaining
+
+            mov     rf, ed_s_text_len
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = needle_len
+
+            ; remaining >= needle_len ?
+            glo     r9
+            str     r2
+            glo     rc
+            sm
+            ghi     r9
+            str     r2
+            ghi     rc
+            smb
+            lbnf    elc_not_found       ; DF=0: remaining < needle_len
+
+            mov     rf, ed_lc_inner
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+
+elc_inner_loop:
+            mov     rf, ed_lc_inner
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = inner
+            mov     rf, ed_s_text_len
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+
+            ; inner >= needle_len ? -> every byte matched
+            glo     r8
+            str     r2
+            glo     rd
+            sm
+            ghi     r8
+            str     r2
+            ghi     rd
+            smb
+            lbdf    elc_match
+
+            ; haystack[outer+inner] == needle[inner] ?
+            mov     rf, ed_li_ptr
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, ed_lc_outer
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            add16   r8, r9
+            mov     rf, ed_lc_inner
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            add16   r8, r9              ; R8 = &haystack[outer+inner]
+            mov     rf, r8
+            ldn     rf
+            str     r2                  ; M(R2) = haystack byte
+
+            mov     rf, ed_s_text_ptr
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, ed_lc_inner
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            add16   r8, r9              ; R8 = &needle[inner]
+            mov     rf, r8
+            ldn     rf                  ; D = needle byte
+            xor                         ; D = needle ^ haystack
+            lbnz    elc_mismatch
+
+            mov     rf, ed_lc_inner
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            add16   rd, 1
+            mov     rf, ed_lc_inner
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     elc_inner_loop
+
+elc_mismatch:
+            mov     rf, ed_lc_outer
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            add16   rd, 1
+            mov     rf, ed_lc_outer
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     elc_outer_loop
+
+elc_match:
+            clc
+            rtn
+
+elc_not_found:
+            stc
+            rtn
+
+;==================================================================
+; EOF handling (redirected input exhausted -- see K_INPUTL's own
+; DF=1 contract, kernel_api.inc)
+;==================================================================
+
+ed_eof_quit:
+            call    K_INMSG
+            db      13,10,0
+            ldi     0                   ; exit code 0 -- same as a
+                                        ; confirmed Q, unsaved edits
+                                        ; abandoned
+            rtn
+
+;==================================================================
 ; Q - quit without saving
 ;==================================================================
 
@@ -2392,6 +3067,7 @@ ed_n1:          dw      0
 ed_have_n2:     db      0
 ed_n2:          dw      0
 ed_list_i:      dw      0
+ed_list_last:   dw      0
 ed_num_buf:     ds      8
 ed_key:         db      0
 ed_crlf:        db      13,10
@@ -2429,5 +3105,14 @@ ed_d_shift_dst: dw      0
 
 ; ed_cmd_e scratch
 ed_save_i:      dw      0
+
+; ed_cmd_s / ed_line_contains scratch
+ed_s_text_ptr:  dw      0
+ed_s_text_len:  dw      0
+ed_s_first:     dw      0
+ed_s_last:      dw      0
+ed_s_scan_i:    dw      0
+ed_lc_outer:    dw      0
+ed_lc_inner:    dw      0
 
             end     start

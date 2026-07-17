@@ -120,6 +120,27 @@ RUN_PATH:       equ     PROG_BASE-102   ; 64-byte buffer: resolved path
 RUN_PATH_LEN:   equ     64              ; RUN_PATH's own size, for
                                         ; bounds-checking writes to it
 
+; RUN_REDIR_OUT/RUN_REDIR_OUT_APPEND/RUN_REDIR_IN: I/O redirection relay,
+; same mechanism and reasoning as RUN_ARGC/RUN_ARGV_TABLE/RUN_PATH above
+; (kernel/shell-internal only, never referenced by ordinary programs).
+; Unlike RUN_PATH, these are NOT copied buffers -- each is just a pointer
+; into LINE_BUF at the (already tokenized, NUL-terminated) redirect
+; target filename, same "raw pointer into the shell's own scratch, valid
+; until the next line is read" convention every argv[N] entry already
+; relies on. 0 means "no redirect of that kind." Set by progs/shell.asm's
+; tokenizer when it recognizes a `>`/`>>`/`<` operator instead of an
+; ordinary token; read by kernel_init's run_loop (kernel/kernel.asm),
+; which opens/closes the real files around the child's run (see
+; kernel/redir.asm).
+RUN_REDIR_OUT:      equ     PROG_BASE-105   ; word: 0 = no output
+                                            ; redirect, else -> filename
+RUN_REDIR_OUT_APPEND: equ   PROG_BASE-106   ; byte: 0 = truncate (`>`),
+                                            ; 1 = append (`>>`) --
+                                            ; meaningless if
+                                            ; RUN_REDIR_OUT is 0
+RUN_REDIR_IN:       equ     PROG_BASE-108   ; word: 0 = no input
+                                            ; redirect, else -> filename
+
 ; ----------------------------------------------------------------
 ; Disk geometry
 ; ----------------------------------------------------------------

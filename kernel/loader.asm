@@ -46,6 +46,7 @@
             extrn   shell_drive
             extrn   shell_elba
             extrn   shell_eoff
+            extrn   _redir_setup
 
 ; same-file proc references (required even within the same file)
             extrn   _prog_finish_load
@@ -293,6 +294,26 @@ pfl_bad_magic:
 
             call    _prog_finish_load
             lbdf    prun_err
+
+            ; open any requested I/O redirect target(s) HERE, only now
+            ; that the child's own binary has genuinely finished
+            ; loading -- _prog_finish_load's own file_close (above)
+            ; just freed prog_fcb/prog_iobuf again, and _redir_setup's
+            ; single-direction (and dual-direction output) paths reuse
+            ; those same addresses. Calling _redir_setup any earlier
+            ; (originally done from run_loop, before prog_run) let it
+            ; open the target correctly, only for THIS load's own
+            ; file_open (immediately above) to silently overwrite it
+            ; moments later -- hardware-found bug, 2026-07-16 ("dir
+            ; >dir1.txt" produced an empty file). See kernel/redir.asm's
+            ; own module header for the full design.
+            call    _redir_setup
+            lbdf    prun_err            ; bad path, disk full, input
+                                        ; file missing, or (rare) not
+                                        ; enough RAM headroom for a
+                                        ; dual redirect -- _redir_setup
+                                        ; itself leaves nothing open in
+                                        ; this case
 
             mov     rf, prun_argv
             lda     rf                  ; D = argv pointer high byte

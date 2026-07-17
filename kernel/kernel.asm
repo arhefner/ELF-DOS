@@ -60,6 +60,13 @@
             extrn   file_dirent
             extrn   dir_cur_lba
             extrn   dir_last_off
+            extrn   _redir_setup
+            extrn   _redir_teardown
+            extrn   _redir_type
+            extrn   _redir_msg
+            extrn   _redir_inmsg
+            extrn   _redir_read
+            extrn   _redir_inputl
 
 ; Kernel version -- single source of truth for the header bytes below,
 ; which programs read directly at the fixed KERNEL_HDR_VER address (see
@@ -122,13 +129,21 @@ k_dir_read:     lbr     dir_read            ; $011B
 ; removal note) -- collapsed into the internal-only prog_run
 ; (kernel/loader.asm), called directly by run_loop below, never
 ; through this table.
-k_type:         lbr     f_type              ; $011E (BIOS passthrough)
-k_msg:          lbr     f_msg               ; $0121 (BIOS passthrough)
-k_inmsg:        lbr     f_inmsg             ; $0124 (BIOS passthrough)
+; K_TYPE/K_MSG/K_INMSG/K_INPUTL (below) and K_READ (further down) are no
+; longer bare BIOS passthroughs -- each now targets a small redirect-
+; aware dispatcher in kernel/redir.asm that falls straight through to
+; the original BIOS call when I/O redirection isn't active (see
+; redir.asm's own module header for the full design). Still a plain
+; lbr each -- not a nested call -- so the target address is the only
+; thing that changed; every existing caller's own calling convention
+; is untouched.
+k_type:         lbr     _redir_type         ; $011E
+k_msg:          lbr     _redir_msg          ; $0121
+k_inmsg:        lbr     _redir_inmsg        ; $0124
 k_getdev:       lbr     f_getdev            ; $0127 (BIOS passthrough)
 k_gettod:       lbr     f_gettod            ; $012A (BIOS passthrough)
 k_settod:       lbr     f_settod            ; $012D (BIOS passthrough)
-k_inputl:       lbr     f_inputl            ; $0130 (BIOS passthrough)
+k_inputl:       lbr     _redir_inputl       ; $0130
 k_boot:         lbr     f_boot              ; $0133 (BIOS passthrough)
 k_tty:          lbr     f_tty               ; $0136 (BIOS passthrough)
 k_setbd:        lbr     f_setbd             ; $0139 (BIOS passthrough)
@@ -148,7 +163,7 @@ k_file_delete:  lbr     file_delete         ; $014B
 k_dir_create:   lbr     dir_create          ; $014E
 k_dir_remove:   lbr     dir_remove          ; $0151
 k_file_rename:  lbr     file_rename         ; $0154
-k_read:         lbr     f_read              ; $0157 (BIOS passthrough)
+k_read:         lbr     _redir_read         ; $0157
 
 ; K_FAT_INIT/K_FILE_INIT/K_SHELL_INIT: boot-only, called exactly once
 ; each by boot/krnboot.asm's relocated init code (see kernel_init's
@@ -303,6 +318,33 @@ kinit_dcd_zero:
 ; valid program" -- a genuinely different, rarer case than before.
 ;------------------------------------------------------------------
 run_loop:
+            ; clear the redirect relay slots BEFORE reloading the
+            ; shell -- prog_run_shell's own rare fallback path (used
+            ; when its cached shell_elba/eoff sector read fails
+            ; validation) calls prog_run directly to reload "C:/bin/
+            ; shell" by path, and prog_run now always calls
+            ; _redir_setup internally (see kernel/loader.asm). Without
+            ; this, that reload would run BEFORE the shell has had any
+            ; chance to tokenize the new line and (re)write these
+            ; slots itself, so they'd still hold whatever the
+            ; PREVIOUS command's redirect left behind, and the
+            ; shell's own reload could spuriously "redirect" itself.
+            ; progs/shell.asm's own tokenizer also clears these at the
+            ; top of every pass (fixing the separate uninitialized-RAM
+            ; bug found 2026-07-16), but that happens only after the
+            ; shell is already loaded and running -- this covers the
+            ; earlier window the tokenizer's own fix can't reach.
+            mov     rf, RUN_REDIR_OUT
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            mov     rf, RUN_REDIR_IN
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+
             call    prog_run_shell      ; loads+runs "C:/bin/shell" --
                                         ; see kernel/loader.asm: reads
                                         ; the cached shell_elba/eoff
@@ -312,10 +354,23 @@ run_loop:
                                         ; load if that cached location
                                         ; is no longer valid. Always
                                         ; returns with RUN_PATH/
-                                        ; RUN_ARGC/RUN_ARGV_TABLE filled
-                                        ; in on success.
+                                        ; RUN_ARGC/RUN_ARGV_TABLE/
+                                        ; RUN_REDIR_OUT/RUN_REDIR_IN
+                                        ; filled in on success.
             lbdf    kern_shell_err      ; shell itself missing/corrupt/
                                         ; unloadable: fatal
+
+            ; NOTE: redirect target(s) are opened INSIDE prog_run
+            ; (kernel/loader.asm's own call to _redir_setup), not here.
+            ; prog_run's own internal load of the child's binary uses
+            ; prog_fcb/prog_iobuf too -- opening a redirect target
+            ; against those same addresses here, before prog_run runs,
+            ; would get silently overwritten the moment prog_run loads
+            ; the child (hardware-found bug, 2026-07-16: "dir
+            ; >dir1.txt" created a 0-byte file -- prog_fcb/prog_iobuf
+            ; are only genuinely idle again AFTER the child's binary
+            ; has finished loading, not from the moment _redir_setup
+            ; runs). See kernel/redir.asm's own module header.
 
             mov     ra, RUN_ARGV_TABLE  ; RA = argv table's address --
                                         ; a fixed constant (the shell
@@ -336,10 +391,35 @@ run_loop:
             call    prog_run            ; D = exit code (unused), DF=0/1
             lbdf    run_bad_program     ; exists (the shell already
                                         ; confirmed that) but isn't a
-                                        ; valid EDF program
+                                        ; valid EDF program, OR its own
+                                        ; internal _redir_setup call
+                                        ; failed (bad output/input
+                                        ; path, disk full, or -- rare
+                                        ; -- not enough RAM headroom
+                                        ; for a dual redirect) -- both
+                                        ; share this one exit and
+                                        ; message for now, a minor
+                                        ; imprecision accepted in favor
+                                        ; of not needing a second
+                                        ; memory flag just to tell them
+                                        ; apart
+
+            call    _redir_teardown     ; close whatever prog_run's own
+                                        ; _redir_setup call opened/
+                                        ; reserved, always -- checked
+                                        ; AFTER prog_run's own DF, since
+                                        ; this call would otherwise
+                                        ; clobber it before the check
+                                        ; above ever ran
             lbr     run_loop
 
 run_bad_program:
+            ; safe to call unconditionally even when _redir_setup was
+            ; never reached (_prog_finish_load failed first) or already
+            ; cleaned up after its own failure -- redir_*_active/
+            ; redir_stack_reserved are already clear in both cases, so
+            ; this is a no-op then, not a double-release
+            call    _redir_teardown
             call    f_inmsg
             db      "Invalid program file.",13,10,0
             lbr     run_loop

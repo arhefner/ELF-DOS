@@ -47,7 +47,8 @@ KOBJ =  kernel/kernel.prg  \
         kernel/rtc.prg     \
         kernel/file.prg    \
         kernel/loader.prg  \
-        kernel/batch.prg
+        kernel/batch.prg   \
+        kernel/redir.prg
 
 # ---- Common include dependencies ----
 INCS =  include/bios.inc    \
@@ -102,6 +103,9 @@ kernel/loader.prg: kernel/loader.asm $(INCS)
 kernel/batch.prg: kernel/batch.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) batch.asm
 
+kernel/redir.prg: kernel/redir.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) redir.asm
+
 # Programs are single-file: each progs/X.asm assembles and links on
 # its own (no multi-module link order to worry about, unlike KOBJ).
 progs/%.prg: progs/%.asm include/kernel_api.inc include/bios.inc include/opcodes.def
@@ -113,6 +117,31 @@ bin:
 bin/%: progs/%.prg | bin
 	$(LINK) $(LFLAGS) -o bin/$* progs/$*.prg
 	rm -f bin/$*.lkb
+
+#------------------------------------------------------------------
+# Reusable libraries (lib/ subdir) -- NOT standalone programs, no EDF
+# header/entry point of their own. Assembled separately and linked
+# alongside whichever program wants them, same idea as the kernel's
+# own multi-module KOBJ link. progs/bumptest.asm and
+# progs/malloctest.asm are the first (and so far only) consumers --
+# see their own explicit link rules below, which override the generic
+# "bin/%: progs/%.prg" pattern rule above for just those two targets
+# (GNU Make always prefers an explicit target-specific rule over a
+# pattern rule that also matches).
+#------------------------------------------------------------------
+lib/heap_bump.prg: lib/heap_bump.asm include/opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) heap_bump.asm
+
+lib/heap_malloc.prg: lib/heap_malloc.asm include/opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) heap_malloc.asm
+
+bin/bumptest: progs/bumptest.prg lib/heap_bump.prg | bin
+	$(LINK) $(LFLAGS) -o bin/bumptest progs/bumptest.prg lib/heap_bump.prg
+	rm -f bin/bumptest.lkb
+
+bin/malloctest: progs/malloctest.prg lib/heap_malloc.prg | bin
+	$(LINK) $(LFLAGS) -o bin/malloctest progs/malloctest.prg lib/heap_malloc.prg
+	rm -f bin/malloctest.lkb
 
 #------------------------------------------------------------------
 # Link rules

@@ -156,7 +156,35 @@ not_drive_cmd:
             ; write back into LINE_BUF in place), RB = next argv-table
             ; slot to fill, R9.0 = argc, R8.0 = in_quotes flag (0/$FF)
             ; for the token currently being scanned.
-            mov     rd, rf
+            mov     rd, rf              ; RD = start of the trimmed
+                                        ; line (captured before RF is
+                                        ; reused as scratch below)
+
+            ; reset the I/O-redirection relay slots before tokenizing
+            ; -- RUN_REDIR_OUT/RUN_REDIR_IN are fixed addresses below
+            ; PROG_BASE, not part of the kernel's own zeroed data
+            ; section, so they hold uninitialized RAM on first boot and
+            ; whatever a PRIOR command's redirect left behind
+            ; otherwise. Only the tok_redir_out/tok_redir_in paths
+            ; below ever WRITE them, so an ordinary command with no
+            ; `>`/`<` at all needs this explicit reset every pass, or
+            ; _redir_setup (kernel/redir.asm) misreads stale/garbage
+            ; data as a real redirect request -- exactly the "Cannot
+            ; redirect." bug hit on hardware (2026-07-16) testing a
+            ; plain "dir" with no redirection at all.
+            mov     rf, RUN_REDIR_OUT
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            mov     rf, RUN_REDIR_IN
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+
+            mov     rf, rd              ; RF restored = start of the
+                                        ; trimmed line
             mov     rb, RUN_ARGV_TABLE
             ldi     0
             plo     r9
@@ -172,6 +200,16 @@ tok_skip_ws:
 tok_check_end:
             ldn     rf
             lbz     tok_done            ; end of line: no more tokens
+
+            ; a `>`/`<` here starts a redirect operator, not an
+            ; ordinary argv token -- neither counts against argc/
+            ; ARGV_MAX_ARGS nor gets written into argv[]. D still
+            ; holds *RF from the ldn above (lbz doesn't touch D).
+            xri     '>'
+            lbz     tok_redir_out
+            ldn     rf
+            xri     '<'
+            lbz     tok_redir_in
 
             glo     r9
             smi     ARGV_MAX_ARGS
@@ -190,7 +228,79 @@ tok_check_end:
                                         ; next slot
 
             ldi     0
-            plo     r8                  ; in_quotes = false
+            phi     r8                  ; R8.1 = 0: ordinary argv
+                                        ; token -- tok_end_token below
+                                        ; increments argc normally
+            lbr     tok_char_entry
+
+tok_redir_out:
+            inc     rf                  ; consume '>'
+            ldn     rf
+            xri     '>'
+            lbnz    tok_redir_out_trunc
+            inc     rf                  ; consume the second '>' (append)
+            mov     r7, RUN_REDIR_OUT_APPEND
+            ldi     1
+            str     r7
+            lbr     tok_redir_out_settarget
+tok_redir_out_trunc:
+            mov     r7, RUN_REDIR_OUT_APPEND
+            ldi     0
+            str     r7
+tok_redir_out_settarget:
+            mov     r7, RUN_REDIR_OUT
+            lbr     tok_redir_skip_ws
+
+tok_redir_in:
+            inc     rf                  ; consume '<'
+            mov     r7, RUN_REDIR_IN
+                                        ; fall through
+
+tok_redir_skip_ws:
+            ; RF -> just past the operator; skip optional whitespace
+            ; before the filename token (">file" and "> file" both work)
+            ldn     rf
+            xri     ' '
+            lbnz    tok_redir_capture
+            inc     rf
+            lbr     tok_redir_skip_ws
+
+tok_redir_capture:
+            ; R7 -> the relay slot (RUN_REDIR_OUT or RUN_REDIR_IN) to
+            ; fill with RD's current value -- this token's about-to-be-
+            ; scanned start, mirroring the argv[argc]=RD capture the
+            ; ordinary-token path does above, just writing somewhere
+            ; else and never touching argc/RB. If the same operator
+            ; appears twice on one line, the later one simply
+            ; overwrites the slot -- last one wins, no special-casing
+            ; needed.
+            ghi     rd
+            str     r7
+            inc     r7
+            glo     rd
+            str     r7
+
+            ldi     $FF
+            phi     r8                  ; R8.1 = nonzero: this token IS
+                                        ; a redirect target -- tok_end_token
+                                        ; below must skip the argc++
+                                        ; (a missing filename, e.g. a
+                                        ; trailing ">" with nothing
+                                        ; after it, still lands here and
+                                        ; produces an empty-string
+                                        ; target -- left to fail
+                                        ; naturally via _redir_setup's
+                                        ; own file_open error path
+                                        ; rather than special-cased here)
+
+tok_char_entry:
+            ldi     0
+            plo     r8                  ; in_quotes = false (R8.0 --
+                                        ; unchanged from the original
+                                        ; design; R8.1, set above on
+                                        ; both paths before reaching
+                                        ; here, is the new redirect-
+                                        ; target flag)
 
 tok_char:
             ldn     rf
@@ -311,10 +421,18 @@ tok_end_token:
             str     rd                  ; NUL-terminate this token
             inc     rd
 
+            ghi     r8
+            lbnz    tok_end_redir       ; this token was a redirect
+                                        ; target (>file/<file), not an
+                                        ; ordinary argv entry -- skip
+                                        ; the argc++ below, it was
+                                        ; never written into argv[]
+
             glo     r9
             adi     1
             plo     r9                  ; argc++
 
+tok_end_redir:
             ldn     rf
             lbz     tok_done            ; that was the last char on
                                         ; the line
