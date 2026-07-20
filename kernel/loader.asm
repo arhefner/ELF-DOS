@@ -406,9 +406,11 @@ prun_err:
             xri     $E5
             lbz     prsh_fallback       ; deleted: fallback
 
-            mov     rf, prog_iobuf
-            add16   rf, r9
-            add16   rf, DE_ATTR
+            mov     rf, prog_iobuf+DE_ATTR
+            add16   rf, r9              ; DE_ATTR folded into the mov,
+                                        ; commutative with the +r9
+                                        ; runtime offset -- gotcha
+                                        ; #15/#17, confirmed safe
             ldn     rf
             ani     ATTR_DIR
             lbnz    prsh_fallback       ; a directory: fallback
@@ -430,9 +432,10 @@ prun_err:
             ; them back out high-byte-first to match that convention --
             ; NOT a straight sequential copy, unlike FCB_ELBA/FCB_EOFF
             ; below (whose own source fields are already BE).
-            mov     rf, prog_iobuf
-            add16   rf, r9
-            add16   rf, DE_CLUSTER
+            mov     rf, prog_iobuf+DE_CLUSTER
+            add16   rf, r9              ; DE_CLUSTER folded into the
+                                        ; mov -- same reasoning as the
+                                        ; DE_ATTR fold above
             lda     rf                  ; D = cluster low byte
             plo     rc
             ldn     rf                  ; D = cluster high byte
@@ -465,9 +468,12 @@ prun_err:
             ; -- explicit byte-by-byte reversal (on-disk byte 3 is the
             ; MSB and goes first into FCB_FSIZE, on-disk byte 0 is the
             ; LSB and goes last)
-            mov     rf, prog_iobuf
+            mov     rf, prog_iobuf+DE_SIZE+3 ; RF -> on-disk size byte
+                                        ; 3 (MSB); DE_SIZE+3 folded
+                                        ; into the mov -- same
+                                        ; reasoning as the DE_ATTR
+                                        ; fold above
             add16   rf, r9
-            add16   rf, DE_SIZE+3       ; RF -> on-disk size byte 3 (MSB)
             ldn     rf
             str     rb
             inc     rb                  ; FCB_FSIZE byte 0 (MSB)

@@ -2527,17 +2527,20 @@ dle_lfn_loop:
 dle_lfn_step_back:
             sub16   rc, DIR_ENT_SIZE    ; RC = previous entry's offset
 
-            mov     rf, dir_buf
-            add16   rf, rc              ; RF = candidate entry base
-            add16   rf, DE_ATTR
+            mov     rf, dir_buf+DE_ATTR
+            add16   rf, rc              ; RF = candidate entry's
+                                        ; attribute byte (DE_ATTR
+                                        ; folded into the mov,
+                                        ; commutative with the +rc
+                                        ; runtime offset -- gotcha
+                                        ; #15/#17, confirmed safe)
             ldn     rf                  ; D = candidate's attribute byte
             xri     ATTR_LFN
             lbnz    dle_mark_short     ; not an LFN entry: this
                                         ; file's run ends here, stop
 
-            mov     rf, dir_buf
+            mov     rf, dir_buf+LFN_CHKSUM
             add16   rf, rc
-            add16   rf, LFN_CHKSUM
             ldn     rf                  ; D = candidate's checksum byte
             str     r2                  ; [R2] = candidate's checksum
                                         ; (one-shot scratch slot -- same
