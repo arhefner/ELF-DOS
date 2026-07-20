@@ -127,9 +127,7 @@
             extrn   _gen_short_name
             extrn   _classify_char
             extrn   _lfn_fill_segment
-            extrn   fa_boff
-            extrn   fa_cluster_idx
-            extrn   fa_sector_in_clust
+            extrn   _shared_scratch
             extrn   fsk_whence
             extrn   fsk_off_hi
             extrn   fsk_off_lo
@@ -138,18 +136,72 @@
             extrn   fsk_boff
             extrn   fsk_cluster_idx
             extrn   fsk_sector_in_clust
-            extrn   fdel_next_clust
-            extrn   fdel_chksum
-            extrn   dcr_parent
-            extrn   dcr_new_clust
-            extrn   dcr_sect_lba
-            extrn   drm_saved_clust
-            extrn   drm_saved_off
-            extrn   drm_saved_lba
-            extrn   ren_new_name
-            extrn   ren_parent
-            extrn   ren_old_off
-            extrn   ren_old_lba
+; _shared_scratch (declared in a tiny standalone proc below, right
+; before file_init -- storage placement in the final binary is
+; determined by link order across all files, not by source position,
+; so this doesn't need to sit anywhere near _file_data's own big data
+; block): 9 bytes shared directly across 5 mutually-exclusive scratch
+; groups that used to be 5 separate, permanently-allocated field sets
+; -- file_open's mode-2 (append) positioning (fa_*), file_delete's
+; cluster-chain-free loop (fdel_*), dir_create/MD (dcr_*), dir_remove/
+; RD (drm_*), and file_rename/REN (ren_*). Confirmed mutually
+; exclusive: this kernel is single-threaded/non-reentrant, and NONE of
+; these 5 top-level routines ever calls into another of the 5 -- they
+; only share LEAF helpers (_file_create, _mark_entry_deleted,
+; _delete_located_entry, _scan_dir_for_name, path_resolve,
+; fat_get/fat_alloc/fat_set), none of which touch this block.
+; (_file_create's OWN scratch, fc_*, is a separate matter -- it's live
+; *during* dir_create's and file_rename's own calls into it, so it
+; can't share this block.) Sized to the single largest need
+; (file_rename's own 4 fields).
+;
+; Each field below is a `#define` (pure textual substitution), NOT an
+; `equ` (a real symbol-table entry) -- deliberately. An isolated
+; investigation (2026-07-21) found a real Asm/02 bug: declaring a name
+; via `extrn` earlier in a file, then LATER defining that SAME name
+; via `equ`, silently collapses the equ's value to the base symbol's
+; own address, discarding any "+offset" -- and every one of these 15
+; field names NEEDS an `extrn` for cross-proc use in this same file
+; (gotcha #6), so this exact shape is unavoidable for `equ`. `#define`
+; sidesteps it entirely: it never creates a real symbol, so there's
+; nothing for a later `extrn`/definition to collide with -- every use
+; site gets the literal text `_shared_scratch+N` substituted in before
+; the assembler's parser ever sees the field's old name, evaluated
+; correctly by the same expression path gotcha #17 already proved
+; sound. Confirmed via a full isolated reproduction (the real
+; kernel/file.asm content, standalone-assembled) before ever touching
+; the real file -- see CLAUDE.md's gotcha #15 for the complete
+; writeup. Must appear before this file's FIRST use of any of these
+; 15 names (file_open's append-mode logic, a few hundred lines below)
+; since `#define` only applies forward from its own point in the
+; source, unlike `extrn`/`public` which apply file-wide regardless of
+; position.
+#define     fa_boff             _shared_scratch
+#define     fa_cluster_idx      _shared_scratch+2
+#define     fa_sector_in_clust  _shared_scratch+3
+#define     fdel_next_clust     _shared_scratch
+#define     fdel_chksum         _shared_scratch+2
+#define     dcr_parent          _shared_scratch
+#define     dcr_new_clust       _shared_scratch+2
+#define     dcr_sect_lba        _shared_scratch+4
+#define     drm_saved_clust     _shared_scratch
+#define     drm_saved_off       _shared_scratch+2
+#define     drm_saved_lba       _shared_scratch+4
+#define     ren_new_name        _shared_scratch
+#define     ren_parent          _shared_scratch+2
+#define     ren_old_off         _shared_scratch+4
+#define     ren_old_lba         _shared_scratch+6
+
+; ----------------------------------------------------------------
+; _shared_scratch's own storage -- see the big comment above.
+; ----------------------------------------------------------------
+            proc    _shared_scratch_data
+
+_shared_scratch:    ds      9
+
+                public  _shared_scratch
+
+            endp
 
 ; ----------------------------------------------------------------
 ; file_init: zero fd_table at boot.
@@ -5607,13 +5659,10 @@ fc_new_attr:    db      0
 fc_new_cluster: dw      0
 fc_new_size:    dw      0,0             ; 4 bytes, big-endian
 
-; fa_*: scratch for file_open's mode-2 (append) end-of-file
-; positioning -- see the append block in file_open. Kept in memory
-; (not registers) across the fat_get chain-walk loop, which clobbers
-; R7/R8/R9/RB/RC (via a possible nested fat_flush).
-fa_boff:            dw      0
-fa_cluster_idx:     db      0
-fa_sector_in_clust: db      0
+; fa_*/fdel_*/dcr_*/drm_*/ren_*: now #define aliases into
+; _shared_scratch, declared near the top of this file (right before
+; file_init) -- see that declaration's own big comment for the full
+; reasoning. No storage lives here anymore.
 
 ; fsk_*: scratch for file_seek (2026-07-20). Args stashed to memory
 ; immediately on entry (fsk_whence/fsk_off_hi/fsk_off_lo/fsk_fcb),
@@ -5632,48 +5681,6 @@ fsk_target:         dw      0
 fsk_boff:           dw      0
 fsk_cluster_idx:    db      0
 fsk_sector_in_clust: db     0
-
-; fdel_next_clust: scratch for file_delete's cluster-freeing loop --
-; kept in memory (not a register) across the fat_set call, which may
-; clobber almost anything.
-fdel_next_clust:    dw      0
-
-; fdel_chksum: scratch for file_delete's LFN-entry cleanup walk --
-; the short entry's LFN checksum (same value _file_create stamps into
-; every LFN entry belonging to this file), computed once and kept in
-; memory since _dir_chksum's own clobber footprint (RC.0/RF/RB.0) and
-; effect on any other register isn't documented beyond its own args.
-fdel_chksum:        db      0
-
-; dcr_*: scratch for dir_create (MD) -- kept in memory, not registers,
-; across the several fat_alloc/fat_flush/_cluster_to_lba/f_idewrite/
-; f_ideread calls between allocating the new cluster and finally
-; handing it to _file_create (same reasoning as fdel_next_clust).
-dcr_parent:         dw      0           ; parent directory's cluster
-                                        ; (0 = root, for the '..' entry)
-dcr_new_clust:      dw      0           ; newly allocated cluster
-dcr_sect_lba:       ds      LBA_SIZE    ; current sector's LBA while
-                                        ; zeroing the new cluster
-
-; drm_*: scratch for dir_remove (RD) -- the empty-check scan (its own
-; dir_open/dir_read pass over the TARGET directory) clobbers dir.asm's
-; live scan state, so the PARENT's located-entry position is saved
-; here first and restored afterward, before _delete_located_entry
-; (shared with DEL) runs. Kept in memory, not registers, across that
-; scan for the same reasoning as fdel_next_clust/dcr_*.
-drm_saved_clust:    dw      0           ; target directory's own first
-                                        ; cluster
-drm_saved_off:      dw      0           ; parent's dir_last_off, saved
-drm_saved_lba:      ds      LBA_SIZE    ; parent's dir_cur_lba, saved
-
-; ren_*: scratch for file_rename (REN) -- same reasoning as drm_*: the
-; new-name collision scan (a fresh dir_open/dir_read pass) clobbers
-; dir.asm's live scan state, so the OLD entry's location is saved here
-; first and restored afterward, before _mark_entry_deleted runs.
-ren_new_name:       dw      0           ; new name pointer
-ren_parent:         dw      0           ; resolved parent cluster
-ren_old_off:        dw      0           ; OLD entry's dir_last_off, saved
-ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
 
                 public  file_dirent
                 public  fo_name
@@ -5697,9 +5704,6 @@ ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
                 public  fc_new_cluster
                 public  fc_new_size
                 public  fc_eoff
-                public  fa_boff
-                public  fa_cluster_idx
-                public  fa_sector_in_clust
                 public  fsk_whence
                 public  fsk_off_hi
                 public  fsk_off_lo
@@ -5708,17 +5712,5 @@ ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
                 public  fsk_boff
                 public  fsk_cluster_idx
                 public  fsk_sector_in_clust
-                public  fdel_next_clust
-                public  fdel_chksum
-                public  dcr_parent
-                public  dcr_new_clust
-                public  dcr_sect_lba
-                public  drm_saved_clust
-                public  drm_saved_off
-                public  drm_saved_lba
-                public  ren_new_name
-                public  ren_parent
-                public  ren_old_off
-                public  ren_old_lba
 
             endp
