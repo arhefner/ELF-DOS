@@ -17,7 +17,7 @@
  *                    writes all sectors to disk starting at LBA 1.
  *
  * Kernel binary layout (as produced by the ELF-DOS build):
- *   Bytes    0-511:  Bootstrap sector (runs at $3E00 on target)
+ *   Bytes    0-511:  Bootstrap sector (runs at $4600 on target)
  *     Offset   0-2:  'KRN' magic signature
  *     Offset     3:  Kernel major version
  *     Offset   4-5:  Sector count word -- PATCHED HERE (big-endian)

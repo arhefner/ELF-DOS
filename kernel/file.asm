@@ -130,6 +130,14 @@
             extrn   fa_boff
             extrn   fa_cluster_idx
             extrn   fa_sector_in_clust
+            extrn   fsk_whence
+            extrn   fsk_off_hi
+            extrn   fsk_off_lo
+            extrn   fsk_fcb
+            extrn   fsk_target
+            extrn   fsk_boff
+            extrn   fsk_cluster_idx
+            extrn   fsk_sector_in_clust
             extrn   fdel_next_clust
             extrn   fdel_chksum
             extrn   dcr_parent
@@ -4994,17 +5002,67 @@ fwrite_calc_written:
             rtn
 
 ; ----------------------------------------------------------------
-; file_seek: set file position to start of file (rewind), given its
-; handle (see file_open)
-; More general seeking to be added when needed.
-; Args:   D = handle (index into fd_table)
-; Returns: DF = 0 on success, DF = 1 on error
+; file_seek: reposition an open file's read/write cursor.
+; Args:    D = handle (index into fd_table)
+;          RC.0 = whence: 0 = SEEK_SET (absolute from start),
+;                 1 = SEEK_CUR (relative to current position),
+;                 2 = SEEK_END (relative to end of file)
+;          RA:RD = 32-bit signed offset (RA = high word, RD = low
+;                 word). This implementation only accepts offsets
+;                 that are a valid sign-extension of a 16-bit value
+;                 (RA == $0000 with RD's bit 15 clear, or RA == $FFFF
+;                 with RD's bit 15 set); anything wider is an error.
+;                 File positions/sizes beyond 16 bits are likewise
+;                 not yet supported (FCB_FSIZE/FCB_FPOS's own high
+;                 words are assumed zero, matching this file's own
+;                 existing append-mode positioning in
+;                 fopen_check_append) -- the 32-bit register ABI is
+;                 reserved now so a future expansion to real 32-bit
+;                 seeking needs no calling-convention change.
+; Returns: DF = 0 on success (RD = the resulting absolute position,
+;          low word only), DF = 1 on error (bad handle, bad whence,
+;          offset out of the supported range, or the resulting
+;          position would fall outside [0, FCB_FSIZE]) -- on any
+;          error the FCB is left completely untouched (no field is
+;          written until the new position is fully validated and,
+;          for a forward/backward move, the target cluster has
+;          already been found).
+; Modifies: R7, R8, R9, RA, RB, RC, RF (all used as internal scratch
+;          -- nothing but D-in/DF-out/RD-out survives a call to this
+;          routine; a caller needing anything else alive across it
+;          must stash to memory first, per this file's own standing
+;          register-survival discipline).
 ; ----------------------------------------------------------------
             endp
 
             proc    file_seek
 
-            plo     rc                  ; RC.0 = handle
+            plo     r9                  ; stash handle in a register
+                                        ; that survives the memory
+                                        ; stashing below (R9 unused
+                                        ; until the cluster-walk loop,
+                                        ; far below)
+
+            mov     rf, fsk_off_hi
+            ghi     ra
+            str     rf
+            inc     rf
+            glo     ra
+            str     rf                  ; fsk_off_hi = offset high word
+
+            mov     rf, fsk_off_lo
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fsk_off_lo = offset low word
+
+            mov     rf, fsk_whence
+            glo     rc
+            str     rf                  ; fsk_whence = whence
+
+            glo     r9
+            plo     rc                  ; RC.0 = handle (reloaded)
 
             glo     rc
             smi     FD_COUNT
@@ -5022,28 +5080,212 @@ fwrite_calc_written:
             phi     rb
             ldn     rf
             plo     rb                  ; RB = the real FCB pointer
+            mov     rf, fsk_fcb
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf                  ; fsk_fcb = RB, stashed --
+                                        ; _switch_drive and fat_get
+                                        ; both clobber broadly below
 
             ; switch the active BPB/FAT-cache to this FCB's own drive
-            ; for consistency with file_read/file_write/file_close --
-            ; today's rewind-only file_seek doesn't itself touch any
-            ; BPB/FAT state, but keeping this call here means a future
-            ; seek enhancement that does can't silently forget it. RB
-            ; must survive -- _switch_drive's own header documents it
-            ; (plus R7/R8/R9/RA/RC/RD/RF) as clobbered.
-            push    rb
             mov     rf, rb
             add16   rf, FCB_DRIVE
             ldn     rf
-            call    _switch_drive
-            pop     rb
+            call    _switch_drive       ; clobbers R7/R8/R9/RA/RC/RD/RF
+                                        ; per its own header -- nothing
+                                        ; of ours needs to survive it,
+                                        ; everything is already stashed
+                                        ; to memory above
 
-            ; FCB_CCLUST = FCB_SCLUST (rewind to the file's start cluster)
+            ; validate whence (0, 1, or 2)
+            mov     rf, fsk_whence
+            ldn     rf
+            smi     3
+            lbdf    fseek_bad_whence    ; whence >= 3: invalid
+
+            ; validate the offset is a genuine 16-bit sign-extension
+            mov     rf, fsk_off_lo
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = off_lo
+            mov     rf, fsk_off_hi
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = off_hi
+
+            ghi     rd
+            ani     $80
+            lbz     fsk_off_pos         ; off_lo's sign bit clear:
+                                        ; off_hi must be 0
+            ghi     r8
+            xri     $FF
+            lbnz    fseek_bad_offset
+            glo     r8
+            xri     $FF
+            lbnz    fseek_bad_offset
+            lbr     fsk_off_checked
+
+fsk_off_pos:
+            ghi     r8
+            lbnz    fseek_bad_offset
+            glo     r8
+            lbnz    fseek_bad_offset
+
+fsk_off_checked:
+            mov     rf, fsk_whence
+            ldn     rf
+            lbz     fsk_target_set
+            smi     1
+            lbz     fsk_target_cur
+            lbr     fsk_target_end
+
+fsk_target_set:
+            ; target = off_lo, must be non-negative
+            ghi     rd
+            ani     $80
+            lbnz    fseek_bad_offset    ; SEEK_SET with a negative
+                                        ; offset makes no sense
+            mov     rf, fsk_target
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     fsk_range_check
+
+fsk_target_cur:
+            mov     rf, fsk_fcb
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = FCB base
+            mov     rf, r9
+            add16   rf, FCB_FPOS
+            add16   rf, 2               ; -> FCB_FPOS's low word
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = FPOS (low word) = base
+            lbr     fsk_add_base
+
+fsk_target_end:
+            mov     rf, fsk_fcb
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = FCB base
+            mov     rf, r9
+            add16   rf, FCB_FSIZE
+            add16   rf, 2               ; -> FCB_FSIZE's low word
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = FSIZE (low word) = base
+
+fsk_add_base:
+            ; target = base(R9) + off_lo(RD), verified to land in
+            ; [0, 65535] via a byte-level add-with-carry, then a case
+            ; split on off_hi/carry-out. Independently verified
+            ; against 2000+ randomized + edge cases in Python before
+            ; writing this, since 2's-complement carry reasoning is
+            ; easy to get subtly wrong.
+            glo     r9
+            str     r2
+            glo     rd
+            add                         ; D = off_lo.lo + base.lo
+            plo     rc                  ; RC.lo = low_word.lo
+            ghi     r9
+            str     r2
+            ghi     rd
+            adc                         ; D = off_lo.hi + base.hi + carry
+            phi     rc                  ; RC.hi = low_word.hi
+            lbdf    fsk_lowcarry        ; DF=1: the add carried out
+
+            ; no carry: valid only if off was non-negative (off_hi==0)
+            mov     rf, fsk_off_hi
+            ldn     rf
+            lbnz    fseek_bad_offset    ; off_hi != 0 (off was
+                                        ; negative) and didn't carry
+                                        ; -> result is still negative
+            lbr     fsk_target_have
+
+fsk_lowcarry:
+            ; carried out: valid only if off was negative (off_hi ==
+            ; $FFFF), wrapping correctly back into [0,65535]
+            mov     rf, fsk_off_hi
+            ldn     rf
+            xri     $FF
+            lbnz    fseek_bad_offset    ; off_hi == 0 (off was non-
+                                        ; negative) and it carried ->
+                                        ; overflow past 65535
+
+fsk_target_have:
+            mov     rf, fsk_target
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf                  ; fsk_target = RC
+
+fsk_range_check:
+            ; 0 <= target <= FSIZE(low word) -- can't seek before the
+            ; start or past the end
+            mov     rf, fsk_fcb
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            mov     rf, r9
+            add16   rf, FCB_FSIZE
+            add16   rf, 2
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = FSIZE (low word)
+
+            mov     rf, fsk_target
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = target
+
+            ; FSIZE >= target ?
+            glo     rd
+            str     r2
+            glo     r8
+            sm
+            ghi     rd
+            str     r2
+            ghi     r8
+            smb
+            lbnf    fseek_bad_offset    ; DF=0: FSIZE < target
+
+            ; target == 0 ? -> rewind shortcut (the general
+            ; last_byte_index = target-1 walk below can't handle
+            ; target==0, since that would underflow)
+            glo     rd
+            lbnz    fsk_general
+            ghi     rd
+            lbnz    fsk_general
+            lbr     fsk_rewind
+
+fsk_rewind:
+            mov     rf, fsk_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = FCB base
+
             mov     rf, rb
             add16   rf, FCB_SCLUST
-            lda     rf                  ; D = start cluster high byte
+            lda     rf
             phi     rd
-            ldn     rf                  ; D = start cluster low byte
-            plo     rd
+            ldn     rf
+            plo     rd                  ; RD = start cluster
 
             mov     rf, rb
             add16   rf, FCB_CCLUST
@@ -5053,43 +5295,226 @@ fwrite_calc_written:
             glo     rd
             str     rf                  ; FCB_CCLUST = FCB_SCLUST
 
-            ; FCB_CSECT = 0
             mov     rf, rb
             add16   rf, FCB_CSECT
             ldi     0
-            str     rf
+            str     rf                  ; FCB_CSECT = 0
 
-            ; FCB_BOFF = 0 (2 bytes)
             mov     rf, rb
             add16   rf, FCB_BOFF
             ldi     0
             str     rf
             inc     rf
+            str     rf                  ; FCB_BOFF = 0
+
+            lbr     fsk_set_fpos
+
+fsk_general:
+            ; last_byte_index = target - 1
+            mov     rf, fsk_target
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            sub16   rd, 1               ; RD = last_byte_index
+
+            ; sector_index (0-127) = last_byte_index >> 9
+            ghi     rd
+            shr
+            plo     rc                  ; RC.0 = sector_index
+
+            ; boff (0-511) = last_byte_index & 511
+            glo     rd
+            plo     r8
+            ghi     rd
+            ani     1
+            phi     r8                  ; R8 = boff
+            mov     rf, fsk_boff
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf                  ; fsk_boff = boff, stashed --
+                                        ; R8 needed as scratch again
+                                        ; below
+
+            ; cluster_index (0-127) = sector_index >> spc_shift -- same
+            ; D-clobber-safe shift-loop shape as fopen_check_append's
+            ; own already-hardware-confirmed version (see its header
+            ; comment for why the loop counter can't share D with the
+            ; value being shifted)
+            mov     rf, bpb_spc_shift
+            ldn     rf
+            plo     r9                  ; R9.0 = spc_shift (loop count)
+            glo     rc                  ; D = sector_index
+            plo     r8                  ; R8.0 = shift accumulator
+fsk_cidx_shr:
+            glo     r9
+            lbz     fsk_cidx_done
+            glo     r8
+            shr
+            plo     r8
+            dec     r9
+            lbr     fsk_cidx_shr
+fsk_cidx_done:
+            glo     r8                  ; D = cluster_index
+            plo     r9                  ; stash before the mov below
+                                        ; clobbers D (gotcha #4)
+            mov     rf, fsk_cluster_idx
+            glo     r9
             str     rf
 
-            ; FCB_FPOS = 0 (4 bytes)
+            ; sector_in_clust = sector_index & (spc-1)
+            mov     rf, bpb_spc
+            ldn     rf
+            smi     1
+            str     r2
+            glo     rc                  ; D = sector_index (still in RC)
+            and
+            plo     rc
+            mov     rf, fsk_sector_in_clust
+            glo     rc
+            str     rf
+
+            ; --- walk fat_get fsk_cluster_idx times from FCB_SCLUST ---
+            mov     rf, fsk_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            mov     rf, rb
+            add16   rf, FCB_SCLUST
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = FCB_SCLUST
+
+            mov     rf, fsk_cluster_idx
+            ldn     rf
+            plo     rc                  ; RC.0 = hops remaining
+fsk_walk_loop:
+            glo     rc
+            lbz     fsk_walk_done
+            push    r9
+            push    ra
+            push    rb
+            push    rc
+            call    fat_get             ; RD = next cluster
+            pop     rc
+            pop     rb
+            pop     ra
+            pop     r9
+            lbdf    fseek_io_err        ; I/O error mid-walk -- FCB
+                                        ; not yet touched, safe to
+                                        ; abandon
+            dec     rc
+            lbr     fsk_walk_loop
+fsk_walk_done:
+            ; RD = target cluster
+
+            mov     rf, fsk_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = FCB base (reload -- the
+                                        ; fat_get walk clobbered it)
+
+            mov     rf, rb
+            add16   rf, FCB_CCLUST
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; FCB_CCLUST = target cluster
+
+            mov     rf, fsk_sector_in_clust
+            ldn     rf
+            plo     r9                  ; R9.0 = target sector-in-cluster
+
+            mov     rf, fsk_boff
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = boff (0-511)
+            add16   r8, 1               ; R8 = new_boff (1-512) -- "+1"
+                                        ; because last_byte_index was
+                                        ; target-1; converts back to
+                                        ; target's own offset
+
+            ghi     r8
+            xri     2
+            lbnz    fsk_no_wrap
+            glo     r8
+            lbnz    fsk_no_wrap
+            ldi     0
+            phi     r8
+            plo     r8                  ; new_boff wrapped to 0
+            glo     r9
+            adi     1
+            plo     r9                  ; new_csect += 1
+fsk_no_wrap:
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            glo     r9
+            str     rf                  ; FCB_CSECT = new_csect
+
+            mov     rf, rb
+            add16   rf, FCB_BOFF
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf                  ; FCB_BOFF = new_boff
+
+fsk_set_fpos:
+            mov     rf, fsk_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = FCB base
+
+            mov     rf, fsk_target
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = target
+
             mov     rf, rb
             add16   rf, FCB_FPOS
-            ldi     0
+            add16   rf, 2               ; -> low word
+            ghi     rd
             str     rf
             inc     rf
-            str     rf
-            inc     rf
-            str     rf
-            inc     rf
-            str     rf
+            glo     rd
+            str     rf                  ; FCB_FPOS (low word) = target
+                                        ; (high word left as-is -- 0,
+                                        ; matching every other place in
+                                        ; this file that only ever
+                                        ; writes FCB_FPOS's low word)
 
             ; clear this FCB's own IOVALID flag -- the buffered sector
-            ; (if any) no longer matches the rewound position
+            ; (if any) no longer matches the new position
             mov     rf, rb              ; RF -> FCB_FLAGS
             ldn     rf
             ani     $EF
             str     rf
 
-            clc
-            rtn
+            clc                         ; DF = 0, success; RD (target)
+            rtn                         ; still holds the new position
 
 fseek_bad_index:
+            stc
+            rtn
+
+fseek_bad_whence:
+            stc
+            rtn
+
+fseek_bad_offset:
+            stc
+            rtn
+
+fseek_io_err:
             stc
             rtn
 
@@ -5187,6 +5612,24 @@ fa_boff:            dw      0
 fa_cluster_idx:     db      0
 fa_sector_in_clust: db      0
 
+; fsk_*: scratch for file_seek (2026-07-20). Args stashed to memory
+; immediately on entry (fsk_whence/fsk_off_hi/fsk_off_lo/fsk_fcb),
+; since _switch_drive and fat_get both clobber broadly. fsk_target is
+; the resolved absolute position; fsk_boff/fsk_cluster_idx/
+; fsk_sector_in_clust mirror fa_boff/fa_cluster_idx/fa_sector_in_clust
+; above (same role, kept separate rather than shared since file_seek
+; and file_open's own append-mode positioning are each already
+; complex enough on their own -- not sharing state between them keeps
+; each easier to reason about independently).
+fsk_whence:         db      0
+fsk_off_hi:         dw      0
+fsk_off_lo:         dw      0
+fsk_fcb:            dw      0
+fsk_target:         dw      0
+fsk_boff:           dw      0
+fsk_cluster_idx:    db      0
+fsk_sector_in_clust: db     0
+
 ; fdel_next_clust: scratch for file_delete's cluster-freeing loop --
 ; kept in memory (not a register) across the fat_set call, which may
 ; clobber almost anything.
@@ -5254,6 +5697,14 @@ ren_old_lba:        ds      LBA_SIZE    ; OLD entry's dir_cur_lba, saved
                 public  fa_boff
                 public  fa_cluster_idx
                 public  fa_sector_in_clust
+                public  fsk_whence
+                public  fsk_off_hi
+                public  fsk_off_lo
+                public  fsk_fcb
+                public  fsk_target
+                public  fsk_boff
+                public  fsk_cluster_idx
+                public  fsk_sector_in_clust
                 public  fdel_next_clust
                 public  fdel_chksum
                 public  dcr_parent

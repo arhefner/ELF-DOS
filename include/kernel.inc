@@ -8,8 +8,14 @@
 ; ----------------------------------------------------------------
 ; Memory layout
 ; ----------------------------------------------------------------
-; Moved $2000 -> $3000 -> $4000 -> $3E00 over time as the kernel has
-; grown (and, for this last move, shrunk). The first move (to $3000)
+; Moved $2000 -> $3000 -> $4000 -> $3E00 -> $4600 over time as the
+; kernel has grown (and, for one move, shrunk). The move to $4600
+; (2026-07-20) was forced by file_seek's real implementation (a
+; substantial new kernel routine, replacing the old rewind-only
+; placeholder) growing "Highest address" to $3f44 -- 324 bytes past
+; the old $3E00 boundary. Moved with real headroom (not just enough
+; to clear the overflow) per this project's own standing practice.
+; The first move (to $3000)
 ; was forced reactively: the kernel had already grown past $2000 (to
 ; $2073) and was silently corrupting its own tail on every prog_load --
 ; confirmed as the cause of "DIR"/etc. crashing partway through on a
@@ -41,7 +47,7 @@
 ; and boot/mbr.asm's/boot/krnboot.asm's copies of KERN_LOAD/KERN_ENTRY
 ; all in sync) well before it gets close. Note this trades directly
 ; against RAM available to programs (mem_base..mem_top).
-PROG_BASE:      equ     $3E00       ; user programs load here; == KERN_LOAD
+PROG_BASE:      equ     $4600       ; user programs load here; == KERN_LOAD
                                     ; (boot/mbr.asm) by design, see above
 
 ; $0080-$00FF: the ROM's small boot-time stack lives here (see

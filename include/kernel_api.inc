@@ -61,7 +61,7 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $3E00       ; user programs load here (see kernel.inc;
+PROG_BASE:      equ     $4600       ; user programs load here (see kernel.inc;
                                     ; == KERN_LOAD in boot/mbr.asm by design --
                                     ; krnboot's own sector is dead once boot
                                     ; completes, so program loads reuse it)
@@ -118,7 +118,24 @@ FCB_IOBUF_LEN:  equ     512
 ;               RA = pointer to caller's FCB_IOBUF_LEN-byte I/O buffer.
 ;               Returns: D = handle (small integer, same convention
 ;               as before), DF = 0/1.
-; K_FILE_CLOSE/K_FILE_SEEK: Args: D = handle. Returns: DF = 0/1.
+; K_FILE_CLOSE: Args: D = handle. Returns: DF = 0/1.
+; K_FILE_SEEK (2026-07-20): Args: D = handle, RC.0 = whence (0 =
+;               SEEK_SET, absolute from start; 1 = SEEK_CUR, relative
+;               to current position; 2 = SEEK_END, relative to end of
+;               file), RA:RD = 32-bit signed offset (RA = high word,
+;               RD = low word). Only offsets that are a valid
+;               sign-extension of a 16-bit value are supported (RA ==
+;               $0000 with RD's bit 15 clear, or RA == $FFFF with
+;               RD's bit 15 set) -- anything wider is an error, and
+;               file positions/sizes beyond 16 bits aren't yet
+;               supported either way. The 32-bit register ABI is
+;               reserved now so a future expansion to real 32-bit
+;               seeking needs no calling-convention change. Returns:
+;               DF = 0 on success (RD = the resulting absolute
+;               position, low word), DF = 1 on error (bad handle, bad
+;               whence, offset out of the supported range, or the
+;               resulting position would fall outside [0, filesize]);
+;               on any error the file position is left unchanged.
 ; K_FILE_READ/K_FILE_WRITE: Args: D = handle, RF = data buffer,
 ;               RC = byte count. Returns: RC = bytes actually
 ;               transferred (read only), DF = 0/1.

@@ -165,7 +165,7 @@ $(KERNEL_BIN): $(KOBJ)
 # Concatenate bootstrap + kernel proper into final install image.
 #
 # Layout of kernel-full.bin:
-#   Bytes     0-1535:  krnboot.bin  (loads to $3E00, entry at $3E06;
+#   Bytes     0-1535:  krnboot.bin  (loads to $4600, entry at $4606;
 #                       3 sectors = KRNBOOT_SECTORS as of the
 #                       multi-sector krnboot expansion, up from 1)
 #   Bytes 1536+:       kernel.bin   (loads to $0100, entry at $0106)

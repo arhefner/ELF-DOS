@@ -485,9 +485,22 @@ sys_extra_no_borrow:
             lbnz    sys_cancelled_err
 
             ; rewind before the write pass -- the magic-check read
-            ; above already consumed the first 512 bytes
-            mov     rd, sys_handle
-            ldn     rd
+            ; above already consumed the first 512 bytes. New
+            ; K_FILE_SEEK ABI (2026-07-20): D=handle, RC.0=whence,
+            ; RA:RD=32-bit signed offset -- SEEK_SET with offset 0 is
+            ; the equivalent "rewind to start" this call always
+            ; wanted. RF (not RD) is used to fetch the handle byte,
+            ; since RD itself now carries the offset's low word.
+            ldi     0
+            phi     ra
+            plo     ra                  ; RA = 0 (offset high word)
+            ldi     0
+            phi     rd
+            plo     rd                  ; RD = 0 (offset low word)
+            ldi     0
+            plo     rc                  ; RC.0 = 0 (SEEK_SET)
+            mov     rf, sys_handle
+            ldn     rf                  ; D = handle
             call    K_FILE_SEEK
             lbdf    sys_seek_err
 
