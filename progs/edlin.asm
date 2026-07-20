@@ -70,6 +70,12 @@
 #include    include/kernel_api.inc
 
 ED_MAX_LINES:   equ     512         ; line-offset table capacity
+ED_RDBUF_LEN:   equ     512         ; ed_getbyte's own read-ahead
+                                    ; buffer, one K_FILE_READ call's
+                                    ; worth -- matches FCB_IOBUF_LEN
+                                    ; (one sector), the same size
+                                    ; COPY_CHUNK_LEN settled on for the
+                                    ; identical per-call-overhead reason
 
             org     PROG_BASE
 
@@ -207,9 +213,10 @@ usage:
 
 ;------------------------------------------------------------------
 ; ed_load_file: read the open file (handle in ed_handle) into
-; ed_buf/ed_lines, one byte at a time via K_FILE_READ, silently
-; skipping CR and splitting on LF (same shape as kernel/batch.asm's
-; own batch_readline this project already built and hardware-tested).
+; ed_buf/ed_lines via ed_getbyte (buffered -- see its own header),
+; silently skipping CR and splitting on LF (same shape as
+; kernel/batch.asm's own batch_readline this project already built
+; and hardware-tested).
 ; Args:    none
 ; Returns: DF = 0 on success, DF = 1 on a real I/O error
 ;------------------------------------------------------------------
@@ -218,31 +225,27 @@ ed_load_file:
             lbdf    el_toolong
 
 el_byte_loop:
-            mov     rf, ed_scratch
-            ldi     0
-            phi     rc
-            ldi     1
-            plo     rc
-            mov     ra, ed_handle
-            ldn     ra
-            call    K_FILE_READ
-            lbdf    el_err
+            call    ed_getbyte
+            lbdf    el_eof              ; DF=1: no more bytes -- could
+                                        ; be true EOF or a real
+                                        ; K_FILE_READ error, checked
+                                        ; below
 
-            glo     rc
-            lbz     el_eof              ; 0 bytes: end of file
+            plo     r7                  ; stash the byte -- xri below
+                                        ; clobbers D, and re-reading it
+                                        ; is now just a register move
+                                        ; instead of a memory round
+                                        ; trip through ed_scratch
 
-            mov     rf, ed_scratch
-            ldn     rf
+            glo     r7
             xri     13                  ; CR?
             lbz     el_byte_loop        ; skip silently
 
-            mov     rf, ed_scratch
-            ldn     rf                  ; reload -- xri above destroyed D
+            glo     r7
             xri     10                  ; LF?
             lbz     el_line_done
 
-            mov     rf, ed_scratch
-            ldn     rf                  ; D = the real byte
+            glo     r7                  ; D = the real byte
             call    ed_append_byte
             lbdf    el_toolong
             lbr     el_byte_loop
@@ -257,6 +260,11 @@ el_line_done:
             lbr     el_byte_loop
 
 el_eof:
+            mov     rf, ed_getbyte_ioerr
+            ldn     rf
+            lbnz    el_err              ; a real I/O error, not true
+                                        ; end-of-file
+
             ; a final line with no trailing newline still needs to be
             ; finished off (with its own separator) if it has any
             ; content at all
@@ -279,6 +287,115 @@ el_toolong:
 el_err:
             stc
             rtn
+
+;------------------------------------------------------------------
+; ed_getbyte: return the next byte from the open file, refilling
+; ed_rdbuf via one ED_RDBUF_LEN-sized K_FILE_READ call whenever it
+; runs out, instead of a separate K_FILE_READ call per byte (the
+; original design here -- roughly 7000 calls for a 7K file, each
+; paying real per-call overhead, made loading noticeably slow on
+; hardware; same root cause and fix shape as COPY_CHUNK_LEN's own
+; 64->512 bump, see CLAUDE.md's performance-follow-up writeup).
+; Args:    none
+; Returns: D = byte, DF = 0 on success; DF = 1 when there's nothing
+;          left -- either true EOF (ed_getbyte_ioerr left 0) or a
+;          real K_FILE_READ error (ed_getbyte_ioerr set nonzero); the
+;          caller distinguishes the two via that flag
+; Modifies: RF, RA, RC, RD, R7 (and D, DF)
+;------------------------------------------------------------------
+ed_getbyte:
+            mov     rf, ed_rdbuf_pos
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = ed_rdbuf_pos
+            mov     rf, ed_rdbuf_len
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; RA = ed_rdbuf_len
+
+            glo     ra
+            str     r2
+            glo     rd
+            sm
+            ghi     ra
+            str     r2
+            ghi     rd
+            smb
+            lbdf    egb_refill          ; DF=1: pos >= len -- refill
+
+            mov     rf, ed_rdbuf
+            add16   rf, rd              ; RF = &ed_rdbuf[pos]
+            ldn     rf                  ; D = the byte
+            plo     r7                  ; stash it across the pos++
+                                        ; below (mov/str clobber D)
+
+            add16   rd, 1               ; RD = pos+1
+            mov     rf, ed_rdbuf_pos
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; ed_rdbuf_pos = pos+1
+
+            glo     r7                  ; D = the byte
+            clc
+            rtn
+
+egb_refill:
+            mov     rb, ed_getbyte_ioerr
+            ldi     0
+            str     rb                  ; assume no error until proven
+                                        ; otherwise below
+
+            mov     rf, ed_rdbuf
+            ldi     low ED_RDBUF_LEN
+            plo     rc
+            ldi     high ED_RDBUF_LEN
+            phi     rc                  ; RC = ED_RDBUF_LEN (512
+                                        ; doesn't fit an 8-bit ldi --
+                                        ; same low/high pattern
+                                        ; loader.asm already uses for
+                                        ; PROG_BASE)
+            mov     ra, ed_handle
+            ldn     ra
+            call    K_FILE_READ         ; RC = actual bytes read,
+                                        ; DF = 0/1 (real error)
+            lbnf    egb_check_count
+            mov     rb, ed_getbyte_ioerr
+            ldi     1
+            str     rb                  ; real I/O error, not EOF
+            stc
+            rtn
+
+egb_check_count:
+            glo     rc
+            lbnz    egb_have_data
+            ghi     rc
+            lbnz    egb_have_data
+            stc                         ; RC == 0: true end of file
+                                        ; (ed_getbyte_ioerr already 0)
+            rtn
+
+egb_have_data:
+            mov     rf, ed_rdbuf_len
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf                  ; ed_rdbuf_len = RC
+
+            mov     rf, ed_rdbuf_pos
+            ldi     0
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf                  ; ed_rdbuf_pos = 0
+
+            lbr     ed_getbyte          ; retry -- pos(0) < len(RC>0)
+                                        ; now, delivers the first byte
+                                        ; of the freshly-read chunk
 
 ;------------------------------------------------------------------
 ; ed_append_byte: append one byte to ed_buf at the current end
@@ -2759,15 +2876,28 @@ ed_s_scan_loop:
             plo     r8
 
             ; 1-based scan number > last ? -> done, not found
-            glo     r8
-            str     r2
+            ; BUG FIX (hardware-found, 2026-07-19): operands were loaded
+            ; in the wrong order for a STRICT ">" comparison -- the
+            ; original code computed "scan >= last" (branching to
+            ; ed_s_not_found one iteration too early, at scan==last),
+            ; which meant the LAST line of any search range was never
+            ; actually checked by ed_line_contains. For the default
+            ; whole-file range that's the file's last line; for a
+            ; single-line range (nS) it fires on the very first and
+            ; only iteration, making that form of the command always
+            ; report "Not found." regardless of content. Fixed by
+            ; computing "last - scan" instead (DF=1 iff last>=scan,
+            ; i.e. scan<=last) and branching away only when DF=0
+            ; (scan>last, a genuine strict inequality).
             glo     rd
-            sm
-            ghi     r8
             str     r2
+            glo     r8
+            sm
             ghi     rd
+            str     r2
+            ghi     r8
             smb
-            lbdf    ed_s_not_found
+            lbnf    ed_s_not_found
 
             mov     rf, ed_s_scan_i
             lda     rf
@@ -2931,6 +3061,29 @@ elc_inner_loop:
             lbdf    elc_match
 
             ; haystack[outer+inner] == needle[inner] ?
+            ;
+            ; ROOT CAUSE (found 2026-07-20 via several rounds of
+            ; targeted hardware diagnostics, after extensive static
+            ; review of this comparison's own logic repeatedly found
+            ; nothing wrong with it): ADD16/SUB16's register-register
+            ; form uses M(R2) as its own internal scratch space --
+            ; confirmed by decoding its real opcode expansion in
+            ; include/opcodes.def, where "STR R2" (byte 0x52) appears
+            ; twice. Every other comparison in this whole codebase
+            ; follows the same tight "str r2, then IMMEDIATELY
+            ; sm/smb/xor" idiom with nothing in between -- this was
+            ; the one place that broke it: the original code computed
+            ; the haystack address, staged its byte via "str r2", THEN
+            ; computed the needle address via a THIRD add16 -- silently
+            ; destroying the just-staged haystack byte before the
+            ; "xor" ever ran. The algorithm itself was always correct;
+            ; this was a previously-undiscovered toolchain-level side
+            ; effect of ADD16 (does NOT affect the immediate-constant
+            ; form, "add16 reg,CONSTANT", which uses ADI/ADCI instead
+            ; and never touches memory -- only the register-register
+            ; form is affected). Fixed by computing BOTH addresses
+            ; first, so no add16/sub16 ever runs between "str r2" and
+            ; the compare that depends on it.
             mov     rf, ed_li_ptr
             lda     rf
             phi     r8
@@ -2948,23 +3101,30 @@ elc_inner_loop:
             ldn     rf
             plo     r9
             add16   r8, r9              ; R8 = &haystack[outer+inner]
-            mov     rf, r8
-            ldn     rf
-            str     r2                  ; M(R2) = haystack byte
 
             mov     rf, ed_s_text_ptr
             lda     rf
-            phi     r8
+            phi     rb
             ldn     rf
-            plo     r8
+            plo     rb
             mov     rf, ed_lc_inner
             lda     rf
             phi     r9
             ldn     rf
             plo     r9
-            add16   r8, r9              ; R8 = &needle[inner]
+            add16   rb, r9              ; RB = &needle[inner] -- both
+                                        ; addresses fully computed now;
+                                        ; no more add16/sub16 calls
+                                        ; happen before the compare
+                                        ; below
+
             mov     rf, r8
+            ldn     rf
+            str     r2                  ; M(R2) = haystack byte
+
+            mov     rf, rb
             ldn     rf                  ; D = needle byte
+
             xor                         ; D = needle ^ haystack
             lbnz    elc_mismatch
 
@@ -3060,7 +3220,15 @@ ed_filename_ptr: dw     0
 ed_fcb:         ds      FCB_LEN
 ed_iobuf:       ds      FCB_IOBUF_LEN
 ed_handle:      db      0
-ed_scratch:     db      0
+
+; ed_getbyte's own buffered-read state (see its header comment)
+ed_rdbuf:       ds      ED_RDBUF_LEN
+ed_rdbuf_pos:   dw      0           ; next unread byte's offset
+ed_rdbuf_len:   dw      0           ; valid byte count currently in
+                                    ; ed_rdbuf (from the last refill)
+ed_getbyte_ioerr: db    0           ; set nonzero only when ed_getbyte's
+                                    ; DF=1 return was a real K_FILE_READ
+                                    ; error, not true end-of-file
 ed_input_buf:   ds      128
 ed_have_n1:     db      0
 ed_n1:          dw      0

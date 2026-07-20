@@ -123,11 +123,12 @@ bin/%: progs/%.prg | bin
 # header/entry point of their own. Assembled separately and linked
 # alongside whichever program wants them, same idea as the kernel's
 # own multi-module KOBJ link. progs/bumptest.asm and
-# progs/malloctest.asm are the first (and so far only) consumers --
-# see their own explicit link rules below, which override the generic
-# "bin/%: progs/%.prg" pattern rule above for just those two targets
-# (GNU Make always prefers an explicit target-specific rule over a
-# pattern rule that also matches).
+# progs/malloctest.asm were the first consumers; progs/ls.asm (switched
+# to heap_bump for its per-entry name storage, 2026-07-19) is the
+# first REAL (non-test) one. See their own explicit link rules below,
+# which override the generic "bin/%: progs/%.prg" pattern rule above
+# for just those targets (GNU Make always prefers an explicit
+# target-specific rule over a pattern rule that also matches).
 #------------------------------------------------------------------
 lib/heap_bump.prg: lib/heap_bump.asm include/opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) heap_bump.asm
@@ -142,6 +143,10 @@ bin/bumptest: progs/bumptest.prg lib/heap_bump.prg | bin
 bin/malloctest: progs/malloctest.prg lib/heap_malloc.prg | bin
 	$(LINK) $(LFLAGS) -o bin/malloctest progs/malloctest.prg lib/heap_malloc.prg
 	rm -f bin/malloctest.lkb
+
+bin/ls: progs/ls.prg lib/heap_bump.prg | bin
+	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg
+	rm -f bin/ls.lkb
 
 #------------------------------------------------------------------
 # Link rules

@@ -424,7 +424,9 @@ rs_in:
 rs_in_open:
             mov     rf, r9
             call    _is_nul_device
-            lbnf    rs_in_isnull
+            lbnf    rs_in_isnull        ; DF is consumed immediately,
+                                        ; not held across anything that
+                                        ; might clobber it
 
             ; R9 = target filename pointer. Decide which FCB/iobuf to
             ; use: prog_fcb/prog_iobuf if output isn't ALSO using a

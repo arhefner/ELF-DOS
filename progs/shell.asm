@@ -141,9 +141,15 @@ bad_drive:
 not_drive_cmd:
             ; RF = start of the trimmed line (program name onward).
             ; Tokenize the whole line in place inside LINE_BUF, quoting
-            ; ("...", spaces preserved) and backslash-escaping (\X ->
-            ; literal X, inside or outside quotes) aware, building the
-            ; argv table (RUN_ARGV_TABLE) and counting argc as it goes.
+            ; and backslash-escaping aware, building the argv table
+            ; (RUN_ARGV_TABLE) and counting argc as it goes. Two quote
+            ; styles, matching bash: "..." (spaces preserved, \X ->
+            ; literal X still works inside or outside) and '...'
+            ; (spaces preserved, 100% literal -- added 2026-07-19, not
+            ; even \X is special inside single quotes). Either can open
+            ; a quoted argument; neither is recognized while inside the
+            ; other (a '"' inside '...' or a "'" inside "..." is just
+            ; an ordinary character).
             ; No kernel/BIOS calls happen anywhere in this loop, so
             ; register state is safe to carry across iterations with no
             ; memory stashing needed (unlike most of the rest of this
@@ -362,14 +368,46 @@ tok_space_end:
             lbr     tok_end_token
 
 tok_special:
+            ; R8.0 holds the current quote state: 0 = not in any quote,
+            ; $FF = inside "..." (backslash-escaping active -- this
+            ; project's original double-quote convention, unchanged),
+            ; $01 = inside '...' (added 2026-07-19: true bash semantics
+            ; -- 100% literal, not even a backslash is special inside a
+            ; single-quoted string). Single-quote mode is checked first
+            ; and handled by its own much simpler path below, since
+            ; nothing except the matching close-quote can end it.
+            glo     r8
+            xri     $01
+            lbz     tok_in_squote
+
             ldn     rf
             xri     '"'
-            lbnz    tok_check_bs
+            lbnz    tok_check_sq_open
             glo     r8
             xri     $FF
-            plo     r8                  ; toggle in_quotes (0 <-> $FF)
+            plo     r8                  ; toggle double-quote mode
+                                        ; (0 <-> $FF -- r8 is guaranteed
+                                        ; to already be one of those two
+                                        ; here, single-quote mode having
+                                        ; been routed away above)
             inc     rf                  ; consume the quote char itself
                                         ; -- not copied to the output
+            lbr     tok_char
+
+tok_check_sq_open:
+            ; a "'" only OPENS single-quote mode when not already
+            ; inside "..." -- matching bash, where a single quote has
+            ; no special meaning inside a double-quoted string (falls
+            ; through to the ordinary backslash-escape/copy path below,
+            ; same as any other character would inside "...")
+            glo     r8
+            lbnz    tok_check_bs
+            ldn     rf
+            xri     '''
+            lbnz    tok_check_bs
+            ldi     $01
+            plo     r8                  ; enter single-quote mode
+            inc     rf                  ; consume the quote char itself
             lbr     tok_char
 
 tok_check_bs:
@@ -398,6 +436,19 @@ tok_bs_eol:
             str     rd
             inc     rd
             lbr     tok_end_token       ; RF is already at the NUL
+
+tok_in_squote:
+            ; true bash semantics: everything up to the matching close
+            ; quote is copied 100% literally -- no backslash-escaping,
+            ; no recognizing '"' either. Only the matching "'" is
+            ; special (closes the quote, itself not copied).
+            ldn     rf
+            xri     '''
+            lbnz    tok_ordinary
+            ldi     0
+            plo     r8                  ; close single-quote mode
+            inc     rf                  ; consume the quote char itself
+            lbr     tok_char
 
 tok_ordinary:
             ldn     rf
