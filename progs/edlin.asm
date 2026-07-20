@@ -924,6 +924,24 @@ ed_cmdloop:
             ldn     rf
             lbz     ed_bare_number      ; nothing after the number(s)
 
+            ; optional "?" confirm flag, between the range and the
+            ; command letter (matches FreeDOS edlin's own
+            ; "[#][,#][?]s$" syntax -- currently only S looks at this,
+            ; other commands simply ignore it)
+            mov     rb, ed_have_confirm
+            ldi     0
+            str     rb                  ; ed_have_confirm = 0 (reset
+                                        ; every pass)
+
+            ldn     rf
+            xri     '?'
+            lbnz    ed_after_confirm
+            inc     rf                  ; consume the '?'
+            mov     rb, ed_have_confirm
+            ldi     1
+            str     rb
+
+ed_after_confirm:
             ldn     rf
             ani     $DF
             xri     'L'
@@ -2712,14 +2730,21 @@ ed_save_open_err:
 ; S - search
 ;==================================================================
 
-; [range]S<text> -- case-sensitive literal substring search. Range
-; defaults to the whole file; a bare [n] searches from n to the end
-; (unlike D/the bare-number edit, where a lone number means "just that
-; one line" -- for a search, "start from here" is the more useful
-; reading). Stops at and displays the FIRST matching line, setting
-; cur_line to it; "Not found." if nothing matches. Only the first
-; occurrence in the whole range is reported -- there's no "search
-; again" state yet (re-running S re-scans from the range start).
+; [range][?]S<text> -- case-sensitive literal substring search,
+; matching FreeDOS edlin's own "[#][,#][?]s$" syntax (2026-07-20).
+; Range defaults to (cur_line+1, line_count) -- NOT the whole file --
+; so a plain "S" naturally continues forward from wherever the last
+; match (or edit) left cur_line; "Not found." if cur_line is already
+; the last line, rather than a range error. An explicit [n] still
+; searches from n to the end, same as before. Stops at and displays
+; the FIRST matching line in range, setting cur_line to it; "Not
+; found." if nothing matches. With the "?" flag, prompts "O.K.? "
+; after landing on a match -- answering Y stops there (same as the
+; no-"?" case); anything else resumes searching from the next line
+; through the end of the same range, so "1?sfoo" then repeated
+; "N" answers steps through every occurrence until "Not found." (no
+; need to remember/retype the search text, since a bare "S" always
+; means "search again from here" once cur_line has advanced).
 ed_cmd_s:
             inc     rf                  ; skip the 'S' letter itself
             call    f_ltrim             ; skip an optional space before
@@ -2772,11 +2797,45 @@ ed_s_first_ok:
             lbr     ed_s_first_done
 
 ed_s_first_default:
+            ; FreeDOS edlin compatibility (2026-07-20): default first =
+            ; cur_line + 1 (search starts on the line AFTER the
+            ; current one), not the whole file from line 1 -- this is
+            ; what lets a bare "S" naturally continue forward on a
+            ; second press after landing on a match, without needing
+            ; to remember the last search text.
+            mov     rf, ed_cur_line
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = cur_line
+            add16   rd, 1               ; RD = cur_line + 1
+
+            mov     rf, ed_line_count
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = line_count
+
+            ; cur_line+1 > line_count ? (already at/past the last line
+            ; -- nothing left to search from here). Report "Not
+            ; found." directly rather than falling into the range
+            ; validator below, which is reserved for a genuinely bad
+            ; EXPLICIT line number.
+            glo     rd
+            str     r2
+            glo     r8
+            sm
+            ghi     rd
+            str     r2
+            ghi     r8
+            smb
+            lbnf    ed_s_not_found      ; DF=0: line_count < cur_line+1
+
             mov     rf, ed_s_first
-            ldi     0
+            ghi     rd
             str     rf
             inc     rf
-            ldi     1
+            glo     rd
             str     rf
 
 ed_s_first_done:
@@ -2955,7 +3014,54 @@ ed_s_found:
             call    ed_print_line
             call    K_INMSG
             db      13,10,0
-            lbr     ed_cmdloop
+
+            mov     rf, ed_have_confirm
+            ldn     rf
+            lbz     ed_cmdloop          ; no "?": stop here, as before
+
+            ; "?" given: ask whether this is the one. Matches FreeDOS
+            ; edlin: answering Y stops here; anything else resumes the
+            ; search from the next line. Follows copy.asm's own
+            ; established Y/N-prompt pattern exactly (K_READ, stash to
+            ; MEMORY not a register since only R9 is confirmed to
+            ; survive K_TTY/K_INMSG -- gotcha #8 -- then K_TTY to echo,
+            ; then reload fresh for the check).
+            call    K_INMSG
+            db      "O.K.? ",0
+
+            call    K_READ              ; D = character read (blocking)
+            plo     rc                  ; short-lived stash, not across
+                                        ; a call -- just to survive the
+                                        ; "mov rf, ed_s_answer" D-clobber
+            mov     rf, ed_s_answer
+            glo     rc
+            str     rf                  ; ed_s_answer = character
+
+            call    K_TTY               ; echo it back to the console
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, ed_s_answer
+            ldn     rf                  ; D = the character read
+            ani     $DF                 ; fold lowercase to uppercase
+            xri     'Y'
+            lbz     ed_cmdloop          ; "yes": stop here, as before
+
+            ; anything else: keep searching from the line after this
+            ; match, through the end of the already-established range
+            mov     rf, ed_s_scan_i
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            add16   rd, 1
+            mov     rf, ed_s_scan_i
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     ed_s_scan_loop
 
 ed_s_not_found:
             call    K_INMSG
@@ -3234,6 +3340,12 @@ ed_have_n1:     db      0
 ed_n1:          dw      0
 ed_have_n2:     db      0
 ed_n2:          dw      0
+ed_have_confirm: db     0           ; "?" seen between the range and
+                                    ; the command letter -- currently
+                                    ; only S looks at this
+ed_s_answer:    db      0           ; S's own "O.K.?" Y/N answer,
+                                    ; stashed to memory (not a
+                                    ; register) across K_TTY/K_INMSG
 ed_list_i:      dw      0
 ed_list_last:   dw      0
 ed_num_buf:     ds      8
