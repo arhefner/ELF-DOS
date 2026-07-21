@@ -21,13 +21,21 @@
 #
 
 ASM         = asm02
-ASMFLAGS    = -L -C -I ..
+# -r (Asm/02, opt-in as of the 2026-07-21 toolchain update): long
+# branches emit relax-aware ('!'/'#') fixups instead of the old-style
+# ('?'/'+') ones that are now this assembler's own default without -r.
+# Required for Link/02's own -r (below) to find anything to shrink --
+# without this flag here, the kernel silently reverts to its
+# pre-relaxation size (confirmed: +322 bytes, one per branch no longer
+# eligible) even with LFLAGS' own -r still in effect, since link02 has
+# nothing marked '#' to work with.
+ASMFLAGS    = -L -C -I .. -r
 LINK        = link02
 # -r: short-branch relaxation (Link/02, opt-in). Only affects proc/endp
 # -wrapped code (that's the only case where a long-branch target isn't
 # already fully known at assemble time) -- kernel/*.asm uses proc/endp
 # throughout and benefits; progs/*.asm is flat and sees zero effect,
-# harmlessly.
+# harmlessly. Needs ASMFLAGS' own -r above to have anything to shrink.
 LFLAGS      = -b -be -r
 
 DEV         = /dev/mmcblk0
@@ -135,6 +143,13 @@ lib/heap_bump.prg: lib/heap_bump.asm include/opcodes.def
 
 lib/heap_malloc.prg: lib/heap_malloc.asm include/opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) heap_malloc.asm
+
+lib/env.prg: lib/env.asm include/opcodes.def include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) env.asm
+
+bin/envtest: progs/envtest.prg lib/env.prg | bin
+	$(LINK) $(LFLAGS) -o bin/envtest progs/envtest.prg lib/env.prg
+	rm -f bin/envtest.lkb
 
 bin/bumptest: progs/bumptest.prg lib/heap_bump.prg | bin
 	$(LINK) $(LFLAGS) -o bin/bumptest progs/bumptest.prg lib/heap_bump.prg
