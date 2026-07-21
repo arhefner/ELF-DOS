@@ -74,6 +74,7 @@ ENV_LINE_MAX:   equ     64          ; bounds NAME=VALUE\0, matching
             extrn   env_read_line
             extrn   _env_streq
             extrn   _env_write_line
+            extrn   env_next
 
 ; ----------------------------------------------------------------
 ; env_read_line: read one line (up to '\n' or EOF) from an open file
@@ -314,6 +315,52 @@ es_notequal:
             endp
 
 ; ----------------------------------------------------------------
+; env_parse_uint: parse a decimal string into an unsigned integer,
+; stopping at the first non-digit character. Moved here from
+; progs/date.asm's own hardware-confirmed parse_uint (2026-07-17,
+; including its own hard-won *2-not-*4 bugfix -- see that file's own
+; history for the full story) -- ROWS/COLUMNS parsing needs the
+; identical logic in multiple consuming programs (ls/more/edlin), and
+; this avoids tripling it; date.asm's own copy is untouched (it's a
+; single-file program with no lib/ dependency today, no reason to
+; change that).
+; Args:    RF = string pointer
+; Returns: RD = parsed value (0 if the string starts with a
+;          non-digit), RF = pointer to the first non-digit character
+;          (unchanged from the input if there were no digits at all)
+; Modifies: R8, R9, RD, RF (and D)
+; ----------------------------------------------------------------
+            proc    env_parse_uint
+
+            ldi     0
+            phi     rd
+            plo     rd                  ; RD = 0
+
+epu_loop:
+            ldn     rf
+            smi     '0'
+            lbnf    epu_done            ; *RF < '0': not a digit
+            plo     r9                  ; R9.0 = candidate digit value
+            smi     10                  ; D = candidate - 10, DF=1 if
+                                        ; candidate >= 10 (no borrow)
+            lbdf    epu_done            ; not a valid digit
+
+            mov     r8, rd
+            shl16   r8
+            shl16   r8
+            shl16   r8                  ; R8 = RD*8
+            shl16   rd                  ; RD = RD*2
+            add16   rd, r8              ; RD = RD*10
+            add16   rd, r9              ; RD += digit
+            inc     rf
+            lbr     epu_loop
+
+epu_done:
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; _env_write_line: write env_line_buf's current content (env_len
 ; bytes, as measured by the most recent env_read_line call) plus a
 ; trailing '\n' to env_out_handle. Shared by env_setenv and
@@ -342,6 +389,99 @@ es_notequal:
             mov     rb, env_out_handle
             ldn     rb                  ; D = handle
             call    K_FILE_WRITE
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; env_first/env_next: iterate over every "NAME=VALUE" line in the
+; on-disk store, in file order, for callers that need to list every
+; variable (printenv/export's own no-args case) rather than look up
+; one name. Deliberately does NOT split each line -- the raw
+; "NAME=VALUE" text (still null-terminated, '=' intact) is exactly
+; what a listing wants to print. Reuses this library's own internal
+; env_in_fcb/env_in_iobuf/env_in_handle/env_line_buf (the same fields
+; env_getenv/env_setenv/env_unsetenv already use for their own "read
+; the source file" step) -- safe under this file's own standing
+; single-threaded/non-reentrant assumption, as long as nothing calls
+; env_getenv/env_setenv/env_unsetenv while a first/next scan is mid-
+; flight (i.e. between env_first and the DF=1/RF=0 EOF return).
+;
+; env_first:
+; Args:    none
+; Returns: RF = pointer to the first line's raw content (env_line_buf,
+;          unsplit), or RF = 0 if the file doesn't exist or is empty
+;          (nothing to iterate).
+; Modifies: broad (opens the file, then behaves exactly like env_next
+;          below).
+; ----------------------------------------------------------------
+            proc    env_first
+
+            mov     rf, env_file_path
+            mov     rd, env_in_fcb
+            mov     ra, env_in_iobuf
+            ldi     0                   ; mode 0 = read -- set LAST,
+                                        ; mov clobbers D (gotcha #4)
+            call    K_FILE_OPEN
+            lbdf    ef_empty            ; can't open: nothing to
+                                        ; iterate
+
+            plo     r9                  ; stash handle (D)
+            mov     rb, env_in_handle
+            glo     r9
+            str     rb                  ; env_in_handle = handle
+
+            lbr     env_next            ; tail call -- env_next's own
+                                        ; "read one line, handle EOF"
+                                        ; logic is exactly what's
+                                        ; needed for the first line
+                                        ; too; env_next's own rtn
+                                        ; correctly returns to
+                                        ; whatever called env_first,
+                                        ; since this is a bare branch,
+                                        ; not a nested call
+
+ef_empty:
+            ldi     0
+            phi     rf
+            plo     rf
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; env_next: continue an iteration started by env_first (or a
+; previous successful env_next).
+; Args:    none
+; Returns: RF = pointer to the next line's raw content (env_line_buf,
+;          unsplit), or RF = 0 at EOF (the file is closed
+;          automatically in that case -- no separate "close" call is
+;          needed from the caller).
+; Modifies: R7, R8, R9, RB, RC, RF (and D), via env_read_line/
+;          K_FILE_CLOSE.
+; ----------------------------------------------------------------
+            proc    env_next
+
+            mov     rf, env_line_buf
+            ldi     high ENV_LINE_MAX
+            phi     rc
+            ldi     low ENV_LINE_MAX
+            plo     rc
+            mov     rb, env_in_handle
+            ldn     rb                  ; D = handle
+            call    env_read_line
+            lbdf    en_eof
+
+            mov     rf, env_line_buf
+            rtn
+
+en_eof:
+            mov     rb, env_in_handle
+            ldn     rb                  ; D = handle
+            call    K_FILE_CLOSE
+            ldi     0
+            phi     rf
+            plo     rf
             rtn
 
             endp

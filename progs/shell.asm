@@ -91,6 +91,48 @@ start_have_line:
             ldn     rf
             lbz     start
 
+            ; --- pipe check: does this line contain a top-level '|'?
+            ; A quote-aware scan (pipe_scan, in the new section below),
+            ; deliberately kept separate from the main argv/redirect
+            ; tokenizer (not_drive_cmd below) rather than folded into
+            ; it -- that tokenizer has already taken two hardware-found
+            ; bugs to get right (see tok_special's own comment), and
+            ; reusing it here would mean teaching it a third, unrelated
+            ; job. RF must reach pipe_scan as its own scan cursor, so
+            ; the true line start is stashed to memory first and
+            ; reloaded fresh afterward regardless of which way the scan
+            ; comes back -- DF from the call survives every instruction
+            ; between here and the lbnf below untouched (none of mov/
+            ; str/inc/glo/ghi/lda/ldn/phi/plo affect DF on the 1802).
+            mov     rb, pipe_line_start
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb
+
+            call    pipe_scan           ; DF=0/RF=pipe position, DF=1=
+                                        ; not found
+            mov     rb, pipe_pos
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; pipe_pos = RF (stashed
+                                        ; unconditionally, regardless of
+                                        ; DF, so handle_pipe can read it
+                                        ; fresh without trusting a
+                                        ; register)
+
+            mov     rf, pipe_line_start
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd              ; RF = trimmed line start again
+
+            lbnf    handle_pipe         ; DF=0: a top-level '|' was found
+
             ; bare drive-letter command ("C:"/"D:"/"E:"/"F:", case-
             ; insensitive, nothing else on the line) switches the
             ; active drive directly via K_SETDRIVE -- a narrow,
@@ -638,6 +680,340 @@ batch_nested:
             call    K_INMSG
             db      "Nested batch not supported.",13,10,0
             lbr     start
+
+;------------------------------------------------------------------
+; Pipes ("cmd1 | cmd2"): a top-level '|' (found by pipe_scan, called
+; from start_have_line above) means this line describes a pipe rather
+; than a single command. Handled entirely in userland, without any
+; kernel changes, by synthesizing a 3-line temp batch script:
+;   <cmd1 text> >/PIPETMP.DAT
+;   <cmd2 text> </PIPETMP.DAT
+;   DEL /PIPETMP.DAT
+; and routing it through the exact same K_BATCH_START path a real
+; ".bat" filename typed at the prompt already uses (is_batch: above) --
+; reusing that path also means a pipe used INSIDE an already-running
+; batch script correctly, automatically hits K_BATCH_START's own
+; nesting rejection ("Nested batch not supported.") rather than
+; needing a separate check here. Known, deliberate limitations for v1:
+; scoped to exactly one pipe (two commands) per line -- a second '|'
+; inside cmd2's own text is carried into the script's second line
+; verbatim, so a 3-stage pipe (a|b|c) fails cleanly via the same
+; nesting rejection on the NEXT pass, rather than silently doing
+; something unexpected; and if either command already has its own
+; explicit '>' or '<' redirect, this feature's own appended operator
+; simply comes after it in the token stream, so the LAST one on the
+; line silently wins -- left undefined/unhandled, an accepted edge
+; case rather than a new special case to design around.
+;------------------------------------------------------------------
+
+;------------------------------------------------------------------
+; pipe_scan: quote-aware scan for the first top-level '|' character.
+; Deliberately does none of the tokenizer's other jobs (no argv
+; building, no backslash-collapsing output, no redirect-operator
+; detection) -- it only needs to locate a byte position, not mutate
+; anything, so it's a much smaller, independently-checkable state
+; machine than not_drive_cmd's own tokenizer above.
+; Args:    RF = line to scan (the trimmed line's own start)
+; Returns: DF=0 with RF = pointer to the '|' character (found), or
+;          DF=1 (not found -- RF left at the line's own NUL terminator,
+;          not meaningful to the caller either way since handle_pipe
+;          and the fallthrough path both reload RF fresh from memory)
+; Modifies: RF, R8 (and D). Makes no calls.
+;------------------------------------------------------------------
+pipe_scan:
+            ldi     0
+            plo     r8                  ; quote state = 0 (none)
+
+ps_loop:
+            ldn     rf
+            lbz     ps_not_found
+
+            glo     r8
+            lbz     ps_unquoted
+            xri     $01
+            lbz     ps_in_squote
+
+            ; in double-quote mode: only '"' (close) or '\' (escape --
+            ; matching the main tokenizer's own "\X inside or outside
+            ; double quotes" rule) are special
+            ldn     rf
+            xri     '"'
+            lbz     ps_close_dq
+            ldn     rf
+            xri     '\'
+            lbz     ps_bs
+            inc     rf
+            lbr     ps_loop
+
+ps_close_dq:
+            ldi     0
+            plo     r8
+            inc     rf
+            lbr     ps_loop
+
+ps_in_squote:
+            ; true bash semantics (matching tok_in_squote above): 100%
+            ; literal until the matching close quote, no backslash-
+            ; escaping recognized inside
+            ldn     rf
+            xri     '''
+            lbnz    ps_sq_next
+            ldi     0
+            plo     r8
+ps_sq_next:
+            inc     rf
+            lbr     ps_loop
+
+ps_unquoted:
+            ldn     rf
+            xri     '|'
+            lbz     ps_found
+            ldn     rf
+            xri     '"'
+            lbz     ps_open_dq
+            ldn     rf
+            xri     '''
+            lbz     ps_open_sq
+            ldn     rf
+            xri     '\'
+            lbz     ps_bs
+            inc     rf
+            lbr     ps_loop
+
+ps_open_dq:
+            ldi     $FF
+            plo     r8
+            inc     rf
+            lbr     ps_loop
+
+ps_open_sq:
+            ldi     $01
+            plo     r8
+            inc     rf
+            lbr     ps_loop
+
+ps_bs:
+            ; skip the next character too, whatever it is (matches the
+            ; main tokenizer's tok_check_bs: "\X" is always a literal
+            ; X, so it can never itself be the pipe separator) -- a
+            ; trailing lone backslash at end of line safely ends the
+            ; scan rather than reading past the NUL
+            inc     rf
+            ldn     rf
+            lbz     ps_not_found
+            inc     rf
+            lbr     ps_loop
+
+ps_found:
+            clc
+            rtn
+
+ps_not_found:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; handle_pipe: reached from start_have_line above with RF = the
+; trimmed line's own start and pipe_pos (memory) = the '|' character's
+; position within it. Computes the LHS run [line start, pipe_pos) and
+; RHS run [pipe_pos+1, end of line), writes the synthesized script
+; (see the section header above), and threads into is_batch to invoke
+; it exactly as if the user had typed its filename directly.
+;------------------------------------------------------------------
+handle_pipe:
+            mov     rb, pipe_lhs_start
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; pipe_lhs_start = RF (line
+                                        ; start)
+
+            mov     r8, rf              ; R8 = line start -- survives
+                                        ; the loads below, nothing else
+                                        ; in this block touches R8
+
+            mov     rf, pipe_pos
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = pipe_pos (the '|' itself)
+
+            mov     r7, rd              ; R7 = pipe_pos, kept for the
+                                        ; RHS-start calc below since the
+                                        ; sub16 that follows is about to
+                                        ; consume RD
+            sub16   rd, r8              ; RD = pipe_pos - line_start =
+                                        ; LHS length (register-register
+                                        ; sub16 -- safe here, nothing
+                                        ; nearby stages a comparison via
+                                        ; str r2 for it to clobber, see
+                                        ; gotcha #18)
+            mov     rb, pipe_lhs_len
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+
+            mov     rd, r7
+            inc     rd                  ; RD = pipe_pos + 1 (RHS start,
+                                        ; skipping the '|' itself)
+            mov     rb, pipe_rhs_start
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+
+            mov     rf, rd              ; RF = pipe_rhs_start
+            call    shell_strlen        ; RC = length, RF unchanged
+            mov     rb, pipe_rhs_len
+            ghi     rc
+            str     rb
+            inc     rb
+            glo     rc
+            str     rb
+
+            ; --- write the synthesized script ---
+            mov     rd, pipe_fcb
+            mov     ra, pipe_iobuf
+            mov     rf, pipe_script_path
+            ldi     1                   ; mode 1: create/overwrite
+            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            lbdf    pipe_open_err
+
+            plo     r9                  ; stash handle in R9.0 -- safe
+                                        ; only across the immediately-
+                                        ; following mov+str, NOT across
+                                        ; any K_FILE_* call (same gotcha
+                                        ; #4 pattern seektest.asm hit
+                                        ; and fixed this same session)
+            mov     rb, pipe_handle
+            glo     r9
+            str     rb                  ; pipe_handle = handle
+
+            mov     rb, pipe_lhs_start
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = pipe_lhs_start
+            mov     rb, pipe_lhs_len
+            lda     rb
+            phi     rc
+            ldn     rb
+            plo     rc                  ; RC = pipe_lhs_len
+            mov     rb, pipe_handle
+            ldn     rb                  ; D = handle
+            call    K_FILE_WRITE        ; write cmd1's raw text
+
+            mov     rf, pipe_out_line
+            call    pipe_write_str      ; write " >/PIPETMP.DAT\n"
+
+            mov     rb, pipe_rhs_start
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf
+            mov     rb, pipe_rhs_len
+            lda     rb
+            phi     rc
+            ldn     rb
+            plo     rc
+            mov     rb, pipe_handle
+            ldn     rb
+            call    K_FILE_WRITE        ; write cmd2's raw text
+
+            mov     rf, pipe_in_line
+            call    pipe_write_str      ; write " </PIPETMP.DAT\n"
+
+            mov     rf, pipe_del_line
+            call    pipe_write_str      ; write "DEL /PIPETMP.DAT\n"
+
+            mov     rf, pipe_handle
+            ldn     rf
+            call    K_FILE_CLOSE
+
+            ; RUN_PATH = "/PIPETMP.BAT" -- reuse the existing batch-
+            ; invocation path exactly as if the user had typed this
+            ; filename directly (see the section header above for why
+            ; this also gets the nested-batch rejection for free)
+            mov     rf, RUN_PATH
+            mov     rd, pipe_script_path
+pipe_copy_path:
+            lda     rd
+            str     rf
+            lbz     pipe_path_done
+            inc     rf
+            lbr     pipe_copy_path
+pipe_path_done:
+            lbr     is_batch
+
+pipe_open_err:
+            call    K_INMSG
+            db      "Cannot create pipe script.",13,10,0
+            lbr     start
+
+;------------------------------------------------------------------
+; pipe_write_str: writes the NUL-terminated string at RF to
+; pipe_handle (a fixed field, not an argument -- every call site above
+; already has the same handle open).
+; Args:    RF = string
+; Returns: nothing checked -- best-effort, matching this file's own
+;          existing write_bin_name, which has no failure path either
+; Modifies: RF, RC, R9, RB (and D)
+;------------------------------------------------------------------
+pipe_write_str:
+            call    shell_strlen        ; RC = length, RF unchanged
+            mov     rb, pipe_handle
+            ldn     rb                  ; D = handle
+            call    K_FILE_WRITE
+            rtn
+
+;------------------------------------------------------------------
+; shell_strlen: Args RF = string (left unchanged). Returns RC = length.
+; Makes no calls -- provably safe by direct inspection, matching this
+; project's own preference for a tiny hand-rolled helper over trusting
+; an unaudited BIOS routine's contract (gotcha #8).
+; Modifies: R8, RC (and D)
+;------------------------------------------------------------------
+shell_strlen:
+            mov     r8, rf
+            ldi     0
+            phi     rc
+            plo     rc
+ssl_loop:
+            ldn     r8
+            lbz     ssl_done
+            inc     r8
+            inc     rc
+            lbr     ssl_loop
+ssl_done:
+            rtn
+
+pipe_line_start: dw 0
+pipe_pos:       dw      0
+pipe_lhs_start: dw      0
+pipe_lhs_len:   dw      0
+pipe_rhs_start: dw      0
+pipe_rhs_len:   dw      0
+pipe_fcb:       ds      FCB_LEN
+pipe_iobuf:     ds      FCB_IOBUF_LEN
+pipe_handle:    db      0
+pipe_script_path: db    "/PIPETMP.BAT",0
+pipe_out_line:  db      " >/PIPETMP.DAT",10,0
+pipe_in_line:   db      " </PIPETMP.DAT",10,0
+pipe_del_line:  db      "del /PIPETMP.DAT",10,0    ; lowercase -- filename
+                                        ; lookups are case-sensitive
+                                        ; (f_strcmp does no folding),
+                                        ; and executables live on disk
+                                        ; lowercase (bin/del, from the
+                                        ; Makefile's own progs/%.asm ->
+                                        ; bin/% pattern) -- "DEL" here
+                                        ; resolved to a nonexistent
+                                        ; "/bin/DEL" and silently left
+                                        ; PIPETMP.DAT behind uncleaned
+                                        ; (hardware-found 2026-07-21)
 
 ;------------------------------------------------------------------
 ; write_bin_name: append "/bin/" + the command name (sh_name) at RF,

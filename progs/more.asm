@@ -10,10 +10,15 @@
 ; bare-LF and CRLF-terminated files page correctly (a lone CR is never
 ; counted, and is printed like any other byte via K_TYPE).
 ;
-; There's no way to query the console's actual terminal height on this
-; hardware/BIOS, so MORE_PAGE_LINES is a fixed, conservative guess (23
-; lines, leaving room for the prompt itself on a common 24-line
-; terminal) -- adjust below if your terminal is a different size.
+; There's no way to query the console's actual terminal height directly
+; on this hardware/BIOS, so the page size defaults to a fixed,
+; conservative guess (MORE_PAGE_LINES=23, leaving room for the prompt
+; itself on a common 24-line terminal) -- but if the ROWS environment
+; variable is set to a valid number, more_page_lines is computed as
+; ROWS-1 instead (same "-1 for the prompt" reasoning as the default),
+; read once at startup. ROWS unset, non-numeric, or too small (<2, so
+; there's no room left after subtracting 1) all keep the compile-time
+; default untouched.
 ;
 ; The line counter and the mid-chunk RF/RC save are all kept in memory
 ; rather than registers across K_TYPE/K_READ/K_TTY/K_INMSG -- this
@@ -28,6 +33,9 @@
 
 #include    include/opcodes.def
 #include    include/kernel_api.inc
+
+            extrn   env_getenv
+            extrn   env_parse_uint
 
 MORE_CHUNK_LEN:  equ    64
 MORE_PAGE_LINES: equ    23
@@ -73,6 +81,38 @@ start:
             ldi     0
             str     rf                  ; more_lines = 0
 
+            ; --- read ROWS from the environment; if valid, override
+            ; more_page_lines (default MORE_PAGE_LINES) with ROWS-1.
+            ; RA/RC (entry argv/argc) are no longer needed past this
+            ; point, safe for env_getenv/env_parse_uint's own broad
+            ; clobber footprint. ---
+            mov     rf, more_rows_name
+            call    env_getenv          ; RF = value or 0
+            ghi     rf
+            lbnz    more_have_rows
+            glo     rf
+            lbz     read_loop           ; not set: keep the default
+
+more_have_rows:
+            call    env_parse_uint      ; RD = parsed value
+            ghi     rd
+            lbnz    more_rows_ok        ; high byte nonzero: >= 256,
+                                        ; certainly >= 2
+            ldi     2
+            str     r2
+            glo     rd
+            sm                          ; D = RD.lo - 2, DF=1 iff
+                                        ; RD.lo >= 2
+            lbnf    read_loop           ; RD < 2: keep the default
+
+more_rows_ok:
+            sub16   rd, 1               ; RD = ROWS - 1
+            mov     rb, more_page_lines
+            glo     rd
+            str     rb                  ; more_page_lines = RD.lo
+                                        ; (a realistic terminal height
+                                        ; fits one byte easily)
+
 read_loop:
             mov     rf, more_buf
             ldi     MORE_CHUNK_LEN
@@ -113,9 +153,21 @@ pl_print:
             call    K_TYPE
             dec     rc
 
+            ; deliberately RB, not RF, for both loads below -- RF
+            ; still holds the live "current position in more_buf"
+            ; pointer print_loop's own body depends on if we loop
+            ; back there in a moment (caught during the manual
+            ; register-liveness trace: an earlier draft used RF here
+            ; and silently destroyed that pointer)
+            mov     rb, more_page_lines
+            ldn     rb                  ; D = more_page_lines (the
+                                        ; runtime threshold)
+            str     r2
             mov     rb, more_lines
-            ldn     rb
-            smi     MORE_PAGE_LINES
+            ldn     rb                  ; D = more_lines
+            sm                          ; D = more_lines -
+                                        ; more_page_lines, DF=1 iff
+                                        ; more_lines >= more_page_lines
             lbnf    print_loop          ; not yet a full page
 
             ; a full page has been printed -- save the mid-chunk
@@ -216,6 +268,8 @@ more_iobuf:     ds      FCB_IOBUF_LEN
 more_handle:    db      0
 more_buf:       ds      MORE_CHUNK_LEN
 more_lines:     db      0
+more_page_lines: db     MORE_PAGE_LINES  ; overridden if ROWS is set
+more_rows_name:  db     "ROWS",0
 more_key:       db      0
 more_save_rf:   dw      0
 more_save_rc:   dw      0

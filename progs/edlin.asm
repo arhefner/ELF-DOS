@@ -69,6 +69,9 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
+            extrn   env_getenv
+            extrn   env_parse_uint
+
 ED_MAX_LINES:   equ     512         ; line-offset table capacity
 ED_RDBUF_LEN:   equ     512         ; ed_getbyte's own read-ahead
                                     ; buffer, one K_FILE_READ call's
@@ -76,6 +79,12 @@ ED_RDBUF_LEN:   equ     512         ; ed_getbyte's own read-ahead
                                     ; (one sector), the same size
                                     ; COPY_CHUNK_LEN settled on for the
                                     ; identical per-call-overhead reason
+ED_PAGE_LINES:  equ     23          ; L command's own page size
+                                    ; default (same "-1 for the
+                                    ; prompt" reasoning as more.asm's
+                                    ; own MORE_PAGE_LINES); overridden
+                                    ; by ROWS-1 if ROWS is set, see
+                                    ; start's own env-reading block
 
             org     PROG_BASE
 
@@ -162,6 +171,40 @@ start:
             ldi     1
             str     rf
 
+            ; --- read ROWS from the environment for the L command's
+            ; own paging (see ed_cmd_l/ed_list_loop below); falls back
+            ; to ED_PAGE_LINES if ROWS is unset, non-numeric, or too
+            ; small (<2, leaving no room after subtracting 1 for the
+            ; "-- More --" prompt). Read once, here -- RA/RC (entry
+            ; argv/argc) are already fully consumed by this point, and
+            ; nothing below needs anything env_getenv/env_parse_uint
+            ; might clobber. ---
+            mov     rf, ed_rows_name
+            call    env_getenv          ; RF = value or 0
+            ghi     rf
+            lbnz    ed_have_rows
+            glo     rf
+            lbz     ed_open_file        ; not set: keep the default
+
+ed_have_rows:
+            call    env_parse_uint      ; RD = parsed value
+            ghi     rd
+            lbnz    ed_rows_ok          ; high byte nonzero: >= 256,
+                                        ; certainly >= 2
+            ldi     2
+            str     r2
+            glo     rd
+            sm                          ; D = RD.lo - 2, DF=1 iff
+                                        ; RD.lo >= 2
+            lbnf    ed_open_file        ; RD < 2: keep the default
+
+ed_rows_ok:
+            sub16   rd, 1               ; RD = ROWS - 1
+            mov     rb, ed_page_lines
+            glo     rd
+            str     rb                  ; ed_page_lines = RD.lo
+
+ed_open_file:
             ; --- open and load the file, if it exists ---
             mov     rf, ed_filename_ptr
             lda     rf
@@ -1246,9 +1289,10 @@ ed_cmd_l:
             mov     rf, ed_have_n1
             ldn     rf
             lbz     ed_l_full           ; no range: list every line
-                                        ; (this hardware has no paging
-                                        ; UI yet, so "all lines" is more
-                                        ; useful here than DOS's classic
+                                        ; (now paged every ed_page_lines
+                                        ; lines -- see ed_list_loop's
+                                        ; own pause-prompt logic below --
+                                        ; rather than DOS's classic
                                         ; 23-line default window)
 
             mov     rf, ed_n1
@@ -1319,7 +1363,7 @@ ed_l_n2_ok:
             inc     rf
             glo     rd
             str     rf
-            lbr     ed_list_loop
+            lbr     ed_list_start
 
 ed_l_single:
             mov     rf, ed_n1
@@ -1333,7 +1377,7 @@ ed_l_single:
             inc     rf
             glo     rd
             str     rf
-            lbr     ed_list_loop
+            lbr     ed_list_start
 
 ed_l_full:
             mov     rf, ed_list_i
@@ -1348,12 +1392,22 @@ ed_l_full:
             inc     rf
             ldn     rd
             str     rf
-            lbr     ed_list_loop
+            lbr     ed_list_start
 
 ed_l_err:
             call    K_INMSG
             db      "Line number out of range.",13,10,0
             lbr     ed_cmdloop
+
+ed_list_start:
+            mov     rf, ed_list_page_count
+            ldi     0
+            str     rf                  ; reset the page counter --
+                                        ; once, here, before the loop
+                                        ; begins (NOT inside the loop
+                                        ; itself, which also reaches
+                                        ; ed_list_loop directly via its
+                                        ; own back-edge below)
 
 ed_list_loop:
             mov     rf, ed_list_i
@@ -1414,6 +1468,51 @@ ed_list_loop:
             inc     rf
             glo     rd
             str     rf
+
+            ; --- pause every ed_page_lines lines. Reuses the exact
+            ; K_READ/K_TTY prompt idiom the S command's own O.K.?
+            ; prompt already established above (memory, not a
+            ; register, across K_TTY/K_INMSG -- only R9 is confirmed
+            ; to survive those, gotcha #8). ---
+            mov     rf, ed_list_page_count
+            ldn     rf
+            adi     1
+            str     rf                  ; ed_list_page_count++
+
+            mov     rf, ed_page_lines
+            ldn     rf                  ; D = threshold
+            str     r2
+            mov     rf, ed_list_page_count
+            ldn     rf                  ; D = current count
+            sm                          ; D = count - threshold, DF=1
+                                        ; iff count >= threshold
+            lbnf    ed_list_loop        ; not yet a full page
+
+            call    K_INMSG
+            db      "-- More --",0
+
+            call    K_READ              ; D = character read (blocking)
+            plo     rc                  ; short-lived stash, not
+                                        ; across a call -- just to
+                                        ; survive the "mov rf,
+                                        ; ed_list_answer" D-clobber
+            mov     rf, ed_list_answer
+            glo     rc
+            str     rf                  ; ed_list_answer = character
+
+            call    K_TTY               ; echo it back to the console
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, ed_list_page_count
+            ldi     0
+            str     rf                  ; reset the page counter
+
+            mov     rf, ed_list_answer
+            ldn     rf
+            ani     $DF                 ; uppercase-fold
+            xri     'Q'
+            lbz     ed_cmdloop          ; quit the listing early
 
             lbr     ed_list_loop
 
@@ -3348,6 +3447,10 @@ ed_s_answer:    db      0           ; S's own "O.K.?" Y/N answer,
                                     ; register) across K_TTY/K_INMSG
 ed_list_i:      dw      0
 ed_list_last:   dw      0
+ed_page_lines:  db      ED_PAGE_LINES   ; overridden if ROWS is set
+ed_list_page_count: db  0
+ed_list_answer: db      0
+ed_rows_name:   db      "ROWS",0
 ed_num_buf:     ds      8
 ed_key:         db      0
 ed_crlf:        db      13,10

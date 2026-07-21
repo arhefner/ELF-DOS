@@ -151,6 +151,18 @@ bin/envtest: progs/envtest.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/envtest progs/envtest.prg lib/env.prg
 	rm -f bin/envtest.lkb
 
+bin/printenv: progs/printenv.prg lib/env.prg | bin
+	$(LINK) $(LFLAGS) -o bin/printenv progs/printenv.prg lib/env.prg
+	rm -f bin/printenv.lkb
+
+bin/export: progs/export.prg lib/env.prg | bin
+	$(LINK) $(LFLAGS) -o bin/export progs/export.prg lib/env.prg
+	rm -f bin/export.lkb
+
+bin/unset: progs/unset.prg lib/env.prg | bin
+	$(LINK) $(LFLAGS) -o bin/unset progs/unset.prg lib/env.prg
+	rm -f bin/unset.lkb
+
 bin/bumptest: progs/bumptest.prg lib/heap_bump.prg | bin
 	$(LINK) $(LFLAGS) -o bin/bumptest progs/bumptest.prg lib/heap_bump.prg
 	rm -f bin/bumptest.lkb
@@ -159,9 +171,17 @@ bin/malloctest: progs/malloctest.prg lib/heap_malloc.prg | bin
 	$(LINK) $(LFLAGS) -o bin/malloctest progs/malloctest.prg lib/heap_malloc.prg
 	rm -f bin/malloctest.lkb
 
-bin/ls: progs/ls.prg lib/heap_bump.prg | bin
-	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg
+bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg | bin
+	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg
 	rm -f bin/ls.lkb
+
+bin/more: progs/more.prg lib/env.prg | bin
+	$(LINK) $(LFLAGS) -o bin/more progs/more.prg lib/env.prg
+	rm -f bin/more.lkb
+
+bin/edlin: progs/edlin.prg lib/env.prg | bin
+	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg
+	rm -f bin/edlin.lkb
 
 #------------------------------------------------------------------
 # Link rules

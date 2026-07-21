@@ -5,10 +5,13 @@
 ;
 ; Default output: sorted file/directory names only, printed in
 ; columns (column-major fill order, matching real Unix ls -- entries
-; fill down each column before moving to the next), assuming an
-; 80-column screen (LS_SCREEN_COLS below -- a constant for now; a
-; future version could read ROWS/COLUMNS environment variables or
-; query an ANSI terminal once this project gets that far).
+; fill down each column before moving to the next). Column width uses
+; the COLUMNS environment variable if set to a valid nonzero number
+; (read once, in ls_resolve below, since that's the point every
+; parse-argv code path already converges through); LS_SCREEN_COLS
+; (80) is both the compile-time fallback and ls_screen_cols' own
+; initial value, so an unset/malformed/zero COLUMNS behaves exactly
+; like before this was added.
 ;
 ; -l: one entry per line, "d"/"-" type indicator, size, last-write
 ; date/time (same MM/DD/YYYY HH:MM format DIR already uses, and the
@@ -56,6 +59,8 @@
 
             extrn   bump_init
             extrn   bump_alloc
+            extrn   env_getenv
+            extrn   env_parse_uint
 
 ; ---- per-entry storage struct (fixed size, LSENT_LEN bytes) ----
 LSENT_ATTR:     equ     0           ; 1 byte, FAT attribute byte
@@ -203,6 +208,38 @@ ls_save_patharg:
             str     rb
 
 ls_resolve:
+            ; --- read COLUMNS from the environment, once, here -- the
+            ; one point every argv-parsing path above converges
+            ; through (both the "lbnf ls_resolve" early-outs and the
+            ; ls_save_patharg fallthrough), and safely past every use
+            ; of the entry RA/RC this program still needs (env_getenv/
+            ; env_parse_uint's own broad clobber footprint includes
+            ; both). Falls back to LS_SCREEN_COLS (ls_screen_cols'
+            ; own compile-time initial value) if COLUMNS is unset,
+            ; non-numeric, or parses to 0.
+            mov     rf, ls_columns_name
+            call    env_getenv          ; RF = value or 0
+            ghi     rf
+            lbnz    ls_have_columns
+            glo     rf
+            lbz     ls_resolve_body     ; not set: keep the default
+
+ls_have_columns:
+            call    env_parse_uint      ; RD = parsed value
+            ghi     rd
+            lbnz    ls_columns_set
+            glo     rd
+            lbz     ls_resolve_body     ; parsed to 0: keep the default
+
+ls_columns_set:
+            mov     rb, ls_screen_cols
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+
+ls_resolve_body:
             mov     rf, ls_patharg
             lda     rf
             phi     rd
@@ -1038,13 +1075,20 @@ ls_trycols_done:
             plo     rd                  ; RD = totalwidth
             glo     rd
             str     r2
-            ldi     low LS_SCREEN_COLS
+            mov     rf, ls_screen_cols
+            inc     rf
+            ldn     rf                  ; D = ls_screen_cols' low byte
+                                        ; (big-endian storage: high
+                                        ; byte at the base address,
+                                        ; low byte at +1)
             sm
             ghi     rd
             str     r2
-            ldi     high LS_SCREEN_COLS
+            mov     rf, ls_screen_cols
+            ldn     rf                  ; D = ls_screen_cols' high byte
             smb
-            lbdf    ls_trycols_success  ; DF=1: 80 >= totalwidth, fits
+            lbdf    ls_trycols_success  ; DF=1: ls_screen_cols >=
+                                        ; totalwidth, fits
 
             ; doesn't fit -- try one fewer column
             mov     rf, ls_trycols
@@ -1753,5 +1797,10 @@ ls_colwidths:   ds      LS_MAX_COLS ; 1 byte/column (max width 129 --
                                     ; LS_NAME_CAP+2 -- fits easily)
 ls_ptrs:        ds      2*LS_MAX_ENTRIES
 ls_entries:     ds      LSENT_LEN*LS_MAX_ENTRIES
+
+ls_columns_name: db     "COLUMNS",0
+ls_screen_cols:  dw     LS_SCREEN_COLS  ; overridden by ls_resolve if
+                                        ; COLUMNS is set to a valid
+                                        ; nonzero number
 
             end     start
