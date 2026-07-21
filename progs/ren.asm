@@ -55,9 +55,10 @@ start:
             call    K_FILE_RENAME       ; DF = 0/1
             lbdf    ren_error
 
-            call    K_INMSG
-            db      "Renamed.",13,10,0
-            ldi     0                   ; exit code 0 = success
+            ldi     0                   ; exit code 0 = success --
+                                        ; silent, per this project's
+                                        ; "no news is good news"
+                                        ; convention (2026-07-21)
             rtn
 
 ren_error:

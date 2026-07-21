@@ -147,6 +147,21 @@ RUN_REDIR_OUT_APPEND: equ   PROG_BASE-106   ; byte: 0 = truncate (`>`),
 RUN_REDIR_IN:       equ     PROG_BASE-108   ; word: 0 = no input
                                             ; redirect, else -> filename
 
+; RUN_BATCH_ECHO_OFF: persistent "suppress batch line echo" mode, same
+; fixed-address/kernel-and-shell-and-program-shared convention as the
+; fields above -- but unlike them, NOT reset every command cycle. It's
+; meant to persist across many lines of the SAME batch run (real
+; MS-DOS's "ECHO OFF" affects every subsequent line until "ECHO ON" or
+; the script ends), so it's only reset when a NEW batch starts
+; (batch_start, kernel/batch.asm) -- never by progs/shell.asm's own
+; tokenizer, unlike RUN_REDIR_OUT/RUN_REDIR_IN. progs/echo.asm writes
+; it directly (ECHO ON/OFF); progs/shell.asm's start: reads it directly
+; right before echoing a batch line. See progs/shell.asm's own '@'-
+; prefix handling for the OTHER half of MS-DOS's echo-control idiom
+; (per-line, not persistent).
+RUN_BATCH_ECHO_OFF: equ     PROG_BASE-109   ; byte: 0 = echo batch lines
+                                            ; normally, nonzero = suppress
+
 ; ----------------------------------------------------------------
 ; Disk geometry
 ; ----------------------------------------------------------------

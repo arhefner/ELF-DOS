@@ -61,6 +61,47 @@ start:
             lbdf    start_interactive   ; no batch active: read the
                                         ; console as normal
 
+            ; --- '@' prefix: suppresses the echo of just this ONE
+            ; line, matching real MS-DOS ("@command" works on any
+            ; batch line, not just "echo off" -- RUN_BATCH_ECHO_OFF,
+            ; checked just below, is the OTHER, persistent half of
+            ; this same idiom: "@echo off" is just "@" applied to a
+            ; real "echo off" invocation, which itself sets that flag
+            ; for every SUBSEQUENT line). Must be stripped from
+            ; LINE_BUF regardless of the echo decision, since every
+            ; later stage (the pipe scanner, the tokenizer, command
+            ; resolution) needs to see the line exactly as if '@' had
+            ; never been there.
+            mov     rf, LINE_BUF
+            ldn     rf
+            xri     '@'
+            lbnz    start_check_echo_off
+
+            ; shift the rest of the line left by one byte, including
+            ; its own NUL terminator, overwriting the '@' -- standard
+            ; in-place left-shift, same convention as not_drive_cmd's
+            ; own tokenizer already uses for its in-place mutation
+            mov     rd, rf              ; RD = write cursor (the '@'
+                                        ; position, about to be
+                                        ; overwritten)
+            inc     rf                  ; RF = read cursor (the byte
+                                        ; right after '@')
+start_strip_at:
+            lda     rf
+            str     rd
+            inc     rd
+            lbnz    start_strip_at      ; loop until the NUL itself was
+                                        ; copied (completing the shift)
+
+            lbr     start_have_line     ; skip the echo entirely for
+                                        ; this one line
+
+start_check_echo_off:
+            mov     rf, RUN_BATCH_ECHO_OFF
+            ldn     rf
+            lbnz    start_have_line     ; persistent echo-off mode:
+                                        ; skip the echo
+
             call    print_prompt
 
             mov     rf, LINE_BUF
@@ -91,6 +132,43 @@ start_have_line:
             ldn     rf
             lbz     start
 
+            ; --- REM: a line comment, matching real DOS's REM. Checked
+            ; before the pipe scanner/tokenizer so "REM foo | bar" is
+            ; correctly treated as pure comment text, not a pipe. Skips
+            ; the whole line entirely -- no argv resolution attempted,
+            ; no "File not found." risk from a nonexistent "REM"
+            ; program. Works for both batch and interactive lines,
+            ; matching real DOS where a bare typed "REM ..." is also a
+            ; legal no-op, not an error. Case-insensitive, and must be
+            ; a whole word ("REM" followed by a space or end-of-line,
+            ; not a prefix of some other word like "REMOVE"). RF stays
+            ; at the trimmed line start throughout -- RB is used as the
+            ; scan cursor so the pipe-scanner/tokenizer below still see
+            ; RF untouched on the "not REM" path.
+            ldn     rf
+            ani     $DF
+            xri     'R'
+            lbnz    start_not_rem
+            mov     rb, rf
+            inc     rb
+            ldn     rb
+            ani     $DF
+            xri     'E'
+            lbnz    start_not_rem
+            inc     rb
+            ldn     rb
+            ani     $DF
+            xri     'M'
+            lbnz    start_not_rem
+            inc     rb
+            ldn     rb                  ; 4th char: must be space or
+                                        ; NUL for "REM" to be a whole
+                                        ; word
+            lbz     start               ; NUL: bare "REM" -- skip line
+            xri     ' '
+            lbz     start               ; space: "REM ..." -- skip line
+
+start_not_rem:
             ; --- pipe check: does this line contain a top-level '|'?
             ; A quote-aware scan (pipe_scan, in the new section below),
             ; deliberately kept separate from the main argv/redirect
@@ -893,6 +971,16 @@ handle_pipe:
             glo     r9
             str     rb                  ; pipe_handle = handle
 
+            mov     rf, pipe_echooff_line
+            call    pipe_write_str      ; write "@echo off\n" -- the
+                                        ; '@' suppresses this line's own
+                                        ; echo, and "echo off" itself
+                                        ; suppresses every line after it
+                                        ; for the rest of this script
+                                        ; (see RUN_BATCH_ECHO_OFF), so
+                                        ; none of the 3 real lines below
+                                        ; clutter the console
+
             mov     rb, pipe_lhs_start
             lda     rb
             phi     rf
@@ -928,7 +1016,7 @@ handle_pipe:
             call    pipe_write_str      ; write " </PIPETMP.DAT\n"
 
             mov     rf, pipe_del_line
-            call    pipe_write_str      ; write "DEL /PIPETMP.DAT\n"
+            call    pipe_write_str      ; write "del /PIPETMP.DAT\n"
 
             mov     rf, pipe_handle
             ldn     rf
@@ -1000,6 +1088,7 @@ pipe_rhs_len:   dw      0
 pipe_fcb:       ds      FCB_LEN
 pipe_iobuf:     ds      FCB_IOBUF_LEN
 pipe_handle:    db      0
+pipe_echooff_line: db   "@echo off",10,0
 pipe_script_path: db    "/PIPETMP.BAT",0
 pipe_out_line:  db      " >/PIPETMP.DAT",10,0
 pipe_in_line:   db      " </PIPETMP.DAT",10,0

@@ -80,6 +80,14 @@
             glo     r9
             str     rf                  ; batch_handle = handle
 
+            ; a NEW batch never inherits a PREVIOUS batch's echo-off
+            ; mode -- RUN_BATCH_ECHO_OFF is deliberately NOT reset per
+            ; command cycle (see kernel.inc's own comment), so this is
+            ; the one place it needs a fresh reset
+            mov     rf, RUN_BATCH_ECHO_OFF
+            ldi     0
+            str     rf
+
             clc                         ; DF = 0, success
             rtn
 

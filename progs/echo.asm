@@ -1,16 +1,30 @@
 ;
-; echo.asm - print arguments, space-separated
+; echo.asm - print arguments, space-separated; also controls batch
+; script echo mode (ECHO ON/OFF), matching real MS-DOS
 ;
 ; Usage: ECHO [-n] [args...]
+;        ECHO ON | ECHO OFF
+;        ECHO
 ;
 ; Prints argv[1..argc-1] (skipping argv[0], this program's own
 ; invocation name), separated by single spaces, followed by a
 ; trailing newline. If argv[1] is exactly "-n" (case-sensitive, no
 ; other characters), it's consumed and NOT printed, printing starts
 ; at argv[2] instead, and the trailing newline is suppressed --
-; matching the common shell "-n" convention. With no arguments at all
-; (bare "ECHO"), prints just a blank line (a trailing newline with
-; nothing before it).
+; matching the common shell "-n" convention.
+;
+; If argv[1] is exactly "ON" or "OFF" (case-insensitive, checked as a
+; flag regardless of anything after it -- same convention "-n" above
+; already uses), sets RUN_BATCH_ECHO_OFF (kernel.inc) instead of
+; printing anything: this is the persistent half of MS-DOS's echo-
+; control idiom, checked by progs/shell.asm before echoing each batch
+; line. The other half, a per-line '@' prefix, is handled entirely in
+; shell.asm and never reaches this program.
+;
+; With no arguments at all (bare "ECHO"), reports the current mode
+; ("ECHO is on."/"ECHO is off.") instead of printing a blank line --
+; matches real DOS; a deliberate behavior change from this program's
+; original bare-ECHO-prints-a-blank-line design.
 ;
 
 #include    include/opcodes.def
@@ -57,10 +71,98 @@ start:
             ldi     1
             str     rf                  ; echo_newline = 1 (true)
 
-            ; check argc >= 2 and argv[1] is EXACTLY "-n"
+            ; --- ECHO ON / ECHO OFF / bare ECHO (report state) ---
+            glo     rc
+            smi     2
+            lbnf    echo_bare           ; argc < 2 (always exactly 1,
+                                        ; argv[0] always exists): report
+
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[1] pointer
+
+            mov     rf, rd
+            ldn     rf
+            ani     $DF                 ; uppercase-fold: safe here --
+                                        ; only 'O'/'o' clear to 0x4F
+                                        ; under this mask, same
+                                        ; reasoning as check_batch_ext's
+                                        ; own established use
+            xri     'O'
+            lbnz    echo_check_dashn    ; first char isn't O: neither
+                                        ; ON nor OFF
+            inc     rf                  ; RF = &argv[1][1]
+            ldn     rf
+            ani     $DF
+            xri     'N'
+            lbnz    echo_maybe_off      ; RF stays at &argv[1][1] --
+                                        ; reused directly below, OFF's
+                                        ; own second character
+            inc     rf
+            ldn     rf                  ; third char must be NUL for
+                                        ; "on" to be the whole token
+            lbnz    echo_check_dashn
+            lbr     echo_set_on
+
+echo_maybe_off:
+            ldn     rf                  ; RF already = &argv[1][1]
+            ani     $DF
+            xri     'F'
+            lbnz    echo_check_dashn
+            inc     rf                  ; RF = &argv[1][2]
+            ldn     rf
+            ani     $DF
+            xri     'F'
+            lbnz    echo_check_dashn
+            inc     rf                  ; RF = &argv[1][3], must be NUL
+            ldn     rf
+            lbnz    echo_check_dashn
+            lbr     echo_set_off
+
+echo_set_on:
+            mov     rf, RUN_BATCH_ECHO_OFF
+            ldi     0
+            str     rf
+            ldi     0                   ; exit code 0 = success
+            rtn
+
+echo_set_off:
+            mov     rf, RUN_BATCH_ECHO_OFF
+            ldi     1
+            str     rf
+            ldi     0
+            rtn
+
+echo_bare:
+            mov     rf, RUN_BATCH_ECHO_OFF
+            ldn     rf
+            lbnz    echo_bare_off
+            call    K_INMSG
+            db      "ECHO is on.",13,10,0
+            ldi     0
+            rtn
+echo_bare_off:
+            call    K_INMSG
+            db      "ECHO is off.",13,10,0
+            ldi     0
+            rtn
+
+echo_check_dashn:
+            ; check argc >= 2 and argv[1] is EXACTLY "-n" (unchanged
+            ; from this program's original design -- reached here,
+            ; instead of falling through from the top, now that ON/OFF
+            ; are checked first; re-fetches argv[1] fresh rather than
+            ; risk touching this already-proven block)
             glo     rc
             smi     2
             lbnf    echo_loop_init      ; argc < 2: nothing to check
+                                        ; (dead in practice -- argc < 2
+                                        ; is already routed to
+                                        ; echo_bare above -- kept as a
+                                        ; harmless safety net)
 
             mov     rb, ra
             add16   rb, 2               ; RB = &argv[1]

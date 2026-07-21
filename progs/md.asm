@@ -38,9 +38,10 @@ start:
             call    K_DIR_CREATE        ; DF = 0/1
             lbdf    md_error
 
-            call    K_INMSG
-            db      "Directory created.",13,10,0
-            ldi     0                   ; exit code 0 = success
+            ldi     0                   ; exit code 0 = success --
+                                        ; silent, per this project's
+                                        ; "no news is good news"
+                                        ; convention (2026-07-21)
             rtn
 
 usage:

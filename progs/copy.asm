@@ -420,9 +420,10 @@ copy_done:
             mov     rd, dst_handle
             ldn     rd
             call    K_FILE_CLOSE
-            call    K_INMSG
-            db      "File copied.",13,10,0
-            ldi     0                   ; exit code 0 = success
+            ldi     0                   ; exit code 0 = success --
+                                        ; silent, per this project's
+                                        ; "no news is good news"
+                                        ; convention (2026-07-21)
             rtn
 
 read_error:
@@ -465,10 +466,11 @@ src_not_found:
             rtn
 
 copy_cancelled:
-            call    K_INMSG
-            db      "Copy cancelled.",13,10,0
-            ldi     0                   ; exit code 0 -- user's own choice,
-                                        ; not an error
+            ldi     0                   ; exit code 0 -- user's own
+                                        ; choice, not an error; silent,
+                                        ; per this project's "no news
+                                        ; is good news" convention
+                                        ; (2026-07-21)
             rtn
 
 usage_error:

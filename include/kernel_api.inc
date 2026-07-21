@@ -94,6 +94,15 @@ RUN_REDIR_OUT:      equ     PROG_BASE-105
 RUN_REDIR_OUT_APPEND: equ   PROG_BASE-106
 RUN_REDIR_IN:       equ     PROG_BASE-108
 
+; RUN_BATCH_ECHO_OFF: persistent "suppress batch line echo" mode (real
+; MS-DOS "ECHO OFF" semantics) -- unlike RUN_REDIR_OUT/IN above, NOT
+; reset every command cycle, only when a new batch starts (see
+; kernel.inc's own copy of this comment for the full reasoning).
+; progs/echo.asm writes it directly for ECHO ON/OFF; a bare ECHO reads
+; it to report the current state.
+RUN_BATCH_ECHO_OFF: equ     PROG_BASE-109   ; byte: 0 = echo batch lines
+                                            ; normally, nonzero = suppress
+
 K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
 
 ; FCB_LEN/FCB_IOBUF_LEN: sizes only, not the field layout (which stays
