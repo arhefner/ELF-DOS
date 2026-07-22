@@ -68,14 +68,10 @@ start:
                                         ; before the mode load below,
                                         ; since mov clobbers D)
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; more_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    not_found
-
-            plo     rd                  ; stash handle (mov below
-                                        ; clobbers D)
-            mov     rf, more_handle
-            glo     rd
-            str     rf                  ; more_handle = handle
 
             mov     rf, more_lines
             ldi     0
@@ -119,8 +115,8 @@ read_loop:
             plo     rc
             ldi     0
             phi     rc                  ; RC = chunk size requested
-            mov     rd, more_handle
-            ldn     rd                  ; D = handle, RF untouched
+            mov     rd, more_fcb        ; RD = FCB pointer (fixed --
+                                        ; RF stays pointed at more_buf)
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    io_error
 
@@ -228,23 +224,20 @@ pl_print:
             lbr     print_loop
 
 done:
-            mov     rf, more_handle
-            ldn     rf
+            mov     rd, more_fcb
             call    K_FILE_CLOSE
             ldi     0                   ; exit code 0 = success
             rtn
 
 quit:
-            mov     rf, more_handle
-            ldn     rf
+            mov     rd, more_fcb
             call    K_FILE_CLOSE
             ldi     0                   ; exit code 0 -- quitting early
                                         ; isn't an error
             rtn
 
 io_error:
-            mov     rf, more_handle
-            ldn     rf
+            mov     rd, more_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Read error.",13,10,0
@@ -265,7 +258,6 @@ usage:
 
 more_fcb:       ds      FCB_LEN
 more_iobuf:     ds      FCB_IOBUF_LEN
-more_handle:    db      0
 more_buf:       ds      MORE_CHUNK_LEN
 more_lines:     db      0
 more_page_lines: db     MORE_PAGE_LINES  ; overridden if ROWS is set

@@ -197,27 +197,25 @@ have_name_ptr:
                                         ; before the mode load below,
                                         ; since mov clobbers D)
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; ms_fcb_struct is a fixed
+                                        ; address, nothing to capture)
             lbdf    open_error
 
-            ; BUG-CLASS GUARD: stash the handle before "mov rf, ..."
-            ; clobbers D -- saved_handle is what K_FILE_CLOSE uses below,
-            ; after ms_send (a leaf worker that clobbers everything)
-            ; has long since destroyed D's original value.
-            plo     r8                  ; R8.0 = handle (temp)
-            mov     rf, saved_handle
-            glo     r8
-            str     rf                  ; saved_handle = handle
-
-            glo     r8                  ; D = handle again, for ms_send
+            mov     rd, ms_fcb_struct   ; RD = FCB pointer, passed to
+                                        ; ms_send as its own argument --
+                                        ; see progs/mr.asm's identical
+                                        ; note on why this stays an
+                                        ; explicit argument rather than
+                                        ; ms_send referencing
+                                        ; ms_fcb_struct directly
             call    ms_send             ; D = result code (0 = success)
             ; BUG-CLASS GUARD (see progs/type.asm/wtest.asm): stash the
             ; result before "mov rf, ..." for K_FILE_CLOSE's own arg
             ; setup clobbers D.
             plo     r8                  ; R8.0 = ms_send's result
 
-            mov     rd, saved_handle
-            ldn     rd
+            mov     rd, ms_fcb_struct
             call    K_FILE_CLOSE        ; result/DF here intentionally
                                         ; ignored -- ms_send's own
                                         ; result is what we report
@@ -254,14 +252,13 @@ open_error:
 
 ms_fcb_struct:  ds      FCB_LEN
 ms_iobuf:       ds      FCB_IOBUF_LEN
-saved_handle:   db      0
 ms_io_mode:     db      0
 
 ;==================================================================
 ; ms_send: send an already-open file's contents over the console/
 ; serial port, using ELF-DOS's own MAX-derived transfer protocol.
 ;
-; Args:    D = handle of an already-open file (mode 0 -- read)
+; Args:    RD = FCB pointer of an already-open file (mode 0 -- read)
 ; Returns: D  = 0 on success, MSERR_* on failure (see equ's above)
 ;          DF = 0 on success, DF = 1 on failure (redundant with D,
 ;               kept for consistency with this project's other calls)
@@ -297,10 +294,14 @@ ms_io_mode:     db      0
 
             .link   .align  page
             proc    ms_send
-            plo     rc                  ; RC.0 = handle (temp)
             mov     rf, ms_handle
-            glo     rc
-            str     rf                  ; ms_handle = handle
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; ms_handle = RD (the FCB
+                                        ; pointer, received as this
+                                        ; proc's own argument)
 
             ; ms_addr (memory, not a register) tracks the running
             ; "address" header field (protocol fidelity only, unused
@@ -330,15 +331,21 @@ ms_shake:   ldi     $55
 ;------------------------------------------------------------------
 ; Per-block loop.
 ;
-; ms_handle (not a register) holds the handle across K_FILE_READ
-; calls: file_read uses R9 as its own internal scratch and leaves it
-; holding unrelated data on return (see progs/type.asm's own note), so
-; nothing kept in a register here would reliably survive the call.
+; ms_handle (not a register) holds the FCB pointer across K_FILE_READ
+; calls: file_read uses RB as its own internal scratch (see
+; progs/type.asm's own note), so nothing kept in a register here would
+; reliably survive the call.
 ;------------------------------------------------------------------
 ms_next:    mov     rf, ms_buf          ; RF = send buffer
             mov     rc, XFER_BUF_LEN
-            mov     rd, ms_handle
-            ldn     rd                  ; D = handle, RF/RC untouched
+            ; RD needs the FCB pointer, a 2-byte value stashed in
+            ; ms_handle -- RB is the scratch address register used to
+            ; fetch it, leaving RF/RC (buffer/count) untouched
+            mov     rb, ms_handle
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = the FCB pointer
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    ms_rderr
 
@@ -471,7 +478,8 @@ ms_exit:    ; D = result code (0 = success); set DF to match
 ms_ok:      clc
 ms_ret:     rtn
 
-ms_handle:      db      0
+ms_handle:      dw      0           ; the FCB pointer (2 bytes -- was a
+                                    ; 1-byte small-int handle)
 ms_addr_hi:     db      0
 ms_addr_lo:     db      0
 ms_buf:         ds      XFER_BUF_LEN

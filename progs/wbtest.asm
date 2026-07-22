@@ -56,14 +56,10 @@ start:
                                         ; before the mode load below,
                                         ; since mov clobbers D)
             ldi     1                   ; mode = write (create/truncate)
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; wbtest_fcb is a fixed
+                                        ; address, nothing to capture)
             lbdf    open_error
-
-            plo     r8                  ; R8.0 = handle (temp, mov
-                                        ; below clobbers D)
-            mov     rf, saved_handle
-            glo     r8
-            str     rf                  ; saved_handle = handle
 
             mov     rf, fill_byte
             ldi     0
@@ -111,8 +107,8 @@ wb_fill_loop:
             plo     rc
             ldi     0
             phi     rc                  ; RC = 64 (write count)
-            mov     rd, saved_handle
-            ldn     rd                  ; D = handle, RF/RC untouched
+            mov     rd, wbtest_fcb      ; RD = FCB pointer (fixed --
+                                        ; RF/RC untouched)
             call    K_FILE_WRITE        ; DF = 0/1
             lbdf    write_error
 
@@ -162,16 +158,14 @@ wb_last_fill_loop:
             plo     rc
             ldi     0
             phi     rc
-            mov     rd, saved_handle
-            ldn     rd
+            mov     rd, wbtest_fcb
             call    K_FILE_WRITE
             lbdf    write_error
 
 ;------------------------------------------------------------------
 ; Close and report.
 ;------------------------------------------------------------------
-            mov     rd, saved_handle
-            ldn     rd
+            mov     rd, wbtest_fcb
             call    K_FILE_CLOSE        ; result intentionally ignored
 
             call    K_INMSG
@@ -192,8 +186,7 @@ usage:
             rtn
 
 write_error:
-            mov     rd, saved_handle
-            ldn     rd
+            mov     rd, wbtest_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Write error.",13,10,0
@@ -202,7 +195,6 @@ write_error:
 
 wbtest_fcb:         ds      FCB_LEN
 wbtest_iobuf:       ds      FCB_IOBUF_LEN
-saved_handle:       db      0
 fill_byte:          db      0
 chunks_left_hi:     db      0
 chunks_left_lo:     db      0

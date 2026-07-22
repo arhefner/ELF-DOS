@@ -291,14 +291,12 @@ dst_not_dir:
                                         ; itself clobbers D, gotcha #4)
             mov     ra, dst_iobuf       ; RA = our dst_iobuf buffer
             ldi     0                   ; mode = read (existence check)
-            call    K_FILE_OPEN         ; D = handle, DF = 0/1
+            call    K_FILE_OPEN         ; DF = 0/1 (D unspecified)
             lbdf    dst_check_done      ; not found (or a directory):
                                         ; proceed directly, nothing to
                                         ; close
 
-            ; D still holds the handle K_FILE_OPEN just returned
-            ; (lbdf above doesn't touch D) -- file_close takes it
-            ; directly in D, not RF, so no stash/reload is even needed
+            mov     rd, dst_fcb
             call    K_FILE_CLOSE
 
             call    K_INMSG
@@ -349,14 +347,10 @@ dst_check_done:
             mov     rd, src_fcb         ; RD = our src_fcb struct
             mov     ra, src_iobuf       ; RA = our src_iobuf buffer
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; src_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    src_not_found
-
-            plo     rd                  ; stash handle (mov below
-                                        ; clobbers D)
-            mov     rf, src_handle
-            glo     rd
-            str     rf                  ; src_handle = handle
 
             ; --- open destination (mode 1, create-or-overwrite) ---
             mov     rf, real_dst
@@ -370,13 +364,10 @@ dst_check_done:
                                         ; above -- already closed there)
             mov     ra, dst_iobuf       ; RA = our dst_iobuf buffer
             ldi     1                   ; mode = write
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; dst_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    dst_open_error
-
-            plo     rd
-            mov     rf, dst_handle
-            glo     rd
-            str     rf                  ; dst_handle = handle
 
 ;------------------------------------------------------------------
 ; Copy loop: read a chunk from source, write the same chunk (exact
@@ -392,8 +383,8 @@ copy_loop:
                                         ; immediate directly -- low/high
                                         ; split, same pattern loader.asm
                                         ; already uses for PROG_BASE)
-            mov     rd, src_handle
-            ldn     rd                  ; D = handle, RF untouched
+            mov     rd, src_fcb         ; RD = FCB pointer (fixed --
+                                        ; RF stays pointed at copy_buf)
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    read_error
 
@@ -406,19 +397,16 @@ have_bytes:
                                         ; holds the byte count from
                                         ; K_FILE_READ -- mov only
                                         ; touches RF/D, not RC)
-            mov     rd, dst_handle
-            ldn     rd                  ; D = handle, RF untouched
+            mov     rd, dst_fcb         ; RD = FCB pointer (fixed)
             call    K_FILE_WRITE        ; DF=0/1
             lbdf    write_error
 
             lbr     copy_loop
 
 copy_done:
-            mov     rd, src_handle
-            ldn     rd
+            mov     rd, src_fcb
             call    K_FILE_CLOSE
-            mov     rd, dst_handle
-            ldn     rd
+            mov     rd, dst_fcb
             call    K_FILE_CLOSE
             ldi     0                   ; exit code 0 = success --
                                         ; silent, per this project's
@@ -427,11 +415,9 @@ copy_done:
             rtn
 
 read_error:
-            mov     rd, src_handle
-            ldn     rd
+            mov     rd, src_fcb
             call    K_FILE_CLOSE
-            mov     rd, dst_handle
-            ldn     rd
+            mov     rd, dst_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Read error.",13,10,0
@@ -439,11 +425,9 @@ read_error:
             rtn
 
 write_error:
-            mov     rd, src_handle
-            ldn     rd
+            mov     rd, src_fcb
             call    K_FILE_CLOSE
-            mov     rd, dst_handle
-            ldn     rd
+            mov     rd, dst_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Write error.",13,10,0
@@ -451,8 +435,7 @@ write_error:
             rtn
 
 dst_open_error:
-            mov     rd, src_handle
-            ldn     rd
+            mov     rd, src_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Cannot create destination.",13,10,0
@@ -483,21 +466,20 @@ src_ptr:    dw      0
 dst_ptr:    dw      0
 real_dst:   dw      0
 
-; CALLER-ALLOCATED FCBs (2026-07-15): src_fcb/dst_fcb are the real FCB
-; memory now (K_FILE_OPEN's RD arg), each with its own private
-; FCB_IOBUF_LEN I/O buffer (RA arg) -- this is the whole point for
-; COPY specifically, since src and dst no longer share and thrash a
-; single kernel-resident buffer. src_handle/dst_handle hold the small-
-; integer handles K_FILE_OPEN returns, passed to K_FILE_CLOSE/READ/
-; WRITE exactly as before. dst_fcb/dst_iobuf are reused for both the
+; CALLER-ALLOCATED FCBs (2026-07-15), FCB POINTER IS THE HANDLE
+; (2026-07-21): src_fcb/dst_fcb are the real FCB memory (K_FILE_OPEN's
+; RD arg), each with its own private FCB_IOBUF_LEN I/O buffer (RA arg)
+; -- this is the whole point for COPY specifically, since src and dst
+; no longer share and thrash a single kernel-resident buffer. Both are
+; fixed addresses, referenced directly (RD = src_fcb / dst_fcb) by
+; every K_FILE_READ/WRITE/CLOSE call site -- no separate handle
+; variable needed. dst_fcb/dst_iobuf are reused for both the
 ; destination-exists check and the real destination open -- the first
 ; is always closed before the second happens.
 src_fcb:    ds      FCB_LEN
 src_iobuf:  ds      FCB_IOBUF_LEN
-src_handle: db      0
 dst_fcb:    ds      FCB_LEN
 dst_iobuf:  ds      FCB_IOBUF_LEN
-dst_handle: db      0
 
 dstchk_arg: dw      0
 dstchk_result: ds   DIRENT_LEN

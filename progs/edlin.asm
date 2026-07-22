@@ -216,28 +216,22 @@ ed_open_file:
             mov     rd, ed_fcb
             mov     ra, ed_iobuf
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; ed_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    ed_cmdloop          ; not found: start empty (new
                                         ; file) -- matches edlin's own
                                         ; behavior
 
-            plo     rd                  ; stash handle (mov below
-                                        ; clobbers D)
-            mov     rf, ed_handle
-            glo     rd
-            str     rf
-
             call    ed_load_file
             lbdf    ed_load_err
 
-            mov     rf, ed_handle
-            ldn     rf
+            mov     rd, ed_fcb
             call    K_FILE_CLOSE
             lbr     ed_cmdloop
 
 ed_load_err:
-            mov     rf, ed_handle
-            ldn     rf
+            mov     rd, ed_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Read error.",13,10,0
@@ -255,7 +249,7 @@ usage:
 ;==================================================================
 
 ;------------------------------------------------------------------
-; ed_load_file: read the open file (handle in ed_handle) into
+; ed_load_file: read the open file (ed_fcb) into
 ; ed_buf/ed_lines via ed_getbyte (buffered -- see its own header),
 ; silently skipping CR and splitting on LF (same shape as
 ; kernel/batch.asm's own batch_readline this project already built
@@ -401,8 +395,8 @@ egb_refill:
                                         ; same low/high pattern
                                         ; loader.asm already uses for
                                         ; PROG_BASE)
-            mov     ra, ed_handle
-            ldn     ra
+            mov     rd, ed_fcb          ; RD = FCB pointer (fixed --
+                                        ; RF stays pointed at ed_rdbuf)
             call    K_FILE_READ         ; RC = actual bytes read,
                                         ; DF = 0/1 (real error)
             lbnf    egb_check_count
@@ -2719,13 +2713,10 @@ ed_cmd_e:
             mov     rd, ed_fcb
             mov     ra, ed_iobuf
             ldi     1                   ; mode = write/truncate
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; ed_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    ed_save_open_err
-
-            plo     rd
-            mov     rf, ed_handle
-            glo     rd
-            str     rf
 
             mov     rf, ed_save_i
             ldi     0
@@ -2773,8 +2764,7 @@ ed_save_loop:
             ldn     rf
             plo     rc
             mov     rf, r8
-            mov     rd, ed_handle
-            ldn     rd
+            mov     rd, ed_fcb
             call    K_FILE_WRITE
             lbdf    ed_save_werr
 
@@ -2783,8 +2773,7 @@ ed_save_loop:
             phi     rc
             ldi     2
             plo     rc
-            mov     rd, ed_handle
-            ldn     rd
+            mov     rd, ed_fcb
             call    K_FILE_WRITE
             lbdf    ed_save_werr
 
@@ -2804,15 +2793,13 @@ ed_save_loop:
             lbr     ed_save_loop
 
 ed_save_done:
-            mov     rf, ed_handle
-            ldn     rf
+            mov     rd, ed_fcb
             call    K_FILE_CLOSE
             ldi     0
             rtn
 
 ed_save_werr:
-            mov     rf, ed_handle
-            ldn     rf
+            mov     rd, ed_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Write error.",13,10,0
@@ -3424,7 +3411,6 @@ ed_buf_end:     dw      0
 ed_filename_ptr: dw     0
 ed_fcb:         ds      FCB_LEN
 ed_iobuf:       ds      FCB_IOBUF_LEN
-ed_handle:      db      0
 
 ; ed_getbyte's own buffered-read state (see its header comment)
 ed_rdbuf:       ds      ED_RDBUF_LEN

@@ -61,8 +61,6 @@ ENV_LINE_MAX:   equ     64          ; bounds NAME=VALUE\0, matching
             extrn   env_name
             extrn   env_value
             extrn   env_overwrite
-            extrn   env_in_handle
-            extrn   env_out_handle
             extrn   env_found
             extrn   env_len
             extrn   env_eq_byte
@@ -77,14 +75,14 @@ ENV_LINE_MAX:   equ     64          ; bounds NAME=VALUE\0, matching
             extrn   env_next
 
 ; ----------------------------------------------------------------
-; env_read_line: read one line (up to '\n' or EOF) from an open file
-; handle into a buffer, stripping the trailing newline, null-
-; terminating the result. Truncates (silently drops the remainder
-; of) a line longer than maxlen-1, matching the C reference's own
-; behavior.
-; Args:    D = handle, RF = buffer, RC = maxlen (RC.0 only -- this
-;          library only ever calls it with ENV_LINE_MAX=64, so one
-;          byte's range is more than enough)
+; env_read_line: read one line (up to '\n' or EOF) from env_in_fcb (the
+; library's own shared read FCB, always the same fixed address) into a
+; buffer, stripping the trailing newline, null-terminating the result.
+; Truncates (silently drops the remainder of) a line longer than
+; maxlen-1, matching the C reference's own behavior.
+; Args:    RF = buffer, RC = maxlen (RC.0 only -- this library only
+;          ever calls it with ENV_LINE_MAX=64, so one byte's range is
+;          more than enough)
 ; Returns: DF = 0 on a real line (RC = length stored, 0..maxlen-1,
 ;          buffer null-terminated), DF = 1 at true EOF with nothing
 ;          read at all this call (matches K_INPUTL's own DF-based EOF
@@ -92,20 +90,13 @@ ENV_LINE_MAX:   equ     64          ; bounds NAME=VALUE\0, matching
 ;          return -- a final line with no trailing newline is still
 ;          returned once, DF=0, before the FOLLOWING call reports
 ;          true EOF).
-; Modifies: R7, R8, R9, RB, RC, RF (and D) -- K_FILE_READ's own
+; Modifies: R7, R8, R9, RB, RC, RD, RF (and D) -- K_FILE_READ's own
 ;          clobber footprint is broad and undocumented beyond
-;          D-in/RC-out/DF-out, so nothing here is trusted to survive
+;          RD-in/RC-out/DF-out, so nothing here is trusted to survive
 ;          it in a register; every value needed across the call is
 ;          stashed to memory first.
 ; ----------------------------------------------------------------
             proc    env_read_line
-
-            plo     r9                  ; stash handle (D) -- safe
-                                        ; only across the mov+str
-                                        ; immediately below
-            mov     rb, erl_handle
-            glo     r9
-            str     rb                  ; erl_handle = handle
 
             mov     rb, erl_wptr
             ghi     rf
@@ -133,14 +124,9 @@ erl_loop:
             phi     rc
             ldi     1
             plo     rc                  ; RC = 1
-            mov     rb, erl_handle
-            ldn     rb                  ; D = handle -- loaded LAST,
-                                        ; immediately before the call
-                                        ; (the earlier draft loaded it
-                                        ; first, then a later "mov rf,
-                                        ; erl_scratch" clobbered it --
-                                        ; gotcha #4, caught during the
-                                        ; manual register trace)
+            mov     rd, env_in_fcb      ; RD = FCB pointer (fixed --
+                                        ; always the same shared read
+                                        ; FCB, no capture needed)
             call    K_FILE_READ
             lbdf    erl_check_got       ; I/O error -- treat the same
                                         ; as EOF (matches the C
@@ -228,7 +214,6 @@ erl_terminate:
 ; Proc-private scratch -- nothing outside env_read_line ever
 ; references these, so no extrn/public wiring is needed.
 ; ----------------------------------------------------------------
-erl_handle:     db      0
 erl_wptr:       dw      0
 erl_maxlen:     db      0
 erl_count:      db      0
@@ -363,11 +348,11 @@ epu_done:
 ; ----------------------------------------------------------------
 ; _env_write_line: write env_line_buf's current content (env_len
 ; bytes, as measured by the most recent env_read_line call) plus a
-; trailing '\n' to env_out_handle. Shared by env_setenv and
-; env_unsetenv for their "copy this line through unchanged" case.
-; Args:    none (reads env_line_buf/env_len/env_out_handle directly)
+; trailing '\n' to env_out_fcb. Shared by env_setenv and env_unsetenv
+; for their "copy this line through unchanged" case.
+; Args:    none (reads env_line_buf/env_len/env_out_fcb directly)
 ; Returns: nothing
-; Modifies: R7, R8, R9, RB, RC, RF (and D)
+; Modifies: R7, R8, R9, RB, RC, RD, RF (and D)
 ; ----------------------------------------------------------------
             proc    _env_write_line
 
@@ -377,8 +362,7 @@ epu_done:
             phi     rc
             ldn     rb
             plo     rc                  ; RC = env_len
-            mov     rb, env_out_handle
-            ldn     rb                  ; D = handle
+            mov     rd, env_out_fcb     ; RD = FCB pointer (fixed)
             call    K_FILE_WRITE
 
             mov     rf, env_nl_byte
@@ -386,8 +370,7 @@ epu_done:
             phi     rc
             ldi     1
             plo     rc                  ; RC = 1
-            mov     rb, env_out_handle
-            ldn     rb                  ; D = handle
+            mov     rd, env_out_fcb
             call    K_FILE_WRITE
             rtn
 
@@ -400,7 +383,7 @@ epu_done:
 ; one name. Deliberately does NOT split each line -- the raw
 ; "NAME=VALUE" text (still null-terminated, '=' intact) is exactly
 ; what a listing wants to print. Reuses this library's own internal
-; env_in_fcb/env_in_iobuf/env_in_handle/env_line_buf (the same fields
+; env_in_fcb/env_in_iobuf/env_line_buf (the same fields
 ; env_getenv/env_setenv/env_unsetenv already use for their own "read
 ; the source file" step) -- safe under this file's own standing
 ; single-threaded/non-reentrant assumption, as long as nothing calls
@@ -422,14 +405,11 @@ epu_done:
             mov     ra, env_in_iobuf
             ldi     0                   ; mode 0 = read -- set LAST,
                                         ; mov clobbers D (gotcha #4)
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; env_in_fcb is a fixed
+                                        ; address, nothing to capture)
             lbdf    ef_empty            ; can't open: nothing to
                                         ; iterate
-
-            plo     r9                  ; stash handle (D)
-            mov     rb, env_in_handle
-            glo     r9
-            str     rb                  ; env_in_handle = handle
 
             lbr     env_next            ; tail call -- env_next's own
                                         ; "read one line, handle EOF"
@@ -467,8 +447,6 @@ ef_empty:
             phi     rc
             ldi     low ENV_LINE_MAX
             plo     rc
-            mov     rb, env_in_handle
-            ldn     rb                  ; D = handle
             call    env_read_line
             lbdf    en_eof
 
@@ -476,8 +454,7 @@ ef_empty:
             rtn
 
 en_eof:
-            mov     rb, env_in_handle
-            ldn     rb                  ; D = handle
+            mov     rd, env_in_fcb
             call    K_FILE_CLOSE
             ldi     0
             phi     rf
@@ -511,13 +488,10 @@ en_eof:
             mov     ra, env_in_iobuf
             ldi     0                   ; mode 0 = read -- set LAST,
                                         ; mov clobbers D (gotcha #4)
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; env_in_fcb is a fixed
+                                        ; address, nothing to capture)
             lbdf    ge_notfound         ; can't open: no file yet
-
-            plo     r9                  ; stash handle (D)
-            mov     rb, env_in_handle
-            glo     r9
-            str     rb                  ; env_in_handle = handle
 
 ge_loop:
             mov     rf, env_line_buf
@@ -525,8 +499,6 @@ ge_loop:
             phi     rc
             ldi     low ENV_LINE_MAX
             plo     rc
-            mov     rb, env_in_handle
-            ldn     rb                  ; D = handle
             call    env_read_line
             lbdf    ge_eof              ; EOF: not found
 
@@ -563,8 +535,7 @@ ge_have_value:
                                         ; scanning
 
             ; match! close the file and return the stashed value ptr
-            mov     rb, env_in_handle
-            ldn     rb                  ; D = handle
+            mov     rd, env_in_fcb
             call    K_FILE_CLOSE
 
             mov     rb, env_value
@@ -578,8 +549,7 @@ ge_have_value:
             rtn
 
 ge_eof:
-            mov     rb, env_in_handle
-            ldn     rb
+            mov     rd, env_in_fcb
             call    K_FILE_CLOSE
 ge_notfound:
             ldi     0
@@ -651,13 +621,10 @@ se_name_ok:
             mov     ra, env_out_iobuf
             ldi     1                   ; set LAST (mov clobbers D,
                                         ; gotcha #4)
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; env_out_fcb is a fixed
+                                        ; address, nothing to capture)
             lbdf    se_reject           ; can't create temp file
-
-            plo     r9
-            mov     rb, env_out_handle
-            glo     r9
-            str     rb                  ; env_out_handle = handle
 
             mov     rb, env_found
             ldi     0
@@ -669,14 +636,11 @@ se_name_ok:
             mov     rd, env_in_fcb
             mov     ra, env_in_iobuf
             ldi     0
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; env_in_fcb is a fixed
+                                        ; address, nothing to capture)
             lbdf    se_no_source        ; open failed: skip the copy
                                         ; loop entirely
-
-            plo     r9
-            mov     rb, env_in_handle
-            glo     r9
-            str     rb                  ; env_in_handle = handle
 
 se_copy_loop:
             mov     rf, env_line_buf
@@ -684,8 +648,6 @@ se_copy_loop:
             phi     rc
             ldi     low ENV_LINE_MAX
             plo     rc
-            mov     rb, env_in_handle
-            ldn     rb
             call    env_read_line
             lbdf    se_close_in         ; EOF: done copying
 
@@ -755,8 +717,7 @@ se_copy_through:
             lbr     se_copy_loop
 
 se_close_in:
-            mov     rb, env_in_handle
-            ldn     rb
+            mov     rd, env_in_fcb
             call    K_FILE_CLOSE
 
 se_no_source:
@@ -769,8 +730,7 @@ se_no_source:
             call    se_write_nv
 
 se_close_out:
-            mov     rb, env_out_handle
-            ldn     rb
+            mov     rd, env_out_fcb
             call    K_FILE_CLOSE
 
             ; swap the temp file into place
@@ -784,7 +744,7 @@ se_close_out:
 
 ; ----------------------------------------------------------------
 ; se_write_nv: write env_name + '=' + env_value + '\n' to
-; env_out_handle. Internal to env_setenv only (called via a plain
+; env_out_fcb. Internal to env_setenv only (called via a plain
 ; `call` from within this same proc -- no extrn/public needed, unlike
 ; genuinely cross-proc routines).
 ; ----------------------------------------------------------------
@@ -797,8 +757,7 @@ se_write_nv:
             mov     rf, r8              ; RF = name pointer
             call    se_strlen           ; RC = length, RF unchanged
                                         ; (se_strlen never touches RF)
-            mov     rb, env_out_handle
-            ldn     rb                  ; D = handle
+            mov     rd, env_out_fcb     ; RD = FCB pointer (fixed)
             call    K_FILE_WRITE
 
             mov     rf, env_eq_byte
@@ -806,8 +765,7 @@ se_write_nv:
             phi     rc
             ldi     1
             plo     rc
-            mov     rb, env_out_handle
-            ldn     rb
+            mov     rd, env_out_fcb
             call    K_FILE_WRITE
 
             mov     rf, env_value
@@ -817,8 +775,7 @@ se_write_nv:
             plo     r8
             mov     rf, r8              ; RF = value pointer
             call    se_strlen
-            mov     rb, env_out_handle
-            ldn     rb
+            mov     rd, env_out_fcb
             call    K_FILE_WRITE
 
             mov     rf, env_nl_byte
@@ -826,8 +783,7 @@ se_write_nv:
             phi     rc
             ldi     1
             plo     rc
-            mov     rb, env_out_handle
-            ldn     rb
+            mov     rd, env_out_fcb
             call    K_FILE_WRITE
             rtn
 
@@ -895,26 +851,20 @@ ue_name_ok:
             mov     rd, env_out_fcb
             mov     ra, env_out_iobuf
             ldi     1
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; env_out_fcb is a fixed
+                                        ; address, nothing to capture)
             lbdf    ue_reject
-
-            plo     r9
-            mov     rb, env_out_handle
-            glo     r9
-            str     rb
 
             mov     rf, env_file_path
             mov     rd, env_in_fcb
             mov     ra, env_in_iobuf
             ldi     0
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; env_in_fcb is a fixed
+                                        ; address, nothing to capture)
             lbdf    ue_close_out        ; no source file: nothing to
                                         ; copy, just finish up
-
-            plo     r9
-            mov     rb, env_in_handle
-            glo     r9
-            str     rb
 
 ue_copy_loop:
             mov     rf, env_line_buf
@@ -922,8 +872,6 @@ ue_copy_loop:
             phi     rc
             ldi     low ENV_LINE_MAX
             plo     rc
-            mov     rb, env_in_handle
-            ldn     rb
             call    env_read_line
             lbdf    ue_close_in
 
@@ -972,13 +920,11 @@ ue_copy_through:
             lbr     ue_copy_loop
 
 ue_close_in:
-            mov     rb, env_in_handle
-            ldn     rb
+            mov     rd, env_in_fcb
             call    K_FILE_CLOSE
 
 ue_close_out:
-            mov     rb, env_out_handle
-            ldn     rb
+            mov     rd, env_out_fcb
             call    K_FILE_CLOSE
 
             mov     rf, env_file_path
@@ -1007,8 +953,6 @@ env_out_iobuf:      ds      FCB_IOBUF_LEN
 env_name:           dw      0
 env_value:          dw      0
 env_overwrite:      db      0
-env_in_handle:      db      0
-env_out_handle:     db      0
 env_found:          db      0
 env_len:            dw      0
 env_eq_byte:        db      '='
@@ -1026,8 +970,6 @@ env_dat_name:       db      "env.dat",0
                 public  env_name
                 public  env_value
                 public  env_overwrite
-                public  env_in_handle
-                public  env_out_handle
                 public  env_found
                 public  env_len
                 public  env_eq_byte

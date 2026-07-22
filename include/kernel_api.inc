@@ -108,15 +108,17 @@ K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
 ; FCB_LEN/FCB_IOBUF_LEN: sizes only, not the field layout (which stays
 ; kernel-internal, see kernel.inc's own FCB_* offsets) -- same
 ; "publish a size, not the struct" precedent as DIRENT_LEN below.
-; CALLER-ALLOCATED FCBs (2026-07-15): a program declares its own
-; `ds FCB_LEN` (the FCB itself) and `ds FCB_IOBUF_LEN` (that FCB's own
-; private 512-byte sector buffer) per file it wants open at once, and
-; passes both pointers to K_FILE_OPEN. The kernel still hands back a
-; plain small-integer handle (same as always -- needed for the future
-; ELFC C library's own low-level I/O convention), now backed by an
-; 8-slot table of pointers instead of a 3-slot table of full FCBs, so
-; the real per-file storage lives in the (much larger) caller's own
-; RAM rather than the kernel's.
+; CALLER-ALLOCATED FCBs (2026-07-15), FCB POINTER IS THE HANDLE
+; (2026-07-21): a program declares its own `ds FCB_LEN` (the FCB
+; itself) and `ds FCB_IOBUF_LEN` (that FCB's own private 512-byte
+; sector buffer) per file it wants open at once, and passes both
+; pointers to K_FILE_OPEN. K_FILE_CLOSE/K_FILE_READ/K_FILE_WRITE/
+; K_FILE_SEEK all take that same FCB pointer directly (in RD) on every
+; call -- there is no separate small-integer "handle" anymore, and no
+; kernel-imposed limit on how many files can be open at once (only
+; available RAM, since each FCB lives in the caller's own memory).
+; K_FILE_OPEN itself no longer returns anything meaningful in D on
+; success -- the caller already has the FCB pointer they passed in.
 FCB_LEN:        equ     32
 FCB_IOBUF_LEN:  equ     512
 
@@ -125,27 +127,29 @@ FCB_IOBUF_LEN:  equ     512
 ;               RD = pointer to caller's FCB_LEN-byte FCB (need not be
 ;               pre-zeroed -- file_open initializes every field),
 ;               RA = pointer to caller's FCB_IOBUF_LEN-byte I/O buffer.
-;               Returns: D = handle (small integer, same convention
-;               as before), DF = 0/1.
-; K_FILE_CLOSE: Args: D = handle. Returns: DF = 0/1.
-; K_FILE_SEEK (2026-07-20): Args: D = handle, RC.0 = whence (0 =
-;               SEEK_SET, absolute from start; 1 = SEEK_CUR, relative
-;               to current position; 2 = SEEK_END, relative to end of
-;               file), RA:RD = 32-bit signed offset (RA = high word,
-;               RD = low word). Only offsets that are a valid
-;               sign-extension of a 16-bit value are supported (RA ==
-;               $0000 with RD's bit 15 clear, or RA == $FFFF with
-;               RD's bit 15 set) -- anything wider is an error, and
-;               file positions/sizes beyond 16 bits aren't yet
-;               supported either way. The 32-bit register ABI is
+;               Returns: DF = 0/1 (D is unspecified on return -- the
+;               caller already has the FCB pointer they passed in).
+; K_FILE_CLOSE: Args: RD = FCB pointer (the same one passed to
+;               K_FILE_OPEN). Returns: DF = 0/1.
+; K_FILE_SEEK (2026-07-20, register ABI changed 2026-07-21): Args:
+;               RD = FCB pointer, RC.0 = whence (0 = SEEK_SET, absolute
+;               from start; 1 = SEEK_CUR, relative to current position;
+;               2 = SEEK_END, relative to end of file), RA:R9 = 32-bit
+;               signed offset (RA = high word, R9 = low word -- R9, not
+;               RD, since RD now carries the FCB pointer). Only offsets
+;               that are a valid sign-extension of a 16-bit value are
+;               supported (RA == $0000 with R9's bit 15 clear, or RA ==
+;               $FFFF with R9's bit 15 set) -- anything wider is an
+;               error, and file positions/sizes beyond 16 bits aren't
+;               yet supported either way. The 32-bit register ABI is
 ;               reserved now so a future expansion to real 32-bit
 ;               seeking needs no calling-convention change. Returns:
 ;               DF = 0 on success (RD = the resulting absolute
-;               position, low word), DF = 1 on error (bad handle, bad
-;               whence, offset out of the supported range, or the
-;               resulting position would fall outside [0, filesize]);
-;               on any error the file position is left unchanged.
-; K_FILE_READ/K_FILE_WRITE: Args: D = handle, RF = data buffer,
+;               position, low word), DF = 1 on error (bad whence,
+;               offset out of the supported range, or the resulting
+;               position would fall outside [0, filesize]); on any
+;               error the file position is left unchanged.
+; K_FILE_READ/K_FILE_WRITE: Args: RD = FCB pointer, RF = data buffer,
 ;               RC = byte count. Returns: RC = bytes actually
 ;               transferred (read only), DF = 0/1.
 K_FILE_OPEN:    equ     $0109

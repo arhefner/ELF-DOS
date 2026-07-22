@@ -958,18 +958,10 @@ handle_pipe:
             mov     ra, pipe_iobuf
             mov     rf, pipe_script_path
             ldi     1                   ; mode 1: create/overwrite
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; pipe_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    pipe_open_err
-
-            plo     r9                  ; stash handle in R9.0 -- safe
-                                        ; only across the immediately-
-                                        ; following mov+str, NOT across
-                                        ; any K_FILE_* call (same gotcha
-                                        ; #4 pattern seektest.asm hit
-                                        ; and fixed this same session)
-            mov     rb, pipe_handle
-            glo     r9
-            str     rb                  ; pipe_handle = handle
 
             mov     rf, pipe_echooff_line
             call    pipe_write_str      ; write "@echo off\n" -- the
@@ -991,8 +983,7 @@ handle_pipe:
             phi     rc
             ldn     rb
             plo     rc                  ; RC = pipe_lhs_len
-            mov     rb, pipe_handle
-            ldn     rb                  ; D = handle
+            mov     rd, pipe_fcb
             call    K_FILE_WRITE        ; write cmd1's raw text
 
             mov     rf, pipe_out_line
@@ -1008,8 +999,7 @@ handle_pipe:
             phi     rc
             ldn     rb
             plo     rc
-            mov     rb, pipe_handle
-            ldn     rb
+            mov     rd, pipe_fcb
             call    K_FILE_WRITE        ; write cmd2's raw text
 
             mov     rf, pipe_in_line
@@ -1018,8 +1008,7 @@ handle_pipe:
             mov     rf, pipe_del_line
             call    pipe_write_str      ; write "del /PIPETMP.DAT\n"
 
-            mov     rf, pipe_handle
-            ldn     rf
+            mov     rd, pipe_fcb
             call    K_FILE_CLOSE
 
             ; RUN_PATH = "/PIPETMP.BAT" -- reuse the existing batch-
@@ -1043,18 +1032,17 @@ pipe_open_err:
             lbr     start
 
 ;------------------------------------------------------------------
-; pipe_write_str: writes the NUL-terminated string at RF to
-; pipe_handle (a fixed field, not an argument -- every call site above
-; already has the same handle open).
+; pipe_write_str: writes the NUL-terminated string at RF to pipe_fcb
+; (a fixed field, not an argument -- every call site above already has
+; it open).
 ; Args:    RF = string
 ; Returns: nothing checked -- best-effort, matching this file's own
 ;          existing write_bin_name, which has no failure path either
-; Modifies: RF, RC, R9, RB (and D)
+; Modifies: RF, RC, RD (and D)
 ;------------------------------------------------------------------
 pipe_write_str:
             call    shell_strlen        ; RC = length, RF unchanged
-            mov     rb, pipe_handle
-            ldn     rb                  ; D = handle
+            mov     rd, pipe_fcb
             call    K_FILE_WRITE
             rtn
 
@@ -1087,7 +1075,6 @@ pipe_rhs_start: dw      0
 pipe_rhs_len:   dw      0
 pipe_fcb:       ds      FCB_LEN
 pipe_iobuf:     ds      FCB_IOBUF_LEN
-pipe_handle:    db      0
 pipe_echooff_line: db   "@echo off",10,0
 pipe_script_path: db    "/PIPETMP.BAT",0
 pipe_out_line:  db      " >/PIPETMP.DAT",10,0

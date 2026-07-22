@@ -4,34 +4,35 @@
 ; Provides:
 ;   file_init   -- no-op (kept for symmetry; nothing kernel-resident
 ;                  to clear now that FCB storage is caller-allocated)
-;   file_open   -- open a file by path into a caller-supplied FCB,
-;                  return a small-integer handle (unchanged convention)
-;   file_close  -- flush and release an FCB, given its handle
-;   file_read   -- read bytes from an open file, given its handle
-;   file_write  -- write bytes to an open file, given its handle
-;   file_seek   -- move file position, given its handle (sequential
-;                  only for now)
+;   file_open   -- open a file by path into a caller-supplied FCB
+;   file_close  -- flush and release an FCB
+;   file_read   -- read bytes from an open file
+;   file_write  -- write bytes to an open file
+;   file_seek   -- move file position (sequential only for now)
 ;
-; CALLER-ALLOCATED FCBs (2026-07-15): FCB *storage* used to live in a
-; fixed kernel-resident table (FCB_COUNT=3 full slots), and the single
-; shared io_buf sector buffer (arbitrated by a global io_owner byte)
-; was a real scaling limit too -- COPY alone needs 2 concurrent FCBs,
-; and two FCBs alternating access through one shared buffer evict each
-; other's cached sector on every call. Now the caller (a program, or
-; the kernel's own prog_run for its one internal need -- see
-; loader.asm) owns the FCB memory AND its own private 512-byte I/O
-; buffer, and passes both pointers to file_open. Handles stay plain
-; small integers exactly as before (the future ELFC C library's own
-; low-level I/O routines need that convention) -- file_open registers
-; the caller's FCB pointer into fd_table, a small kernel-resident
-; array of just POINTERS (FD_COUNT=8 slots, kernel/kernel.asm), and
-; returns the slot index. file_close/file_read/file_write/file_seek
-; take that same index and resolve it through fd_table to the real FCB
-; pointer -- one extra indirection versus the old direct
-; index*FCB_LEN computation, otherwise unchanged. Net effect: 8
-; concurrent files instead of 3, a smaller kernel-resident table
-; (FD_COUNT*2=16 bytes vs. the old FCB_COUNT*32=96), and no more
-; shared-buffer thrashing between FCBs used together.
+; CALLER-ALLOCATED FCBs (2026-07-15), FCB POINTER IS THE HANDLE
+; (2026-07-21): FCB *storage* used to live in a fixed kernel-resident
+; table (FCB_COUNT=3 full slots), and the single shared io_buf sector
+; buffer (arbitrated by a global io_owner byte) was a real scaling
+; limit too -- COPY alone needs 2 concurrent FCBs, and two FCBs
+; alternating access through one shared buffer evict each other's
+; cached sector on every call. Now the caller (a program, or the
+; kernel's own prog_run/batch_start/redir for their own internal needs
+; -- see loader.asm/batch.asm/redir.asm) owns the FCB memory AND its
+; own private 512-byte I/O buffer, and passes both pointers to
+; file_open. file_open no longer returns anything meaningful in D:
+; since the caller already has the FCB pointer they passed in, there's
+; nothing to hand back. file_close/file_read/file_write/file_seek take
+; that same FCB pointer directly (in RD) instead of a small-integer
+; handle resolved through a lookup table -- there used to be a
+; kernel-resident fd_table (FD_COUNT=8 slots) doing exactly that
+; index-to-pointer mapping, removed entirely since it added an
+; indirection with no real purpose (the caller's own FCB pointer was
+; always the actual identity of "which file," the index was just a
+; second name for the same thing) and put a hard cap on concurrent
+; open files for no benefit. RD was chosen over RB specifically so a
+; future C-library caller's own RB-based stack frame survives a file
+; I/O call without needing to save/restore it.
 ;
 ; FCB structure (FCB_LEN = 32 bytes -- 23 of them used, still inside
 ; the original power-of-2 padding):
@@ -71,7 +72,6 @@
 #include    include/kernel.inc
 
 ; cross-file references
-            extrn   fd_table
             extrn   _switch_drive
             extrn   fat_get
             extrn   fat_set
@@ -98,7 +98,6 @@
             extrn   file_dirent
             extrn   fo_name
             extrn   fo_mode
-            extrn   fo_handle
             extrn   fo_fcb
             extrn   fo_iobuf
             extrn   fo_drive
@@ -204,27 +203,15 @@ _shared_scratch:    ds      9
             endp
 
 ; ----------------------------------------------------------------
-; file_init: zero fd_table at boot.
-; Called once at boot before the shell starts. Caller-allocated FCB
-; memory itself needs no clearing here (file_open initializes every
-; field of whatever FCB it's given) -- but fd_table is still
-; kernel-resident, and file_open's free-slot scan relies on a free
-; slot reading as 0. Kernel RAM isn't guaranteed zero on power-on, so
-; without this, a freshly booted system could see garbage in every
-; fd_table slot and report "no free slot" on the very first open.
+; file_init: no-op, kept for symmetry with the other _INIT jump-table
+; slots (K_BPB_INIT/K_FAT_INIT/etc.) -- there is no longer any
+; kernel-resident file-layer state to clear at boot. FCB storage is
+; entirely caller-allocated (file_open initializes every field of
+; whatever FCB it's given), and there's no fd_table anymore either
+; (each K_FILE_READ/WRITE/CLOSE/SEEK call takes the FCB pointer
+; directly, see file_open's own header comment).
 ; ----------------------------------------------------------------
             proc    file_init
-
-            mov     rf, fd_table
-            ldi     FD_COUNT * 2
-            plo     rc                  ; RC.0 = byte count
-
-finit_loop: ldi     0
-            str     rf
-            inc     rf
-            dec     rc
-            glo     rc
-            lbnz    finit_loop
 
             rtn
 
@@ -280,52 +267,6 @@ finit_loop: ldi     0
             inc     rf
             glo     ra
             str     rf                  ; fo_iobuf = caller's I/O buffer ptr
-
-
-            ; --- find a free fd_table slot and register the caller's
-            ; FCB pointer into it (see kernel.asm: fd_table is FD_COUNT
-            ; pointers, a free slot holds 0 -- a real FCB address is
-            ; never 0) ---
-            ldi     0
-            plo     rc                  ; RC.0 = index = 0
-            mov     rf, fd_table        ; RF = current slot pointer
-
-fopen_scan:
-            glo     rc
-            xri     FD_COUNT
-            lbz     fopen_no_slot       ; index == FD_COUNT: no free slot
-
-            lda     rf                  ; D = slot high byte, RF -> low byte
-            lbnz    fopen_next          ; nonzero: slot in use
-            ldn     rf                  ; D = slot low byte
-            lbz     fopen_found         ; both bytes zero: free slot
-
-fopen_next:
-            inc     rf                  ; RF -> next slot's high byte
-            glo     rc
-            adi     1
-            plo     rc                  ; index++
-            lbr     fopen_scan
-
-fopen_no_slot:
-            stc                         ; DF = 1, no free slot (fd_table full)
-            rtn
-
-fopen_found:
-            ; RF currently points at the free slot's LOW byte (the
-            ; lda/ldn check above advanced it there); back up to the
-            ; slot's high byte to write the caller's FCB pointer in.
-            dec     rf
-            mov     rd, fo_fcb
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf                  ; fd_table[index] = caller's FCB ptr
-
-            mov     rf, fo_handle
-            glo     rc
-            str     rf                  ; fo_handle = index
 
             ; --- resolve the (possibly multi-component, possibly
             ; drive-prefixed) path -- path_resolve determines the base
@@ -806,9 +747,10 @@ fa_no_sector_wrap:
             str     rf                  ; FCB_FPOS (low word) = FSIZE
 
 fopen_no_append:
-            mov     rf, fo_handle
-            ldn     rf                  ; D = FCB index (handle)
-            clc                         ; DF = 0, success
+            clc                         ; DF = 0, success -- D is
+                                        ; unspecified on return, the
+                                        ; caller already has the FCB
+                                        ; pointer they passed in
             rtn
 
 fopen_notfound:
@@ -932,41 +874,18 @@ fopen_notfound:
             str     rb
             inc     rb                  ; FCB_DRIVE = fo_drive
 
-            mov     rf, fo_handle
-            ldn     rf
-            clc
+            clc                         ; DF = 0, success -- D
+                                        ; unspecified, same reasoning
+                                        ; as fopen_no_append above
             rtn
 
 fopen_err:
-            ; free the fd_table slot registered back at fopen_found --
-            ; every path that reaches here runs after that registration
-            ; (bad path resolve, an "X:" prefix naming an unmounted
-            ; drive, empty final component, "must not be a directory"
-            ; rejection, mode-0 not-found, and _file_create failure).
-            ; Without this, each failed open permanently leaked one of
-            ; the FD_COUNT slots -- confirmed on hardware 2026-07-13:
-            ; a session with several legitimate "does this exist yet?"
-            ; probes (COPY's own overwrite-check, run before every
-            ; copy) plus a couple of genuine "Bad command."s
-            ; accumulated exactly enough leaks to first starve a COPY
-            ; destination open ("Cannot create destination.") and then
-            ; the kernel's own mandatory shell reload ("Shell not
-            ; found or invalid."), halting the system.
-            mov     rf, fo_handle
-            ldn     rf
-            shl                         ; D = index * 2 (fd_table entry
-                                        ; size)
-            plo     r8
-            ldi     0
-            phi     r8                  ; R8 = index * 2
-            mov     rf, fd_table
-            add16   rf, r8              ; RF = &fd_table[index]
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf                  ; fd_table[index] = 0 (free)
-
-            stc                         ; DF = 1, error
+            stc                         ; DF = 1, error -- nothing was
+                                        ; ever registered anywhere
+                                        ; (caller-owned FCB memory, no
+                                        ; fd_table), so there's nothing
+                                        ; to free/unwind on any failure
+                                        ; path that reaches here
             rtn
 
             endp
@@ -2100,89 +2019,47 @@ fc_no_term:
             endp
 
 ; ----------------------------------------------------------------
-; file_close: flush and release an FCB, given its handle
-; Args:   D = handle (index into fd_table)
+; file_close: flush and release an FCB
+; Args:   RD = FCB pointer (the same one the caller passed to
+;              file_open)
 ; Returns: DF = 0 on success, DF = 1 on error
 ; ----------------------------------------------------------------
 
             proc    file_close
 
-            plo     rc                  ; RC.0 = handle
-
-            glo     rc
-            smi     FD_COUNT
-            lbdf    fclose_bad_index    ; index >= FD_COUNT: error
-
-            ; resolve index -> &fd_table[index] -> the real FCB pointer.
-            ; RB is kept stable across the whole routine holding
-            ; &fd_table[index] itself, so the slot can be cleared at
-            ; the end without recomputing it from the index a second
-            ; time (and without needing RC to survive the
-            ; _fclose_rewrite_size call below, which documents RC as
-            ; one of the registers it clobbers).
-            glo     rc
-            shl                         ; D = index * 2 (fd_table entry size)
-            plo     r8
-            ldi     0
-            phi     r8                  ; R8 = index*2
-            mov     rf, fd_table
-            add16   rf, r8              ; RF = &fd_table[index]
-            mov     rb, rf              ; RB = &fd_table[index]
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = the real FCB pointer
-
             ; switch the active BPB/FAT-cache to this FCB's own drive
             ; before touching anything that depends on it (the size
-            ; rewrite below). RD/RB must survive -- _switch_drive's
-            ; own header documents both as clobbered.
+            ; rewrite below). RD must survive -- _switch_drive's own
+            ; header documents it as clobbered.
             push    rd
-            push    rb
             mov     rf, rd
             add16   rf, FCB_DRIVE
             ldn     rf
             call    _switch_drive
-            pop     rb
             pop     rd
 
             ; if the file grew since it was opened, rewrite the
-            ; directory entry's size field before releasing the slot
+            ; directory entry's size field
             mov     rf, rd              ; RF = FCB base (FCB_FLAGS)
             ldn     rf
             ani     FCB_F_SIZECHG
             lbz     fclose_no_rewrite
 
-            push    rd                  ; save FCB pointer and
-            push    rb                  ; &fd_table[index] across the
-                                        ; rewrite -- its own header
-                                        ; documents both RD and RB as
-                                        ; clobbered
+            push    rd                  ; save the FCB pointer across
+                                        ; the rewrite -- its own header
+                                        ; documents RD as clobbered
             call    _fclose_rewrite_size
-            pop     rb
             pop     rd
             ; rewrite errors are ignored here -- there's nothing more
-            ; to do at close time, and the slot is released either way
+            ; to do at close time
 
 fclose_no_rewrite:
-            ; mark the FCB itself closed (light sanity flag -- catches
-            ; a stale handle reused after close)
+            ; mark the FCB itself closed (light sanity flag)
             mov     rf, rd
             ldi     0
             str     rf                  ; FCB_FLAGS = 0
 
-            ; free the fd_table slot so the index can be reused
-            mov     rf, rb
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf                  ; fd_table[index] = 0
-
             clc
-            rtn
-
-fclose_bad_index:
-            stc
             rtn
 
             endp
@@ -3933,9 +3810,8 @@ fst_err:
 fst_buf:        dw      0
 
 ; ----------------------------------------------------------------
-; file_read: read bytes from an open file into a buffer, given its
-; handle (see file_open)
-; Args:   D  = handle (index into fd_table)
+; file_read: read bytes from an open file into a buffer
+; Args:   RD = FCB pointer (the same one passed to file_open)
 ;         RF = destination buffer
 ;         RC = byte count
 ; Returns: RC = bytes actually read (may be less at EOF)
@@ -3953,24 +3829,12 @@ fst_buf:        dw      0
             ; with push/pop around _cluster_to_lba and fat_get, which
             ; both clobber registers this routine depends on):
             ;   RA  destination pointer
-            ;   RB  the real FCB pointer (resolved from the handle via
-            ;       fd_table once, at entry)
+            ;   RB  the real FCB pointer (arrives directly in RD, moved
+            ;       to RB here -- no fd_table resolve needed)
             ;   RC  bytes remaining to read (the arg, decremented)
-            ; R7/R8/R9/RD are scratch, recomputed fresh each iteration
-            ; (R9 used to hold the handle stably across the loop for
-            ; the old global io_owner check; that check is gone now
-            ; that each FCB tracks its own buffer validity, so R9 is
-            ; ordinary scratch here like R7/R8/RD).
+            ; R7/R8/R9/RD are scratch, recomputed fresh each iteration.
 
-            ; BUG FIX: "mov ra, rf" itself clobbers D (its final GLO RF
-            ; leaves D = RF's low byte -- part of the destination buffer
-            ; address), so the real handle passed in D at entry would
-            ; not survive to "plo r9" unless captured first. This is why
-            ; prog_load's own call (RF=PROG_BASE, low byte 0) coincidentally
-            ; worked while any other destination buffer corrupted R9.0 into
-            ; a bogus handle, reading/writing essentially random memory
-            ; for the rest of the call.
-            plo     r9                  ; R9.0 = handle (captured first)
+            mov     rb, rd              ; RB = the real FCB pointer
             mov     ra, rf              ; RA = destination pointer
 
             mov     rf, fr_request
@@ -3979,19 +3843,6 @@ fst_buf:        dw      0
             inc     rf
             glo     rc
             str     rf                  ; fr_request = original byte count
-
-            ; resolve handle -> &fd_table[handle] -> the real FCB pointer
-            glo     r9
-            shl                         ; D = handle * 2 (fd_table entry size)
-            plo     rd
-            ldi     0
-            phi     rd                  ; RD = handle*2
-            mov     rf, fd_table
-            add16   rf, rd              ; RF = &fd_table[handle]
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = the real FCB pointer
 
             ; switch the active BPB/FAT-cache to this FCB's own drive
             ; before the read loop touches anything that depends on
@@ -4376,9 +4227,8 @@ fread_calc_read:
             rtn
 
 ; ----------------------------------------------------------------
-; file_write: write bytes from a buffer into an open file, given its
-; handle (see file_open)
-; Args:   D  = handle (index into fd_table)
+; file_write: write bytes from a buffer into an open file
+; Args:   RD = FCB pointer (the same one passed to file_open)
 ;         RF = source buffer
 ;         RC = byte count
 ; Returns: DF = 0 on success, DF = 1 on error (disk full / I/O)
@@ -4412,21 +4262,15 @@ fread_calc_read:
             ; with push/pop around calls that clobber registers this
             ; routine depends on):
             ;   RA  source pointer
-            ;   RB  the real FCB pointer (resolved from the handle via
-            ;       fd_table once, at entry)
+            ;   RB  the real FCB pointer (arrives directly in RD, moved
+            ;       to RB here -- no fd_table resolve needed)
             ;   RC  bytes remaining to write (the arg, decremented)
             ; R7/R8/R9/RD are scratch, recomputed fresh each iteration
-            ; (R9 used to hold the handle stably across the loop for
-            ; the old global io_owner check; that check is gone now
-            ; that each FCB tracks its own buffer validity, so R9 is
-            ; ordinary scratch here like R7/R8/RD -- the many existing
-            ; push/pop r9 pairs around fat_alloc/fat_set/fat_flush
-            ; below are harmlessly defensive now rather than load-
-            ; bearing, left in place rather than churned).
+            ; (the many existing push/pop r9 pairs around fat_alloc/
+            ; fat_set/fat_flush below are harmlessly defensive, left in
+            ; place rather than churned).
 
-            plo     r9                  ; R9.0 = handle (captured before
-                                        ; "mov ra, rf" clobbers D -- see
-                                        ; file_read's BUG FIX note)
+            mov     rb, rd              ; RB = the real FCB pointer
             mov     ra, rf              ; RA = source pointer
 
             mov     rf, fr_request
@@ -4435,19 +4279,6 @@ fread_calc_read:
             inc     rf
             glo     rc
             str     rf                  ; fr_request = original byte count
-
-            ; resolve handle -> &fd_table[handle] -> the real FCB pointer
-            glo     r9
-            shl                         ; D = handle * 2 (fd_table entry size)
-            plo     rd
-            ldi     0
-            phi     rd                  ; RD = handle*2
-            mov     rf, fd_table
-            add16   rf, rd              ; RF = &fd_table[handle]
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = the real FCB pointer
 
             ; switch the active BPB/FAT-cache to this FCB's own drive
             ; before anything below (including the first-cluster
@@ -5058,15 +4889,18 @@ fwrite_calc_written:
 
 ; ----------------------------------------------------------------
 ; file_seek: reposition an open file's read/write cursor.
-; Args:    D = handle (index into fd_table)
+; Args:    RD = FCB pointer (the same one passed to file_open)
 ;          RC.0 = whence: 0 = SEEK_SET (absolute from start),
 ;                 1 = SEEK_CUR (relative to current position),
 ;                 2 = SEEK_END (relative to end of file)
-;          RA:RD = 32-bit signed offset (RA = high word, RD = low
-;                 word). This implementation only accepts offsets
+;          RA:R9 = 32-bit signed offset (RA = high word, R9 = low
+;                 word -- moved off RD, which now carries the FCB
+;                 pointer instead, matching file_read/file_write/
+;                 file_close's own convention). This implementation
+;                 only accepts offsets
 ;                 that are a valid sign-extension of a 16-bit value
-;                 (RA == $0000 with RD's bit 15 clear, or RA == $FFFF
-;                 with RD's bit 15 set); anything wider is an error.
+;                 (RA == $0000 with R9's bit 15 clear, or RA == $FFFF
+;                 with R9's bit 15 set); anything wider is an error.
 ;                 File positions/sizes beyond 16 bits are likewise
 ;                 not yet supported (FCB_FSIZE/FCB_FPOS's own high
 ;                 words are assumed zero, matching this file's own
@@ -5075,15 +4909,14 @@ fwrite_calc_written:
 ;                 reserved now so a future expansion to real 32-bit
 ;                 seeking needs no calling-convention change.
 ; Returns: DF = 0 on success (RD = the resulting absolute position,
-;          low word only), DF = 1 on error (bad handle, bad whence,
-;          offset out of the supported range, or the resulting
-;          position would fall outside [0, FCB_FSIZE]) -- on any
-;          error the FCB is left completely untouched (no field is
-;          written until the new position is fully validated and,
-;          for a forward/backward move, the target cluster has
-;          already been found).
+;          low word only), DF = 1 on error (bad whence, offset out of
+;          the supported range, or the resulting position would fall
+;          outside [0, FCB_FSIZE]) -- on any error the FCB is left
+;          completely untouched (no field is written until the new
+;          position is fully validated and, for a forward/backward
+;          move, the target cluster has already been found).
 ; Modifies: R7, R8, R9, RA, RB, RC, RF (all used as internal scratch
-;          -- nothing but D-in/DF-out/RD-out survives a call to this
+;          -- nothing but RD-in/DF-out/RD-out survives a call to this
 ;          routine; a caller needing anything else alive across it
 ;          must stash to memory first, per this file's own standing
 ;          register-survival discipline).
@@ -5092,11 +4925,14 @@ fwrite_calc_written:
 
             proc    file_seek
 
-            plo     r9                  ; stash handle in a register
-                                        ; that survives the memory
-                                        ; stashing below (R9 unused
-                                        ; until the cluster-walk loop,
-                                        ; far below)
+            mov     rf, fsk_fcb
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fsk_fcb = RD (the FCB pointer,
+                                        ; arrives directly, no fd_table
+                                        ; resolve needed)
 
             mov     rf, fsk_off_hi
             ghi     ra
@@ -5106,46 +4942,20 @@ fwrite_calc_written:
             str     rf                  ; fsk_off_hi = offset high word
 
             mov     rf, fsk_off_lo
-            ghi     rd
+            ghi     r9
             str     rf
             inc     rf
-            glo     rd
+            glo     r9
             str     rf                  ; fsk_off_lo = offset low word
+                                        ; (from R9, moved off RD so RD
+                                        ; can carry the FCB pointer)
 
             mov     rf, fsk_whence
             glo     rc
             str     rf                  ; fsk_whence = whence
 
-            glo     r9
-            plo     rc                  ; RC.0 = handle (reloaded)
-
-            glo     rc
-            smi     FD_COUNT
-            lbdf    fseek_bad_index     ; index >= FD_COUNT: error
-
-            ; resolve handle -> &fd_table[handle] -> the real FCB pointer
-            glo     rc
-            shl                         ; D = handle * 2 (fd_table entry size)
-            plo     rd
-            ldi     0
-            phi     rd                  ; RD = handle*2
-            mov     rf, fd_table
-            add16   rf, rd              ; RF = &fd_table[handle]
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = the real FCB pointer
-            mov     rf, fsk_fcb
-            ghi     rb
-            str     rf
-            inc     rf
-            glo     rb
-            str     rf                  ; fsk_fcb = RB, stashed --
-                                        ; _switch_drive and fat_get
-                                        ; both clobber broadly below
-
             ; switch the active BPB/FAT-cache to this FCB's own drive
-            mov     rf, rb
+            mov     rf, rd
             add16   rf, FCB_DRIVE
             ldn     rf
             call    _switch_drive       ; clobbers R7/R8/R9/RA/RC/RD/RF
@@ -5557,10 +5367,6 @@ fsk_set_fpos:
             clc                         ; DF = 0, success; RD (target)
             rtn                         ; still holds the new position
 
-fseek_bad_index:
-            stc
-            rtn
-
 fseek_bad_whence:
             stc
             rtn
@@ -5581,13 +5387,14 @@ fseek_io_err:
 ; file_dirent: scratch DIRENT_LEN buffer for file_open's directory
 ;              search (private to this module, unlike shell.asm's
 ;              dir_result).
-; fo_*:        file_open's saved arguments and chosen FCB -- needed
-;              because dir_open/dir_read clobber R9/RA/RB/RC/RD/RF
-;              internally, so nothing survives in a register across
-;              the directory-search loop. fo_fcb/fo_iobuf are the
-;              caller-supplied FCB/I-O-buffer pointers (2026-07-15,
-;              caller-allocated FCBs); fo_handle is the fd_table
-;              index chosen for this open.
+; fo_*:        file_open's saved arguments -- needed because dir_open/
+;              dir_read clobber R9/RA/RB/RC/RD/RF internally, so
+;              nothing survives in a register across the directory-
+;              search loop. fo_fcb/fo_iobuf are the caller-supplied
+;              FCB/I-O-buffer pointers (2026-07-15, caller-allocated
+;              FCBs) -- the caller already has fo_fcb's own value, so
+;              unlike the old fd_table design there's no separate
+;              handle to allocate or return.
 ; fr_request:  file_read's original requested byte count, needed to
 ;              compute the actual bytes-read return value at the end.
 ;------------------------------------------------------------------
@@ -5598,7 +5405,6 @@ fo_name:        dw      0
 fo_mode:        db      0
 fo_fcb:         dw      0
 fo_iobuf:       dw      0
-fo_handle:      db      0
 fo_drive:       db      0           ; path_resolve's resolved drive
                                     ; (RC.0), stashed to memory right
                                     ; after the call since dir_open/
@@ -5687,7 +5493,6 @@ fsk_sector_in_clust: db     0
                 public  fo_mode
                 public  fo_fcb
                 public  fo_iobuf
-                public  fo_handle
                 public  fo_drive
                 public  fr_request
                 public  fcrw_slot

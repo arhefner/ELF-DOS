@@ -60,14 +60,10 @@ start:
             mov     rd, hd_fcb          ; RD = our FCB struct
             mov     ra, hd_iobuf        ; RA = our I/O buffer
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; hd_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    not_found
-
-            plo     rd                  ; stash handle (mov below
-                                        ; clobbers D)
-            mov     rf, hd_handle
-            glo     rd
-            str     rf                  ; hd_handle = handle
 
             mov     rf, hd_offset
             ldi     0
@@ -81,8 +77,8 @@ row_loop:
             plo     rc
             ldi     0
             phi     rc                  ; RC = 16 (bytes requested)
-            mov     rd, hd_handle
-            ldn     rd                  ; D = handle, RF untouched
+            mov     rd, hd_fcb          ; RD = FCB pointer (fixed --
+                                        ; RF untouched)
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    io_error
 
@@ -257,15 +253,13 @@ ascii_done:
             lbr     row_loop
 
 done:
-            mov     rf, hd_handle
-            ldn     rf
+            mov     rd, hd_fcb
             call    K_FILE_CLOSE
             ldi     0                   ; exit code 0 = success
             rtn
 
 io_error:
-            mov     rf, hd_handle
-            ldn     rf
+            mov     rd, hd_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Read error.",13,10,0
@@ -336,7 +330,6 @@ hex_byte:
 
 hd_fcb:         ds      FCB_LEN
 hd_iobuf:       ds      FCB_IOBUF_LEN
-hd_handle:      db      0
 hd_rowbuf:      ds      16
 hd_offset:      dw      0
 hd_row_count:   db      0

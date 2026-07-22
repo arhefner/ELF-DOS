@@ -87,43 +87,22 @@ sk_fill_done:
                                         ; set LAST: mov clobbers D
                                         ; (gotcha #4), so D=mode must
                                         ; be loaded after every mov
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; sk_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    sk_open_w_err
-
-            plo     r9                  ; stash handle (D) in R9 --
-                                        ; safe only across the mov+str
-                                        ; immediately below, NOT across
-                                        ; the K_FILE_WRITE call further
-                                        ; down (file_write's own header
-                                        ; documents R9 as its own
-                                        ; internal scratch, reused at
-                                        ; the very end to compute
-                                        ; bytes_written -- so it must
-                                        ; be reloaded from memory, not
-                                        ; trusted to survive)
-            mov     rb, sk_whandle
-            glo     r9
-            str     rb                  ; sk_whandle = write handle
 
             mov     rf, sk_rampbuf
             ldi     high SEEK_FILE_LEN
             phi     rc
             ldi     low SEEK_FILE_LEN
             plo     rc                  ; RC = 1200
-            mov     rb, sk_whandle
-            ldn     rb                  ; D = handle, loaded fresh
-                                        ; from memory (not carried in a
-                                        ; register from the open above)
+            mov     rd, sk_fcb          ; RD = FCB pointer (fixed --
+                                        ; RF/RC untouched)
             call    K_FILE_WRITE
             lbdf    sk_write_err
 
-            mov     rb, sk_whandle
-            ldn     rb                  ; D = handle, again loaded
-                                        ; fresh -- K_FILE_WRITE's own
-                                        ; clobber footprint is broad
-                                        ; enough that nothing but its
-                                        ; documented DF/RC returns can
-                                        ; be trusted afterward
+            mov     rd, sk_fcb
             call    K_FILE_CLOSE
             lbdf    sk_close_w_err
 
@@ -135,18 +114,10 @@ sk_fill_done:
             ldi     0                   ; mode 0 = read -- set LAST,
                                         ; same reason as the write
                                         ; open above
-            call    K_FILE_OPEN
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; sk_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    sk_open_r_err
-
-            plo     r9                  ; stash handle (D, per
-                                        ; K_FILE_OPEN's real contract
-                                        ; -- confirmed against
-                                        ; copy.asm/wtest.asm's own
-                                        ; established idiom) before
-                                        ; the mov below clobbers D
-            mov     rb, sk_handle
-            glo     r9
-            str     rb                  ; sk_handle = read handle
 
             ; ================================================
             ; check 1: SEEK_SET(0) succeeds, RD == 0
@@ -164,12 +135,11 @@ sk_fill_done:
             phi     ra
             plo     ra                  ; RA = 0 (offset high word)
             ldi     0
-            phi     rd
-            plo     rd                  ; RD = 0 (offset low word)
+            phi     r9
+            plo     r9                  ; R9 = 0 (offset low word)
             ldi     0
             plo     rc                  ; RC.0 = 0 (SEEK_SET)
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_ok
 
             ; --- check 2: byte at position 0 == 0 ---
@@ -197,13 +167,12 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     high 500
-            phi     rd
+            phi     r9
             ldi     low 500
-            plo     rd
+            plo     r9
             ldi     0
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_ok
 
             ; --- check 4: byte at position 500 == 500 & 0xFF = 244 ---
@@ -231,13 +200,12 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     high 1199
-            phi     rd
+            phi     r9
             ldi     low 1199
-            plo     rd
+            plo     r9
             ldi     0
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_ok
 
             ; --- check 6: byte at 1199 == 1199 & 0xFF = 175 ---
@@ -265,13 +233,12 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     high SEEK_FILE_LEN
-            phi     rd
+            phi     r9
             ldi     low SEEK_FILE_LEN
-            plo     rd
+            plo     r9
             ldi     0
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_ok
 
             ; --- check 8: read at EOF returns 0 bytes ---
@@ -289,13 +256,12 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     high 200
-            phi     rd
+            phi     r9
             ldi     low 200
-            plo     rd
+            plo     r9
             ldi     0
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    K_FILE_SEEK
             lbdf    sk_setup_err        ; the SEEK_SET(200) itself
                                         ; must succeed -- not one of
@@ -313,13 +279,12 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     0
-            phi     rd
+            phi     r9
             ldi     100
-            plo     rd
+            plo     r9
             ldi     1                   ; SEEK_CUR
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_ok
 
             ; --- check 10: byte at 300 == 300 & 0xFF = 44 ---
@@ -340,13 +305,12 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     high 200
-            phi     rd
+            phi     r9
             ldi     low 200
-            plo     rd
+            plo     r9
             ldi     0
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    K_FILE_SEEK
             lbdf    sk_setup_err
 
@@ -362,13 +326,12 @@ sk_fill_done:
             ldi     $FF
             plo     ra                  ; RA = $FFFF (sign-extended -1)
             ldi     $FF
-            phi     rd
+            phi     r9
             ldi     $9C                 ; -100 = $FF9C
-            plo     rd
+            plo     r9
             ldi     1                   ; SEEK_CUR
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_ok
 
             ; --- check 12: byte at 100 == 100 ---
@@ -396,12 +359,11 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     0
-            phi     rd
-            plo     rd
+            phi     r9
+            plo     r9
             ldi     2                   ; SEEK_END
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_ok
 
             ; ================================================
@@ -422,13 +384,12 @@ sk_fill_done:
             ldi     $FF
             plo     ra
             ldi     $FF
-            phi     rd
+            phi     r9
             ldi     $FF                 ; -1 = $FFFF
-            plo     rd
+            plo     r9
             ldi     2                   ; SEEK_END
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_ok
 
             ; --- check 15: byte at 1199 == 175 (matches check 6) ---
@@ -449,12 +410,11 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     0
-            phi     rd
-            plo     rd
+            phi     r9
+            plo     r9
             ldi     3                   ; invalid whence
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_err
 
             ; ================================================
@@ -469,13 +429,12 @@ sk_fill_done:
             ldi     $FF
             plo     ra
             ldi     $FF
-            phi     rd
+            phi     r9
             ldi     $FF
-            plo     rd
+            plo     r9
             ldi     0                   ; SEEK_SET
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_err
 
             ; ================================================
@@ -488,13 +447,12 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     high 1201
-            phi     rd
+            phi     r9
             ldi     low 1201
-            plo     rd
+            plo     r9
             ldi     0                   ; SEEK_SET
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_err
 
             ; ================================================
@@ -508,13 +466,12 @@ sk_fill_done:
             phi     ra
             plo     ra
             ldi     high 100
-            phi     rd
+            phi     r9
             ldi     low 100
-            plo     rd
+            plo     r9
             ldi     0
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    K_FILE_SEEK
             lbdf    sk_setup_err
 
@@ -523,13 +480,12 @@ sk_fill_done:
             ldi     $FF
             plo     ra
             ldi     $FF
-            phi     rd
+            phi     r9
             ldi     $38                 ; -200 = $FF38
-            plo     rd
+            plo     r9
             ldi     1                   ; SEEK_CUR
             plo     rc
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    sk_expect_err
 
             ; --- check 20: position after the failed seek above is
@@ -543,8 +499,7 @@ sk_fill_done:
             call    sk_expect_readbyte
 
             ; --- close the read handle ---
-            mov     rf, sk_handle
-            ldn     rf
+            mov     rd, sk_fcb
             call    K_FILE_CLOSE
 
             ; --- summary ---
@@ -594,12 +549,12 @@ sk_setup_err:
 
 ;------------------------------------------------------------------
 ; sk_expect_ok: call K_FILE_SEEK with its args already loaded by the
-; caller (D/RC/RA/RD), expecting success (DF=0); then compares the
+; caller (RD/RC/RA/R9), expecting success (DF=0); then compares the
 ; returned position (RD) against sk_expected (memory -- NOT a
 ; register carried across the call, since file_seek's own documented
-; Modifies list clobbers R7-R9/RA-RC/RF, so nothing but D-in/DF-out/
+; Modifies list clobbers R7-R9/RA-RC/RF, so nothing but RD-in/DF-out/
 ; RD-out can be trusted to survive it).
-; Args:    D/RC/RA/RD = K_FILE_SEEK's own args; sk_expected must
+; Args:    RD/RC/RA/R9 = K_FILE_SEEK's own args; sk_expected must
 ;          already hold the expected resulting position.
 ; Returns: nothing (prints PASS/FAIL, updates sk_fail_count)
 ;------------------------------------------------------------------
@@ -630,7 +585,7 @@ sk_unexpected_fail:
 
 ;------------------------------------------------------------------
 ; sk_expect_err: call K_FILE_SEEK with its args already loaded by the
-; caller (D/RC/RA/RD), expecting failure (DF=1).
+; caller (RD/RC/RA/R9), expecting failure (DF=1).
 ;------------------------------------------------------------------
 sk_expect_err:
             call    K_FILE_SEEK
@@ -650,8 +605,8 @@ sk_unexpected_ok:
             rtn
 
 ;------------------------------------------------------------------
-; sk_expect_readbyte: K_FILE_READ exactly 1 byte via sk_handle (the
-; already-open read handle) into sk_readbuf, and compare it against
+; sk_expect_readbyte: K_FILE_READ exactly 1 byte via sk_fcb (the
+; already-open read FCB) into sk_readbuf, and compare it against
 ; sk_expected_byte (a single byte, since every ramp value is 0-255).
 ;------------------------------------------------------------------
 sk_expect_readbyte:
@@ -660,8 +615,8 @@ sk_expect_readbyte:
             phi     rc
             ldi     1
             plo     rc
-            mov     ra, sk_handle
-            ldn     ra
+            mov     rd, sk_fcb          ; RD = FCB pointer (fixed --
+                                        ; RF/RC untouched)
             call    K_FILE_READ
             lbdf    sk_readbyte_ioerr
 
@@ -703,7 +658,7 @@ sk_readbyte_wrongcount:
             rtn
 
 ;------------------------------------------------------------------
-; sk_expect_eof: K_FILE_READ 1 byte via sk_handle, expecting exactly
+; sk_expect_eof: K_FILE_READ 1 byte via sk_fcb, expecting exactly
 ; 0 bytes transferred (EOF), with no I/O error.
 ;------------------------------------------------------------------
 sk_expect_eof:
@@ -712,8 +667,8 @@ sk_expect_eof:
             phi     rc
             ldi     1
             plo     rc
-            mov     ra, sk_handle
-            ldn     ra
+            mov     rd, sk_fcb          ; RD = FCB pointer (fixed --
+                                        ; RF/RC untouched)
             call    K_FILE_READ
             lbdf    sk_eof_ioerr
 
@@ -776,8 +731,6 @@ sk_check_eq16_fail:
             rtn
 
 sk_fail_count:      db      0
-sk_whandle:          db      0
-sk_handle:           db      0
 sk_expected:         dw      0
 sk_expected_byte:    db      0
 sk_name:             db      "SEEKTST.DAT",0

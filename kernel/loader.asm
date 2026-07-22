@@ -42,7 +42,6 @@
             extrn   mem_base
             extrn   mem_top
             extrn   _switch_drive
-            extrn   fd_table
             extrn   shell_drive
             extrn   shell_elba
             extrn   shell_eoff
@@ -56,7 +55,6 @@
 ; same-file data references (required even within the same file)
             extrn   prog_fcb
             extrn   prog_iobuf
-            extrn   prog_handle
             extrn   prog_size
             extrn   prun_argv
             extrn   prun_argc
@@ -64,16 +62,16 @@
 
 ; ----------------------------------------------------------------
 ; _prog_finish_load: shared tail for both prog_run and
-; prog_run_shell, once a handle is already open in prog_handle --
-; read the whole file to PROG_BASE, close it, validate the 'EDF'
-; magic, and compute/publish mem_base. This is everything the old
-; prog_load did AFTER its own file_open call; factored out so
-; prog_run_shell's own direct-FCB-population "open" (see below) can
-; share it without duplicating this logic.
-; Args:    none (prog_handle already set to an open handle)
+; prog_run_shell, once prog_fcb is already open -- read the whole file
+; to PROG_BASE, close it, validate the 'EDF' magic, and
+; compute/publish mem_base. This is everything the old prog_load did
+; AFTER its own file_open call; factored out so prog_run_shell's own
+; direct-FCB-population "open" (see below) can share it without
+; duplicating this logic.
+; Args:    none (prog_fcb already populated/open)
 ; Returns: DF = 0 on success (PROG_BASE holds the loaded program,
 ;          mem_base/LOADER_ARGS updated), DF = 1 on error (read error
-;          or bad magic) -- the handle is always closed either way
+;          or bad magic) -- prog_fcb is always closed either way
 ; Modifies: R7, R8, R9, RB, RC, RD, RF
 ; ----------------------------------------------------------------
             proc    _prog_finish_load
@@ -96,11 +94,10 @@
             smb                         ; D = mem_top.hi - PROG_BASE.hi - borrow
             phi     rc                  ; RC = available space (mem_top - PROG_BASE)
 
-            mov     rf, prog_handle
-            ldn     rf                  ; D = handle
-            plo     r9                  ; stash it (mov below clobbers D)
+            mov     rd, prog_fcb        ; RD = FCB pointer (fixed --
+                                        ; no handle to stash/reload
+                                        ; anymore)
             mov     rf, PROG_BASE       ; RF = destination
-            glo     r9                  ; D = handle (reloaded, correct)
             call    file_read           ; RC = bytes read, DF=0/1
             lbdf    pfl_read_err
 
@@ -111,8 +108,7 @@
             glo     rc
             str     rf                  ; prog_size = bytes loaded
 
-            mov     rf, prog_handle
-            ldn     rf                  ; D = handle
+            mov     rd, prog_fcb
             call    file_close
 
             ; validate the 'EDF' magic header
@@ -181,8 +177,7 @@
 
 pfl_read_err:
             ; file_read failed: still need to close what was opened
-            mov     rf, prog_handle
-            ldn     rf
+            mov     rd, prog_fcb
             call    file_close
 pfl_bad_magic:
             stc                         ; DF = 1, error
@@ -279,18 +274,10 @@ pfl_bad_magic:
                                         ; real tail pointer is already
                                         ; stashed above)
             ldi     0                   ; mode = read
-            call    file_open           ; D = handle, DF=0/1
+            call    file_open           ; DF=0/1 (D unspecified --
+                                        ; prog_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    prun_err            ; not found
-
-            ; BUG FIX pattern preserved from the pre-simplification
-            ; code: "mov rf, prog_handle" itself clobbers D (gotcha #4),
-            ; so the handle file_open just returned in D has to be
-            ; stashed in a spare register first, or it doesn't survive
-            ; to the "str rf" below.
-            plo     r9                  ; stash handle
-            mov     rf, prog_handle
-            glo     r9                  ; D = handle (reloaded)
-            str     rf                  ; prog_handle = handle
 
             call    _prog_finish_load
             lbdf    prun_err
@@ -531,55 +518,9 @@ prun_err:
             ldn     rf
             str     rb                  ; FCB_DRIVE
 
-            ; --- register into a free fd_table slot, exactly as
-            ; file_open's own fopen_found does ---
-            ldi     0
-            plo     rc                  ; RC.0 = index = 0
-            mov     rf, fd_table
-
-prsh_scan:
-            glo     rc
-            xri     FD_COUNT
-            lbz     prsh_fallback       ; no free slot: fallback (very
-                                        ; unlikely -- the previous
-                                        ; command's own FCBs should
-                                        ; already be closed by now)
-            lda     rf
-            lbnz    prsh_next
-            ldn     rf
-            lbz     prsh_found
-prsh_next:
-            inc     rf
-            glo     rc
-            adi     1
-            plo     rc
-            lbr     prsh_scan
-
-prsh_found:
-            dec     rf
-            ; BUG FIX: file_open's own analogous fopen_found copies a
-            ; caller's FCB pointer OUT of fo_fcb, a 2-byte variable
-            ; that HOLDS a pointer value (via lda/ldn, dereferencing
-            ; it) -- prog_fcb here is not that shape at all, it IS the
-            ; FCB struct itself (ds FCB_LEN). The fix is to take RD's
-            ; own value after "mov rd, prog_fcb" (the struct's
-            ; address) directly via ghi/glo, NOT to dereference it --
-            ; the original lda/ldn version instead copied the FCB's
-            ; own first two content bytes (FCB_FLAGS and half of
-            ; FCB_SCLUST) into fd_table, leaving the handle resolving
-            ; to garbage memory ever after.
-            mov     rd, prog_fcb        ; RD = &prog_fcb (the address
-                                        ; itself)
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; fd_table[index] = &prog_fcb
-
-            mov     rf, prog_handle
-            glo     rc
-            str     rf                  ; prog_handle = index
-
+            ; no fd_table registration needed anymore -- prog_fcb is
+            ; already the FCB pointer _prog_finish_load (and every
+            ; other file_* consumer) will reference directly
             call    _prog_finish_load
             lbdf    prsh_fallback
 
@@ -604,17 +545,16 @@ kshell_path:    db      "C:/bin/shell",0
 ; prog_fcb/prog_iobuf: this kernel's own dedicated, permanently
 ; resident FCB + 512-byte I/O buffer, used only for loading program
 ; binaries (see prog_run's own comment on why it can't use a
-; program-supplied FCB the way ordinary file I/O does). prog_handle
-; is the fd_table index file_open (or prog_run_shell's own direct
-; registration) returned for prog_fcb. prun_argv/prun_argc are
-; prog_run's own stash for the caller's argv pointer/argc across the
-; load sequence (see its own comment).
+; program-supplied FCB the way ordinary file I/O does) -- referenced
+; directly (RD = prog_fcb) by every file_* call involved in loading,
+; no separate handle needed. prun_argv/prun_argc are prog_run's own
+; stash for the caller's argv pointer/argc across the load sequence
+; (see its own comment).
 ;------------------------------------------------------------------
             proc    _loader_data
 
 prog_fcb:       ds      FCB_LEN
 prog_iobuf:     ds      SECTOR_SIZE
-prog_handle:    db      0
 prog_size:      dw      0           ; bytes actually loaded (for mem_base calc)
 prun_argv:      dw      0           ; prog_run's own argv-pointer stash
 prun_argc:      dw      0           ; prog_run's own argc stash
@@ -622,7 +562,6 @@ saved_sp:       dw      0           ; kernel's R2 across _prog_exec_now's call
 
                 public  prog_fcb
                 public  prog_iobuf
-                public  prog_handle
                 public  prog_size
                 public  prun_argv
                 public  prun_argc

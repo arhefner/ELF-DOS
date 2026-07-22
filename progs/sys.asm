@@ -115,27 +115,26 @@ start:
                                         ; point, and RF still holds the
                                         ; filename pointer independently)
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; sys_fcb_struct is a fixed
+                                        ; address, nothing to capture)
             lbdf    open_error
 
-            ; BUG-CLASS GUARD: stash the handle before "mov rf, ..."
-            ; clobbers D -- saved_handle is what K_FILE_CLOSE uses below,
-            ; after sys_install (a leaf worker that clobbers everything)
-            ; has long since destroyed D's original value.
-            plo     r8                  ; R8.0 = handle (temp)
-            mov     rf, saved_handle
-            glo     r8
-            str     rf                  ; saved_handle = handle
-
-            glo     r8                  ; D = handle again, for sys_install
+            mov     rd, sys_fcb_struct  ; RD = FCB pointer, passed to
+                                        ; sys_install as its own
+                                        ; argument -- see progs/mr.asm's
+                                        ; identical note on why this
+                                        ; stays an explicit argument
+                                        ; rather than sys_install
+                                        ; referencing sys_fcb_struct
+                                        ; directly
             call    sys_install         ; D = result code (0 = success)
             ; BUG-CLASS GUARD (see progs/type.asm/wtest.asm): stash the
             ; result before "mov rf, ..." for K_FILE_CLOSE's own arg
             ; setup clobbers D.
             plo     r8                  ; R8.0 = sys_install's result
 
-            mov     rd, saved_handle
-            ldn     rd
+            mov     rd, sys_fcb_struct
             call    K_FILE_CLOSE        ; result/DF here intentionally
                                         ; ignored -- sys_install's own
                                         ; result is what we report
@@ -196,7 +195,6 @@ usage:
 
 sys_fcb_struct: ds      FCB_LEN
 sys_iobuf:      ds      FCB_IOBUF_LEN
-saved_handle:   db      0
 sys_path_ptr:   dw      0
 
 ;==================================================================
@@ -223,7 +221,7 @@ sys_path_ptr:   dw      0
 ; read once here and reused as the first sector written, not
 ; discarded and re-read.
 ;
-; Args:    D = handle of an already-open file (mode 0 -- read);
+; Args:    RD = FCB pointer of an already-open file (mode 0 -- read);
 ;          also reads sys_path_ptr (memory, set by the caller in
 ;          progs/sys.asm's own start before K_FILE_OPEN clobbers RF)
 ;          for this routine's own directory-entry lookup -- the same
@@ -254,10 +252,14 @@ sys_path_ptr:   dw      0
 ;==================================================================
 
             proc    sys_install
-            plo     rc                  ; RC.0 = handle (temp)
             mov     rf, sys_handle
-            glo     rc
-            str     rf                  ; sys_handle = handle
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; sys_handle = RD (the FCB
+                                        ; pointer, received as this
+                                        ; proc's own argument)
 
 ;------------------------------------------------------------------
 ; Resolve the file's size from its own directory entry -- see this
@@ -416,8 +418,14 @@ sys_sectors_done:
             phi     rc
             ldi     0
             plo     rc                  ; RC = 512
-            mov     rd, sys_handle
-            ldn     rd
+            ; RD needs the FCB pointer, a 2-byte value stashed in
+            ; sys_handle -- RB is the scratch address register used to
+            ; fetch it, leaving RF/RC (buffer/count) untouched
+            mov     rb, sys_handle
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = the FCB pointer
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    sys_magic_read_err
 
@@ -485,22 +493,25 @@ sys_extra_no_borrow:
             lbnz    sys_cancelled_err
 
             ; rewind before the write pass -- the magic-check read
-            ; above already consumed the first 512 bytes. New
-            ; K_FILE_SEEK ABI (2026-07-20): D=handle, RC.0=whence,
-            ; RA:RD=32-bit signed offset -- SEEK_SET with offset 0 is
-            ; the equivalent "rewind to start" this call always
-            ; wanted. RF (not RD) is used to fetch the handle byte,
-            ; since RD itself now carries the offset's low word.
+            ; above already consumed the first 512 bytes. K_FILE_SEEK
+            ; ABI (register roles changed 2026-07-21): RD=FCB pointer,
+            ; RC.0=whence, RA:R9=32-bit signed offset -- SEEK_SET with
+            ; offset 0 is the equivalent "rewind to start" this call
+            ; always wanted. RB is the scratch address register used
+            ; to fetch the 2-byte FCB pointer out of sys_handle.
             ldi     0
             phi     ra
             plo     ra                  ; RA = 0 (offset high word)
             ldi     0
-            phi     rd
-            plo     rd                  ; RD = 0 (offset low word)
+            phi     r9
+            plo     r9                  ; R9 = 0 (offset low word)
             ldi     0
             plo     rc                  ; RC.0 = 0 (SEEK_SET)
-            mov     rf, sys_handle
-            ldn     rf                  ; D = handle
+            mov     rb, sys_handle
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = the FCB pointer
             call    K_FILE_SEEK
             lbdf    sys_seek_err
 
@@ -563,8 +574,11 @@ sys_zero_loop:
             plo     rc                  ; RC = 512 again, the request
                                         ; size (independent of what the
                                         ; zero loop above did to it)
-            mov     rd, sys_handle
-            ldn     rd
+            mov     rb, sys_handle
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = the FCB pointer
             call    K_FILE_READ
             lbdf    w_read_err
 
@@ -805,7 +819,9 @@ sys_confirm_no:
             ldi     1                   ; declined
             rtn
 
-sys_handle:             db      0
+sys_handle:             dw      0           ; the FCB pointer (2 bytes
+                                            ; -- was a 1-byte small-int
+                                            ; handle)
 sys_statname_ptr:       dw      0
 sys_dirent_buf:         ds      DIRENT_LEN
 sys_size_hi:            db      0

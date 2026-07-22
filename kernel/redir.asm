@@ -387,13 +387,18 @@ rs_out_open:
 rs_out_trunc:
             ldi     1                   ; write (create/truncate)
 rs_out_domode:
-            call    file_open           ; D = handle, DF = 0/1
+            call    file_open           ; DF = 0/1 (D unspecified --
+                                        ; output redirect always uses
+                                        ; prog_fcb, a fixed address,
+                                        ; nothing to capture from D)
             lbdf    rs_err
-            plo     r9                  ; stash handle (mov below
-                                        ; clobbers D -- gotcha #4)
-            mov     rf, redir_out_handle
-            glo     r9
-            str     rf
+            mov     rf, prog_fcb        ; RF = prog_fcb's own address
+            mov     rb, redir_out_handle
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; redir_out_handle = &prog_fcb
             mov     rf, redir_out_active
             ldi     $FF
             str     rf
@@ -451,12 +456,17 @@ rs_in_single:
             mov     rd, prog_fcb
             mov     ra, prog_iobuf
             ldi     0                   ; read
-            call    file_open
+            call    file_open           ; DF = 0/1 (D unspecified --
+                                        ; prog_fcb again, nothing to
+                                        ; capture)
             lbdf    rs_err
-            plo     r9
-            mov     rf, redir_in_handle
-            glo     r9
-            str     rf
+            mov     rf, prog_fcb
+            mov     rb, redir_in_handle
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; redir_in_handle = &prog_fcb
             mov     rf, redir_in_active
             ldi     $FF
             str     rf
@@ -480,6 +490,22 @@ rs_in_dual:
             add16   ra, FCB_LEN         ; RA = dynamic iobuf, right
                                         ; after the FCB
 
+            ; stash the dynamic FCB's own address into redir_in_handle
+            ; NOW, before R9 gets reused as scratch below by the
+            ; filename reload -- unlike the fixed-prog_fcb cases above,
+            ; this address is only known at runtime, so it can't be
+            ; recomputed later the way "mov rf, prog_fcb" can. Safe to
+            ; do before file_open even attempts the open: redir_in_handle
+            ; is only ever read once redir_in_active is set, which
+            ; doesn't happen until file_open actually succeeds below.
+            mov     rf, redir_in_handle
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf                  ; redir_in_handle = R9 (the
+                                        ; dynamic FCB address)
+
             ; re-read the target filename fresh from memory rather
             ; than trusting a register to have survived the
             ; _redir_reserve call just made (it uses RB internally --
@@ -492,12 +518,8 @@ rs_in_dual:
             mov     rf, r8
 
             ldi     0                   ; read
-            call    file_open
+            call    file_open           ; DF = 0/1 (D unspecified)
             lbdf    rs_err_undo_reserve
-            plo     r9
-            mov     rf, redir_in_handle
-            glo     r9
-            str     rf
             mov     rf, redir_in_active
             ldi     $FF
             str     rf
@@ -530,7 +552,10 @@ rs_err_maybe_close_out:
             lbnz    rs_err_out_clear    ; NUL: nothing to close
 
             mov     ra, redir_out_handle
+            lda     ra
+            phi     rd
             ldn     ra
+            plo     rd                  ; RD = the FCB pointer
             call    file_close
 
 rs_err_out_clear:
@@ -582,7 +607,10 @@ rs_ok:
                                         ; handle
 
             mov     ra, redir_out_handle
+            lda     ra
+            phi     rd
             ldn     ra
+            plo     rd                  ; RD = the FCB pointer
             call    file_close
 
 rt_out_clear:
@@ -603,7 +631,10 @@ rt_in:
             lbnz    rt_in_clear         ; NUL: nothing was opened
 
             mov     ra, redir_in_handle
+            lda     ra
+            phi     rd
             ldn     ra
+            plo     rd                  ; RD = the FCB pointer
             call    file_close
 
 rt_in_clear:
@@ -678,8 +709,12 @@ rt_release:
             ldi     1
             plo     rc                  ; RC = 1 (one byte)
             mov     ra, redir_out_handle
-            ldn     ra                  ; D = handle (loaded last --
-                                        ; every mov above clobbers D)
+            lda     ra
+            phi     rd
+            ldn     ra
+            plo     rd                  ; RD = the FCB pointer (loaded
+                                        ; via RA scratch, leaving RF/RC
+                                        ; untouched)
             call    file_write
 
             pop     ra
@@ -757,7 +792,10 @@ rmsg_scandone:
                                         ; start (file_write's own
                                         ; source buffer argument)
             mov     ra, redir_out_handle
-            ldn     ra                  ; D = handle (loaded last)
+            lda     ra
+            phi     rd
+            ldn     ra
+            plo     rd                  ; RD = the FCB pointer
             call    file_write
 
             pop     ra
@@ -916,7 +954,14 @@ kim_scan:
             ; --- redirected: one file_write call for the whole run ---
             mov     rf, r9              ; RF = kim_start (still in R9)
             mov     ra, redir_out_handle
-            ldn     ra                  ; D = handle (loaded last)
+            lda     ra
+            phi     rd
+            ldn     ra
+            plo     rd                  ; RD = the FCB pointer (RD's
+                                        ; caller-visible value is
+                                        ; already saved via push rd at
+                                        ; entry, free to use internally
+                                        ; here)
             call    file_write
             lbr     kim_restore
 
@@ -1031,7 +1076,10 @@ kim_restore:
             ldi     1
             plo     rc
             mov     ra, redir_in_handle
-            ldn     ra                  ; D = handle (loaded last)
+            lda     ra
+            phi     rd
+            ldn     ra
+            plo     rd                  ; RD = the FCB pointer
             call    file_read           ; RC = bytes actually read
             lbdf    rrd_eof             ; I/O error: treat like EOF
             glo     rc
@@ -1176,7 +1224,10 @@ kir_loop:
             ldi     1
             plo     rc
             mov     ra, redir_in_handle
-            ldn     ra                  ; D = handle (loaded last)
+            lda     ra
+            phi     rd
+            ldn     ra
+            plo     rd                  ; RD = the FCB pointer
             call    file_read
             lbdf    kir_eof             ; I/O error: treat like EOF
 
@@ -1326,13 +1377,18 @@ kir_console:
             proc    _redir_data
 
 redir_out_active:      db      0
-redir_out_handle:      db      0
+redir_out_handle:      dw      0   ; the real FCB pointer (prog_fcb, or
+                                    ; the dynamically-reserved dual-
+                                    ; redirect address) -- 2 bytes,
+                                    ; unlike the old small-int handle,
+                                    ; since it's used directly as a
+                                    ; K_FILE_* argument now
 redir_out_null:        db      0   ; set when the output target is the
                                     ; NUL device -- redir_out_handle is
                                     ; meaningless in that case, no real
                                     ; FCB was ever opened
 redir_in_active:        db      0
-redir_in_handle:        db      0
+redir_in_handle:        dw      0   ; same as redir_out_handle, input side
 redir_in_null:          db      0   ; same as redir_out_null, input side
 redir_stack_reserved:   db      0   ; set only while a dual-redirect's
                                     ; dynamic stack reservation is

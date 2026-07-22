@@ -753,23 +753,6 @@ dir_buf:        ds      SECTOR_SIZE
                 public  dir_buf
 
 ; ----------------------------------------------------------------
-; fd_table -- FD_COUNT pointers into caller-allocated FCB memory
-; (2026-07-15). Replaces the old fixed-size fcb_table (FCB_COUNT=3
-; full 32-byte FCBs) and the single shared io_buf (arbitrated by a
-; global io_owner byte) -- FCB storage AND each FCB's own 512-byte
-; I/O buffer now live in the caller's own memory (a program, or this
-; kernel's own prog_run for its one internal need, see loader.asm).
-; file_open registers a caller's FCB pointer into a free (zero) slot
-; here and returns the slot index as the handle, exactly as before;
-; file_close/file_read/file_write/file_seek resolve that same index
-; back through this table to the real FCB pointer. A free slot holds
-; 0, which a real FCB address never is.
-; ----------------------------------------------------------------
-fd_table:       ds      FD_COUNT * 2
-
-                public  fd_table
-
-; ----------------------------------------------------------------
 ; Memory map -- exported to user programs at load time
 ;
 ; mem_top: last usable RAM byte (set once at boot from f_freemem)

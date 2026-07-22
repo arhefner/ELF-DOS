@@ -38,7 +38,6 @@
 ; file -- see CLAUDE.md gotcha #6)
             extrn   batch_fcb
             extrn   batch_iobuf
-            extrn   batch_handle
             extrn   batch_scratch
             extrn   brl_count
 
@@ -70,15 +69,10 @@
                                         ; own caller-FCB argument)
             mov     ra, batch_iobuf     ; RA = our own I/O buffer
             ldi     0                   ; mode = read
-            call    file_open           ; D = handle, DF = 0/1
+            call    file_open           ; DF = 0/1 (D unspecified --
+                                        ; batch_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    bst_reject
-
-            ; stash the handle BEFORE the mov below clobbers D (gotcha
-            ; #4)
-            plo     r9
-            mov     rf, batch_handle
-            glo     r9
-            str     rf                  ; batch_handle = handle
 
             ; a NEW batch never inherits a PREVIOUS batch's echo-off
             ; mode -- RUN_BATCH_ECHO_OFF is deliberately NOT reset per
@@ -99,7 +93,7 @@ bst_reject:
 
 ; ----------------------------------------------------------------
 ; batch_readline: fetch the next line of the active batch script.
-; Args:    none (uses batch_fcb/batch_handle)
+; Args:    none (uses batch_fcb)
 ; Returns: DF = 0 with LINE_BUF holding the next line (null-
 ;          terminated, CR/LF stripped) if a batch is active and a line
 ;          was available; DF = 1 if no batch is active, or the batch
@@ -147,12 +141,9 @@ brl_loop:
             phi     rc
             ldi     1
             plo     rc                  ; RC = 1 (read 1 byte)
-            mov     ra, batch_handle    ; RA -> batch_handle (RF/RC
-                                        ; must stay untouched by this --
-                                        ; use RA, not RF, to reach it)
-            ldn     ra                  ; D = handle (fresh, correct --
-                                        ; nothing after this clobbers D
-                                        ; before the call)
+            mov     rd, batch_fcb       ; RD = FCB pointer (fixed --
+                                        ; RF/RC untouched, matching the
+                                        ; old comment's own reasoning)
             call    file_read           ; RC = bytes read, DF = 0/1
             lbdf    brl_ioerr
 
@@ -215,8 +206,7 @@ brl_eof:
             ldn     rf
             lbnz    brl_term
 
-            mov     ra, batch_handle
-            ldn     ra
+            mov     rd, batch_fcb
             call    file_close
             mov     rf, batch_fcb
             ldi     0
@@ -230,8 +220,7 @@ brl_ioerr:
             ; a real I/O error mid-batch: treat the same as EOF --
             ; close, clear state, report "no line" -- rather than
             ; leaving the batch wedged open with no way to advance
-            mov     ra, batch_handle
-            ldn     ra
+            mov     rd, batch_fcb
             call    file_close
             mov     rf, batch_fcb
             ldi     0
@@ -248,8 +237,6 @@ brl_ioerr:
 
 batch_fcb:      ds      FCB_LEN
 batch_iobuf:    ds      SECTOR_SIZE
-batch_handle:   db      0           ; fd_table index while a batch's
-                                    ; FCB is open
 batch_scratch:  db      0           ; 1-byte read scratch for
                                     ; batch_readline's byte-at-a-time
                                     ; loop
@@ -262,7 +249,6 @@ brl_count:      db      0           ; characters written to LINE_BUF so
 
                 public  batch_fcb
                 public  batch_iobuf
-                public  batch_handle
                 public  batch_scratch
                 public  brl_count
 

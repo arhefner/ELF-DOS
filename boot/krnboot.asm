@@ -779,7 +779,12 @@ boot_drive_copy:
 ;--------------------------------------------------------------
 
             call        K_FAT_INIT          ; invalidate FAT cache, clear dirty flag
-            call        K_FILE_INIT         ; mark all FCB slots as free
+            call        K_FILE_INIT         ; no-op (kept for symmetry
+                                            ; with the other _INIT
+                                            ; slots -- no kernel-
+                                            ; resident file-layer state
+                                            ; left to clear, see
+                                            ; file.asm's own header)
 
             ; K_SHELL_INIT (2026-07-13): locate "C:/bin/shell"'s own
             ; directory entry and cache its (drive, sector LBA, byte
@@ -787,9 +792,10 @@ boot_drive_copy:
             ; kernel.asm's own kernel_shell_init for the full mechanism
             ; and why (run_loop's own reload of the shell every command
             ; cycle reads that cached location directly instead of a
-            ; full directory scan each time). Needs fd_table already
-            ; zeroed (K_FILE_INIT, just above), and works correctly
-            ; this early -- before kernel_init's own cur_drive/
+            ; full directory scan each time). kernel_shell_init calls
+            ; _find_dirent directly, never file_open, so it has no
+            ; dependency on K_FILE_INIT above -- works correctly this
+            ; early -- before kernel_init's own cur_drive/
             ; drive_cur_dir zero-init has run -- only because the path
             ; it searches always has an explicit "C:" prefix (see
             ; kernel_shell_init's own header comment).

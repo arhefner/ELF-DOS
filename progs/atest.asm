@@ -55,13 +55,10 @@ start:
                                         ; before the mode load below,
                                         ; since mov clobbers D)
             ldi     2                   ; mode = append
-            call    K_FILE_OPEN         ; D = handle, DF=0/1
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; atest_fcb is a fixed address,
+                                        ; nothing to capture)
             lbdf    not_found
-
-            plo     rd                  ; stash handle (mov below clobbers D)
-            mov     rf, atest_handle
-            glo     rd
-            str     rf                  ; atest_handle = handle
 
             mov     rf, remaining
             ldi     REPEAT_COUNT
@@ -78,10 +75,8 @@ write_loop:
             ldi     0
             phi     rc                  ; RC = byte count
 
-            ; see progs/wtest.asm's own note: RD (not RF) is used to
-            ; fetch the handle so RF stays pointed at test_line
-            mov     rd, atest_handle
-            ldn     rd                  ; D = handle, RF untouched
+            mov     rd, atest_fcb       ; RD = FCB pointer (fixed --
+                                        ; RF stays pointed at test_line)
             call    K_FILE_WRITE        ; RC = bytes written, DF=0/1
             lbdf    write_error
 
@@ -93,8 +88,7 @@ write_loop:
             lbr     write_loop
 
 write_done:
-            mov     rd, atest_handle
-            ldn     rd
+            mov     rd, atest_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Append test complete.",13,10,0
@@ -102,8 +96,7 @@ write_done:
             rtn
 
 write_error:
-            mov     rd, atest_handle
-            ldn     rd
+            mov     rd, atest_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Write error.",13,10,0
@@ -125,7 +118,6 @@ usage:
 test_line:      db      "abcdefghij",10
 atest_fcb:      ds      FCB_LEN
 atest_iobuf:    ds      FCB_IOBUF_LEN
-atest_handle:   db      0
 remaining:      db      0
 
             end     start

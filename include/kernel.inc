@@ -258,20 +258,17 @@ DRIVE_COUNT:        equ     4
 ; ----------------------------------------------------------------
 ; FCB (File Control Block) structure offsets
 ;
-; Each FCB is FCB_LEN bytes. CALLER-ALLOCATED (2026-07-15): the
-; kernel no longer maintains a fixed-size table of full FCBs -- the
-; caller (a program, or the kernel's own prog_run for its one
-; internal need) owns the memory and passes a pointer to file_open.
-; Handles stay small integers, exactly as before (needed for the
-; future ELFC C library's own low-level I/O convention): file_open
-; registers the caller's FCB pointer into a small kernel-resident
-; table of just POINTERS (fd_table, FD_COUNT slots, see below) and
-; returns the slot index; file_close/file_read/file_write/file_seek
-; still take that same index, now resolved via one extra pointer
-; dereference instead of a direct fcb_table-relative computation.
-; This raises the old hard 3-concurrent-file ceiling to FD_COUNT (8)
-; while making the kernel-resident table itself smaller (FD_COUNT*2
-; bytes of pointers vs. the old FCB_COUNT*32 bytes of full FCBs).
+; Each FCB is FCB_LEN bytes. CALLER-ALLOCATED (2026-07-15), FCB
+; POINTER IS THE HANDLE (2026-07-21): the kernel no longer maintains
+; any table of FCBs, full or otherwise -- the caller (a program, or
+; the kernel's own prog_run/batch_start/redir for their own internal
+; needs) owns the memory and passes a pointer to file_open.
+; file_close/file_read/file_write/file_seek all take that same FCB
+; pointer directly (in RD) -- there used to be an intermediate
+; small-integer "handle" resolved through a kernel-resident lookup
+; table (fd_table), removed entirely since the caller's own FCB
+; pointer already uniquely identifies "which file" and the table added
+; nothing but a hard 8-concurrent-file cap.
 ;
 ; File size and position are stored as 4-byte big-endian values.
 ; On this 16K-64K machine the high words will normally be zero,
@@ -332,12 +329,6 @@ FCB_F_IOVALID:  equ     $10         ; this FCB's own IOBUF currently holds
                                     ; on any cluster/sector wrap, and on
                                     ; seek). Per-FCB replacement for the
                                     ; old global io_owner comparison.
-
-; fd_table: kernel-resident array of FD_COUNT pointers (see
-; kernel/kernel.asm) -- file_open registers a caller's FCB pointer
-; into a free (zero) slot here and returns the slot index; a real
-; FCB's address is never 0, so 0 unambiguously means "free."
-FD_COUNT:       equ     8
 
 ; ----------------------------------------------------------------
 ; Path and drive conventions
