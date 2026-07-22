@@ -28,12 +28,33 @@
 ; entry point). Only the rare case of redirecting BOTH output and
 ; input on the same command line needs a second, simultaneously-open
 ; FCB+iobuf pair -- rather than a second permanent 544-byte
-; allocation, that pair is carved dynamically out of the top of RAM by
-; relocating the hardware stack (R2) and mem_top down by
-; REDIR_RESERVE_LEN bytes for the duration of that one command, then
-; reversed in _redir_teardown. See _redir_reserve/_redir_release below
-; for the mechanism, and CLAUDE.md for the full design writeup.
+; allocation, that pair is carved dynamically out of RAM by reducing
+; mem_top by REDIR_RESERVE_LEN bytes for the duration of that one
+; command, then reversed in _redir_teardown. See _himem_reserve/
+; _himem_release below for the mechanism, and CLAUDE.md for the full
+; design writeup.
 ;
+; _himem_reserve/_himem_release (GENERALIZED 2026-07-21, from this
+; file's original redirect-only _redir_reserve/_redir_release; fully
+; REDESIGNED 2026-07-22 -- see _himem_reserve's own header for the
+; incident that forced it): the same mem_top-adjustment mechanism is
+; now also used by kernel/glob.asm's dynamic glob-expansion-buffer
+; reservation, so it's a length-parameterized (RC), flag-agnostic PURE
+; MECHANISM -- each caller (this file's own _redir_setup/
+; _redir_teardown, and kernel/glob.asm) tracks its own "is my
+; reservation active" flag and passes its own length. This matters for
+; correctness, not just code reuse: a resolved command's own dual-
+; redirect reservation can be active NESTED INSIDE an already-active
+; glob reservation (glob reserves while the shell runs and writes
+; expanded argv text; a dual-redirect reservation for the CHILD
+; command that shell resolved to happens later, inside that child's
+; own prog_run call) -- both must adjust mem_top relative to whatever
+; it CURRENTLY is, never an assumed baseline, which only works
+; reliably if both go through one shared routine. The hardware stack
+; (R2) is NEVER touched by either routine -- it lives permanently in
+; STACK_RESERVE_LEN bytes at the true top of RAM (kernel.inc, set once
+; at boot), completely independent of mem_top or of how many
+; reservations are currently stacked up beneath it.
 
 #include    include/opcodes.def
 #include    include/bios.inc
@@ -56,8 +77,8 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
 
 ; same-file cross-proc routine references (required even within the
 ; same file -- see CLAUDE.md gotcha #6)
-            extrn   _redir_reserve
-            extrn   _redir_release
+            extrn   _himem_reserve
+            extrn   _himem_release
             extrn   _is_nul_device
 
 ; same-file cross-proc data references (required even within the same
@@ -70,6 +91,7 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   redir_in_null
             extrn   redir_stack_reserved
             extrn   redir_scratch
+            extrn   himem_scratch
             extrn   kim_start
             extrn   kim_resume
             extrn   kim_ptr
@@ -79,46 +101,57 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   kir_count
 
 ; ----------------------------------------------------------------
-; _redir_reserve: relocate the hardware stack (R2) down by
-; REDIR_RESERVE_LEN bytes and reduce mem_top to match, freeing that
-; much RAM at the (old) top of RAM for a second FCB+iobuf pair -- used
-; only for the rare case of a single command redirecting BOTH output
-; and input at once (see the module header; the common single-
-; direction case reuses prog_fcb/prog_iobuf instead, at no extra RAM
-; cost). The freed region's address is simply the new (reduced)
-; mem_top + 1 -- callers recompute it on demand rather than it being
+; _himem_reserve: reduce mem_top by RC bytes, freeing that much RAM at
+; the (old) top of the program-visible heap for the caller's own use.
+; The freed region's address is simply the new (reduced) mem_top + 1
+; -- callers recompute it on demand rather than it being returned/
 ; stashed separately.
 ;
-; Copies however many bytes are currently on the stack (mem_top - R2,
-; computed fresh here, never assumed) from their current locations
-; down to REDIR_RESERVE_LEN-lower locations, then adjusts R2 to match
-; -- a plain byte-copy loop with no calls of its own, so nothing can
-; grow the stack out from under the byte count computed at the top of
-; this routine. Assumes the source/destination ranges don't overlap,
-; i.e. the stack in use here is under REDIR_RESERVE_LEN (544) bytes
-; deep -- true by a wide margin this shallow into the call chain
-; (kernel_init -> run_loop -> prog_run -> _redir_setup ->
-; _redir_reserve). Also assumes nothing else can push onto the stack
-; asynchronously during the copy (no interrupt-driven activity during
-; normal kernel/program execution on this hardware, per the project's
-; own established BIOS conventions elsewhere) -- flagged here since
-; it's the one assumption this routine can't itself verify.
+; REDESIGNED 2026-07-22, after the original stack-relocation approach
+; (copy the hardware stack's live content down by RC bytes, adjust R2
+; to match) was found, via real hardware testing, to be fundamentally
+; incompatible with a reservation whose lifetime spans a call-depth
+; unwind back to a SHALLOWER point than where it was made -- exactly
+; glob's own case (reserved deep inside the shell's own call chain;
+; released only after the shell fully returns AND a whole separate
+; child program has run and returned). R2 naturally rises back toward
+; the true top of RAM as calls unwind, and on real hardware it landed
+; ABOVE the temporarily-reduced mem_top by release time, wrapping the
+; stack_used computation into a huge value and corrupting memory well
+; beyond the copy loop's intended range. See CLAUDE.md's own writeup
+; of this incident for the full diagnostic trail.
 ;
-; Also republishes the reduced mem_top at LOADER_ARGS+2 -- this now
-; runs from inside prog_run (see kernel/loader.asm), AFTER
-; _prog_finish_load has already published the OLD, un-reduced mem_top
-; there for the child to read, so without this a dual-redirected
-; child's own heap code would see a stale, too-high ceiling and could
-; wander into the space just reserved for the second FCB.
+; The user's own fix (2026-07-22): stop moving the stack at all. A
+; fixed STACK_RESERVE_LEN-byte margin at the true top of RAM is
+; permanently reserved for the hardware stack at boot (kernel_init,
+; kernel/kernel.asm) and NEVER adjusted again -- R2 always operates in
+; exactly that fixed region, completely independent of mem_top or of
+; how deep the call chain happens to be at any given moment. Every
+; himem buffer (this file's own dual-redirect FCB pair, kernel/
+; glob.asm's expansion buffer) simply lives BENEATH the current
+; mem_top, addressed via mem_top+1 -- multiple simultaneous
+; reservations stack up underneath each other for free, and nothing
+; here ever reads or writes R2.
 ;
-; Args:    none
-; Returns: DF = 0 on success (mem_top/R2 both reduced,
-;          redir_stack_reserved set), DF = 1 if there isn't enough
-;          headroom above mem_base to safely reserve the space
+; PURE MECHANISM -- no flag of its own (see this file's module header
+; for why: kernel/redir.asm's own dual-redirect reservation and
+; kernel/glob.asm's glob-buffer reservation can be simultaneously
+; active). Each caller tracks its own active flag and is responsible
+; for not calling this a second time on top of an already-active
+; reservation of its own.
+;
+; Also republishes the reduced mem_top at LOADER_ARGS+2 -- keeps
+; whichever program is about to run (or is currently running, for
+; kernel/glob.asm's case) from seeing a stale, too-high heap ceiling
+; that could wander into the space just reserved.
+;
+; Args:    RC = bytes to reserve
+; Returns: DF = 0 on success (mem_top reduced), DF = 1 if there isn't
+;          enough headroom above mem_base to safely reserve the space
 ;          (nothing is changed in that case)
-; Modifies: R7, R8, R9, RB, RD, RF
+; Modifies: R8, RA, RB, RD, RF
 ; ----------------------------------------------------------------
-            proc    _redir_reserve
+            proc    _himem_reserve
 
             mov     rf, mem_top
             lda     rf
@@ -126,75 +159,70 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             ldn     rf
             plo     r8                  ; R8 = mem_top
 
-            mov     r9, r2              ; R9 = current stack pointer
-
-            ; sanity check: new_mem_top = mem_top - RESERVE must stay
-            ; above mem_base
+            ; sanity check computed against mem_base first, so a
+            ; rejected reservation touches nothing
             mov     rf, mem_base
             lda     rf
             phi     rb
             ldn     rf
             plo     rb                  ; RB = mem_base
 
-            mov     r7, r8
-            sub16   r7, REDIR_RESERVE_LEN ; R7 = new_mem_top
-            mov     rd, r7
-            sub16   rd, rb              ; RD = new_mem_top - mem_base,
-                                        ; DF=1 if new_mem_top >= mem_base
-            lbnf    rsv_fail            ; not enough headroom
+            ; R8 -= RC = new_mem_top. Not done via the register-
+            ; register SUB16 macro -- gotcha #18 -- purely out of
+            ; caution left over from the incident above; R2 is never
+            ; live-relevant to this computation in the new design, but
+            ; the SEX-protected scratch path costs almost nothing and
+            ; removes any residual doubt.
+            mov     ra, himem_scratch
+            sex     ra
+            glo     rc
+            str     ra
+            glo     r8
+            sm
+            plo     r8
+            ghi     rc
+            str     ra
+            ghi     r8
+            smb
+            phi     r8
+            sex     r2                  ; restore X = R2 -- everything
+                                        ; else in this codebase assumes
+                                        ; X is always R2
+                                        ; R8 = new_mem_top
 
-            ; stack_used = mem_top - R2
+            ; new_mem_top - mem_base -- SEX-protected, same reasoning
             mov     rd, r8
-            sub16   rd, r9
-
-            ; copy stack_used bytes from [R9+1 .. mem_top] down to
-            ; [R9+1-RESERVE .. mem_top-RESERVE]
-            mov     rf, r9
-            inc     rf                  ; RF = lowest used stack byte
-            mov     rb, rf
-            sub16   rb, REDIR_RESERVE_LEN ; RB = matching destination
-
-rsv_copy:
+            mov     ra, himem_scratch
+            sex     ra
+            glo     rb
+            str     ra
             glo     rd
-            lbnz    rsv_copy_have
+            sm
+            plo     rd
+            ghi     rb
+            str     ra
             ghi     rd
-            lbz     rsv_copy_done       ; stack_used bytes copied
-rsv_copy_have:
-            ldn     rf
-            str     rb
-            inc     rf
-            inc     rb
-            sub16   rd, 1
-            lbr     rsv_copy
-
-rsv_copy_done:
-            mov     rf, r2
-            sub16   rf, REDIR_RESERVE_LEN
-            mov     r2, rf              ; R2 -= RESERVE
+            smb
+            phi     rd
+            sex     r2
+            lbnf    rsv_fail            ; DF=0 (borrow): new_mem_top <
+                                        ; mem_base -- not enough
+                                        ; headroom
 
             mov     rf, mem_top
-            ghi     r7
+            ghi     r8
             str     rf
             inc     rf
-            glo     r7
+            glo     r8
             str     rf                  ; mem_top = new_mem_top
 
-            ; also republish the reduced value at LOADER_ARGS+2 --
-            ; _prog_finish_load already wrote the OLD mem_top there
-            ; before this routine ever runs (this now runs from inside
-            ; prog_run, after the child's binary has loaded but before
-            ; it starts executing), so without this the child's own
-            ; heap code would see a stale, too-high ceiling and could
-            ; wander into the space just reserved for the second FCB
+            ; also republish the reduced value at LOADER_ARGS+2 -- see
+            ; this routine's own header for why
             mov     rf, LOADER_ARGS+2
-            ghi     r7
+            ghi     r8
             str     rf
             inc     rf
-            glo     r7
-            str     rf
-
-            mov     rf, redir_stack_reserved
-            ldi     $FF
+            glo     r8
             str     rf
 
             clc
@@ -207,25 +235,23 @@ rsv_fail:
             endp
 
 ; ----------------------------------------------------------------
-; _redir_release: reverse _redir_reserve -- copies the stack's current
-; contents back up by REDIR_RESERVE_LEN bytes, restores R2, and
-; restores mem_top (by adding the same fixed amount back). A no-op if
-; redir_stack_reserved isn't set. Must run AFTER both redirect FCBs
-; have already been closed (see _redir_teardown) -- the dynamically-
-; reserved FCB/iobuf live in exactly the memory this routine is about
-; to hand back to the stack, so file_close needs to run first while
-; that memory still holds a valid FCB.
-; Args:    none
+; _himem_release: reverse _himem_reserve -- restores mem_top by adding
+; RC back. See _himem_reserve's own header for the full 2026-07-22
+; redesign history (no stack relocation, no R2 involvement at all).
+;
+; PURE MECHANISM -- no flag of its own, same reasoning as
+; _himem_reserve's own header. The caller must only call this when it
+; knows ITS OWN reservation is genuinely active (passing the same RC
+; value originally passed to _himem_reserve for it), and -- for
+; kernel/redir.asm's own dual-redirect case -- must make sure anything
+; living in the reserved region (the dynamically-reserved second FCB)
+; is already closed first, since this routine has no way to know
+; what's living there.
+; Args:    RC = bytes to release
 ; Returns: nothing
-; Modifies: R7, R8, R9, RB, RD, RF
+; Modifies: R8, RA, RB, RF
 ; ----------------------------------------------------------------
-            proc    _redir_release
-
-            mov     rf, redir_stack_reserved
-            ldn     rf
-            lbz     rel_done            ; nothing was reserved: no-op
-            ldi     0
-            str     rf                  ; clear the flag
+            proc    _himem_release
 
             mov     rf, mem_top
             lda     rf
@@ -233,49 +259,29 @@ rsv_fail:
             ldn     rf
             plo     r8                  ; R8 = current (reduced) mem_top
 
-            mov     r9, r2              ; R9 = current (reduced) stack
-                                        ; pointer
+            ; R8 += RC -- SEX-protected, same caution as
+            ; _himem_reserve's own header explains
+            mov     ra, himem_scratch
+            sex     ra
+            glo     rc
+            str     ra
+            glo     r8
+            add
+            plo     r8
+            ghi     rc
+            str     ra
+            ghi     r8
+            adc
+            phi     r8
+            sex     r2                  ; R8 = restored mem_top
 
-            mov     rd, r8
-            sub16   rd, r9              ; RD = stack_used
+            mov     rf, mem_top
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
 
-            ; copy stack_used bytes from [R9+1 .. mem_top] UP to
-            ; [R9+1+RESERVE .. mem_top+RESERVE] -- walk from the
-            ; highest used address down to the lowest, the mirror
-            ; image of _redir_reserve's own ascending copy
-            mov     rf, r8              ; RF = mem_top (highest used
-                                        ; source address)
-            mov     rb, rf
-            add16   rb, REDIR_RESERVE_LEN ; RB = matching destination
-
-rel_copy:
-            glo     rd
-            lbnz    rel_copy_have
-            ghi     rd
-            lbz     rel_copy_done
-rel_copy_have:
-            ldn     rf
-            str     rb
-            dec     rf
-            dec     rb
-            sub16   rd, 1
-            lbr     rel_copy
-
-rel_copy_done:
-            mov     rf, r2
-            add16   rf, REDIR_RESERVE_LEN
-            mov     r2, rf              ; R2 += RESERVE
-
-            mov     rf, r8
-            add16   rf, REDIR_RESERVE_LEN ; RF = restored mem_top
-            mov     rb, mem_top
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb
-
-rel_done:
             rtn
 
             endp
@@ -336,7 +342,7 @@ ind_no:
 ; and report success without ever calling file_write. Input (if
 ; requested) also uses prog_fcb/prog_iobuf UNLESS output is ALSO using
 ; it (a real, non-NUL output redirect), in which case input uses a
-; dynamically-reserved second FCB+iobuf instead (see _redir_reserve)
+; dynamically-reserved second FCB+iobuf instead (see _himem_reserve)
 ; -- an output redirect to NUL does NOT count as "using prog_fcb" for
 ; this decision, since it never touches it. Input redirected from NUL
 ; also skips any real FCB and sets redir_in_null instead; the 2 input
@@ -473,8 +479,22 @@ rs_in_single:
             lbr     rs_ok
 
 rs_in_dual:
-            call    _redir_reserve
+            ldi     high REDIR_RESERVE_LEN
+            phi     rc
+            ldi     low REDIR_RESERVE_LEN
+            plo     rc                  ; RC = length to reserve --
+                                        ; _himem_reserve is now a
+                                        ; shared, length-parameterized
+                                        ; mechanism (see its own header)
+            call    _himem_reserve
             lbdf    rs_err_maybe_close_out ; not enough headroom
+
+            mov     rf, redir_stack_reserved
+            ldi     $FF
+            str     rf                  ; flag-setting now lives HERE
+                                        ; (the caller), not inside the
+                                        ; now flag-agnostic
+                                        ; _himem_reserve
 
             mov     rf, mem_top
             lda     rf
@@ -508,7 +528,7 @@ rs_in_dual:
 
             ; re-read the target filename fresh from memory rather
             ; than trusting a register to have survived the
-            ; _redir_reserve call just made (it uses RB internally --
+            ; _himem_reserve call just made (it uses RB internally --
             ; gotcha #10)
             mov     rf, RUN_REDIR_IN
             lda     rf
@@ -535,7 +555,20 @@ rs_in_isnull:
             lbr     rs_ok
 
 rs_err_undo_reserve:
-            call    _redir_release
+            ; reached only after rs_in_dual's own _himem_reserve call
+            ; already succeeded (redir_stack_reserved is set) and the
+            ; dual-redirect's file_open then failed -- RC is reloaded
+            ; fresh here rather than trusted to have survived that
+            ; call (gotcha #10)
+            ldi     high REDIR_RESERVE_LEN
+            phi     rc
+            ldi     low REDIR_RESERVE_LEN
+            plo     rc
+            call    _himem_release
+            mov     rf, redir_stack_reserved
+            ldi     0
+            str     rf                  ; clear the flag ourselves --
+                                        ; _himem_release no longer does
 
 rs_err_maybe_close_out:
             ; close output if it was opened above, so a failure here
@@ -587,8 +620,8 @@ rs_ok:
 ; redirect never opened a real FCB, so file_close is skipped for it
 ; (calling it on redir_out_handle/redir_in_handle's leftover/bogus
 ; value would be a real bug). Closing must happen before
-; _redir_release, since the dynamically-reserved FCB/iobuf (if any)
-; live in exactly the memory _redir_release is about to hand back to
+; _himem_release, since the dynamically-reserved FCB/iobuf (if any)
+; live in exactly the memory _himem_release is about to hand back to
 ; the stack.
 ; Args:    none
 ; Returns: nothing
@@ -646,8 +679,24 @@ rt_in_clear:
             str     rf
 
 rt_release:
-            call    _redir_release      ; no-op if nothing was
-                                        ; reserved this round
+            mov     rf, redir_stack_reserved
+            ldn     rf
+            lbz     rt_release_done     ; nothing was reserved this
+                                        ; round: no-op (this check used
+                                        ; to live inside _redir_release
+                                        ; itself; _himem_release is now
+                                        ; a flag-agnostic shared
+                                        ; mechanism, see its own header)
+            ldi     0
+            str     rf                  ; clear the flag
+
+            ldi     high REDIR_RESERVE_LEN
+            phi     rc
+            ldi     low REDIR_RESERVE_LEN
+            plo     rc
+            call    _himem_release
+
+rt_release_done:
             rtn
 
             endp
@@ -1392,12 +1441,29 @@ redir_in_handle:        dw      0   ; same as redir_out_handle, input side
 redir_in_null:          db      0   ; same as redir_out_null, input side
 redir_stack_reserved:   db      0   ; set only while a dual-redirect's
                                     ; dynamic stack reservation is
-                                    ; active (see _redir_reserve)
+                                    ; active (see _himem_reserve) --
+                                    ; this file's OWN flag; unrelated
+                                    ; to kernel/glob.asm's own
+                                    ; glob_stack_reserved, which tracks
+                                    ; a separate, possibly-simultaneous
+                                    ; reservation through the same
+                                    ; shared mechanism
 redir_scratch:          db      0   ; shared 1-byte I/O scratch for
                                     ; _redir_type/_redir_read/
                                     ; _redir_inputl (never in
                                     ; concurrent use -- this kernel is
                                     ; single-threaded)
+
+himem_scratch:           dw      0   ; scratch word used by
+                                    ; _himem_reserve/_himem_release's
+                                    ; SEX-protected 16-bit arithmetic
+                                    ; (see either routine's own
+                                    ; comments) -- kept out of M(R2)
+                                    ; purely out of caution left over
+                                    ; from the 2026-07-22 stack-
+                                    ; relocation incident; R2 is never
+                                    ; touched by either routine at all
+                                    ; in the current design
 
 kim_start:              dw      0   ; _redir_inmsg's own scan-start R6
                                     ; value
@@ -1423,6 +1489,7 @@ kir_count:               db      0   ; _redir_inputl's running byte
                 public  redir_in_null
                 public  redir_stack_reserved
                 public  redir_scratch
+                public  himem_scratch
                 public  kim_start
                 public  kim_resume
                 public  kim_ptr

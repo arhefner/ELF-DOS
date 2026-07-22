@@ -488,6 +488,29 @@ SHELL_DATA_OFF: equ     DRIVE_COUNT + DRIVE_COUNT*BPBBLK_LEN
 K_BATCH_START:      equ     $0170       ; -> batch_start
 K_BATCH_READLINE:   equ     $0173       ; -> batch_readline
 
+; K_GLOB_RESERVE: reserve GLOB_BUF_LEN bytes of himem for the shell's
+; own glob-expansion buffer (2026-07-21) -- see kernel/glob.asm's own
+; module header for the full design (why this needs to be a dynamic
+; reservation rather than a fixed low buffer, and why it shares
+; kernel/redir.asm's dual-redirect stack-relocation mechanism).
+; Kernel/shell-internal only -- only progs/shell.asm ever calls this,
+; when its own pre-scan finds an argv token that needs expansion.
+; IDEMPOTENT: a second call while already reserved just returns the
+; existing address again, DF=0, no relocation -- safe to call once per
+; command-line attempt without tracking anything shell-side.
+; Args:    none
+; Returns: DF = 0 on success, RD = this reservation's base address
+;          (GLOB_BUF_LEN bytes usable from RD onward). DF = 1 if
+;          there isn't enough RAM headroom -- the caller should abort
+;          the whole command line rather than attempt a half-expanded
+;          one.
+K_GLOB_RESERVE:     equ     $0176       ; -> kernel_glob_reserve
+
+; GLOB_BUF_LEN: size of the reservation K_GLOB_RESERVE makes --
+; progs/shell.asm's own glob-expansion pass budgets its writes against
+; this so it never overruns the reserved region.
+GLOB_BUF_LEN:       equ     768
+
 ; Raw FAT16 VBR/BPB and MBR partition-table field offsets, restated
 ; from kernel.inc for the same reason as BPBBLK_*/BPB_DATA_PTR above --
 ; krnboot's own relocated bpb_init body needs these to parse the raw
@@ -506,4 +529,4 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $0176
+; next free jump-table slot address: $0179

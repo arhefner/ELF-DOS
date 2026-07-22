@@ -67,6 +67,8 @@
             extrn   _redir_inmsg
             extrn   _redir_read
             extrn   _redir_inputl
+            extrn   kernel_glob_reserve
+            extrn   _glob_release
 
 ; Kernel version -- single source of truth for the header bytes below,
 ; which programs read directly at the fixed KERNEL_HDR_VER address (see
@@ -230,7 +232,14 @@ k_stat:         lbr     file_stat           ; $0169
 ; the shell is reloaded fresh from disk every command cycle).
 k_batch_start:  lbr     batch_start         ; $0170
 k_batch_readline: lbr   batch_readline      ; $0173
-                ; next free jump-table address: $0176
+
+; K_GLOB_RESERVE: dynamic himem reservation for progs/shell.asm's own
+; glob-expansion buffer (2026-07-21) -- see kernel/glob.asm's own
+; module header for the full design. Idempotent; only ever called by
+; the shell itself, when its own pre-scan finds a token that needs
+; expansion.
+k_glob_reserve: lbr     kernel_glob_reserve ; $0176
+                ; next free jump-table address: $0179
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
@@ -265,6 +274,14 @@ kernel_init:
             ; f_freemem returns in RF; save it before RF is reused
             call    f_freemem           ; RF = address of last RAM byte
             mov     r9, rf              ; keep a copy in R9
+
+            ; permanently reserve STACK_RESERVE_LEN bytes at the very
+            ; top of RAM for the hardware stack (R2), which lives
+            ; there for the whole session and is NEVER relocated --
+            ; see kernel.inc's own STACK_RESERVE_LEN comment for the
+            ; full 2026-07-22 redesign history. Immediate-form sub16
+            ; (compile-time constant) -- no register-register risk.
+            sub16   r9, STACK_RESERVE_LEN
 
             mov     rf, mem_top
             ghi     r9
@@ -411,6 +428,14 @@ run_loop:
                                         ; this call would otherwise
                                         ; clobber it before the check
                                         ; above ever ran
+            call    _glob_release       ; release the shell's own glob-
+                                        ; buffer reservation, if any --
+                                        ; MUST run AFTER _redir_teardown
+                                        ; above: a dual-redirect
+                                        ; reservation this child's own
+                                        ; run may have made nests INSIDE
+                                        ; the glob one (reserved later,
+                                        ; released first -- LIFO)
             lbr     run_loop
 
 run_bad_program:
@@ -420,6 +445,7 @@ run_bad_program:
             ; redir_stack_reserved are already clear in both cases, so
             ; this is a no-op then, not a double-release
             call    _redir_teardown
+            call    _glob_release       ; same LIFO ordering as above
             call    f_inmsg
             db      "Invalid program file.",13,10,0
             lbr     run_loop

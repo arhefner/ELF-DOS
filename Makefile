@@ -56,7 +56,8 @@ KOBJ =  kernel/kernel.prg  \
         kernel/file.prg    \
         kernel/loader.prg  \
         kernel/batch.prg   \
-        kernel/redir.prg
+        kernel/redir.prg   \
+        kernel/glob.prg
 
 # ---- Common include dependencies ----
 INCS =  include/bios.inc    \
@@ -113,6 +114,9 @@ kernel/batch.prg: kernel/batch.asm $(INCS)
 
 kernel/redir.prg: kernel/redir.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) redir.asm
+
+kernel/glob.prg: kernel/glob.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) glob.asm
 
 # Programs are single-file: each progs/X.asm assembles and links on
 # its own (no multi-module link order to worry about, unlike KOBJ).

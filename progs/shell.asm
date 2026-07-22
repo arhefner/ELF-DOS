@@ -621,6 +621,12 @@ tok_done:
             glo     r9
             str     rf
 
+            ; glob-expand argv[1..argc-1] in place (may rewrite
+            ; RUN_ARGC/RUN_ARGV_TABLE -- see glob_expand's own header
+            ; below). Zero cost for an ordinary command with no
+            ; wildcard token: its own pre-scan returns immediately.
+            call    glob_expand
+
             mov     rf, RUN_ARGV_TABLE
             lda     rf
             phi     ra
@@ -758,6 +764,722 @@ batch_nested:
             call    K_INMSG
             db      "Nested batch not supported.",13,10,0
             lbr     start
+
+;------------------------------------------------------------------
+; File globbing ("*"/"?" wildcard expansion) -- shell-level, Unix-
+; style: argv[1..argc-1] tokens whose FINAL path component (after the
+; last '/', or the whole token if there's none) contains '*' (zero or
+; more characters) or '?' (exactly one) are expanded into every
+; matching directory entry, each becoming its own argv entry, BEFORE
+; the command is ever resolved/handed to the kernel. argv[0] (the
+; command name itself) is never glob-expanded. A pattern with zero
+; matches falls back to the literal original token (bash's default
+; "nullglob off" behavior) -- lets the resolved command's own normal
+; error path report it. Wildcards are only recognized in the final
+; path component -- one earlier in the path (e.g. "fo*o/bar.txt") is
+; left as an ordinary character; matching mid-path wildcards would
+; need recursive per-component expansion, out of scope for v1.
+; Case-sensitive, matching this project's own file_open/path_resolve
+; lookup convention (no folding). Match order is on-disk directory
+; order, not sorted (matches DOS's own DIR *.TXT-style ordering,
+; simpler for v1 than collecting-then-sorting).
+;
+; A cheap pre-scan runs first and costs nothing beyond it for an
+; ordinary command with no wildcard token at all: no kernel call, no
+; himem reservation. Only once a real wildcard is found does this
+; call K_GLOB_RESERVE (kernel/glob.asm) for a dynamic himem buffer to
+; hold the expanded text -- see that file's own module header for why
+; this can't just be a fixed low buffer or ordinary program-heap
+; memory. K_GLOB_RESERVE is idempotent, so re-attempting a second
+; command line within the same shell invocation (e.g. after a "File
+; not found." loops back to start:) safely reuses the same buffer.
+;------------------------------------------------------------------
+GLOB_ENTRY_RESERVE: equ 64     ; per-match budget reserved in the
+                                ; himem buffer before attempting a
+                                ; write -- matches RUN_PATH_LEN's own
+                                ; "reasonable single path/name" bound
+
+;------------------------------------------------------------------
+; glob_expand: see the section header above for the full design.
+; Reads/rewrites RUN_ARGC/RUN_ARGV_TABLE directly (fixed addresses --
+; see kernel.inc's own comment on why these are never ordinary
+; program-relative labels).
+; Args:    none
+; Returns: nothing (aborts the whole line via "lbr start", not a
+;          normal return, if K_GLOB_RESERVE fails -- see ge_oom)
+; Modifies: everything (R7-RD) -- called once from tok_done, before
+;           any other state in this file's own "resolve" section
+;           exists to protect
+;------------------------------------------------------------------
+glob_expand:
+            mov     rf, RUN_ARGC
+            inc     rf                  ; -> argc's low byte
+            mov     rb, ge_argc         ; BUG FIX (gotcha #4): mov
+                                        ; must happen BEFORE the ldn
+                                        ; that fetches the real value
+                                        ; -- mov itself clobbers D, so
+                                        ; doing it after would have
+                                        ; stored ge_argc's own address
+                                        ; low byte instead of argc
+            ldn     rf                  ; D = argc's low byte (argc
+                                        ; never exceeds
+                                        ; ARGV_MAX_ARGS=16, so one
+                                        ; byte is enough)
+            str     rb                  ; ge_argc = argc
+
+            ; --- pre-scan: does ANY argv[1..argc-1]'s final component
+            ; contain '*' or '?' ? ---
+            mov     rf, ge_i
+            ldi     1
+            str     rf
+
+ge_prescan_loop:
+            mov     rf, ge_i
+            ldn     rf
+            str     r2                  ; M(X) = ge_i
+            mov     rf, ge_argc
+            ldn     rf                  ; D = ge_argc
+            xor                         ; D = ge_argc XOR ge_i
+            lbz     ge_prescan_none     ; ge_i == ge_argc: scanned all
+                                        ; of argv[1..argc-1], no
+                                        ; wildcard found
+
+            call    ge_get_token
+            call    ge_check_wildcard   ; DF=0 if a wildcard was found
+            lbnf    ge_prescan_found
+
+            mov     rf, ge_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     ge_prescan_loop
+
+ge_prescan_found:
+            mov     rf, ge_needs_glob
+            ldi     $FF
+            str     rf
+            lbr     ge_prescan_done
+
+ge_prescan_none:
+            mov     rf, ge_needs_glob
+            ldi     0
+            str     rf
+
+ge_prescan_done:
+            mov     rf, ge_needs_glob
+            ldn     rf
+            lbz     ge_return           ; nothing to do: RUN_ARGC/
+                                        ; RUN_ARGV_TABLE already
+                                        ; correct exactly as tok_done
+                                        ; wrote them
+
+            ; --- reserve the himem glob buffer (idempotent) ---
+            call    K_GLOB_RESERVE
+            lbdf    ge_oom
+
+            mov     rf, ge_glob_base
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; ge_glob_base = RD
+
+            mov     rf, ge_glob_used
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf                  ; ge_glob_used = 0
+
+            mov     rf, ge_budget_exhausted
+            ldi     0
+            str     rf
+
+            ; --- ge_argv_tmp[0] = argv[0] (never glob-expanded) ---
+            mov     rf, RUN_ARGV_TABLE
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ge_argv_tmp
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, ge_new_argc
+            ldi     1
+            str     rf
+
+            mov     rf, ge_i
+            ldi     1
+            str     rf
+
+ge_expand_loop:
+            mov     rf, ge_i
+            ldn     rf
+            str     r2
+            mov     rf, ge_argc
+            ldn     rf
+            xor
+            lbz     ge_expand_done      ; scanned all of argv[1..argc-1]
+
+            call    ge_get_token
+            call    ge_check_wildcard
+            lbdf    ge_copy_literal     ; no wildcard in this token:
+                                        ; copy it through unchanged
+
+            call    ge_expand_token     ; may emit 0+ matches directly
+                                        ; into ge_argv_tmp/GLOB_BUF
+            mov     rf, ge_match_count
+            ldn     rf
+            lbnz    ge_expand_next      ; at least one match handled
+
+ge_copy_literal:
+            mov     rf, ge_token
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = the literal token
+                                        ; pointer (unchanged, still
+                                        ; valid -- points into LINE_BUF)
+            call    ge_append_tmp
+
+ge_expand_next:
+            mov     rf, ge_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     ge_expand_loop
+
+ge_expand_done:
+            call    ge_publish
+            lbr     ge_return
+
+ge_oom:
+            call    K_INMSG
+            db      "Out of memory for glob expansion.",13,10,0
+            lbr     start               ; abort the whole line -- no
+                                        ; half-expanded command
+
+ge_return:
+            rtn
+
+;------------------------------------------------------------------
+; ge_get_token: RD = argv[ge_i], also stashed into ge_token. No calls
+; inside -- RD's return value is safe to use immediately at every
+; call site.
+; Modifies: RF, R8, RD
+;------------------------------------------------------------------
+ge_get_token:
+            mov     rf, ge_i
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = ge_i (zero-extended)
+            shl16   r8                  ; R8 = ge_i * 2
+            mov     rf, RUN_ARGV_TABLE
+            add16   rf, r8              ; RF = &RUN_ARGV_TABLE[ge_i]
+                                        ; (register-register add16 --
+                                        ; nothing staged via str r2
+                                        ; nearby, gotcha #18-safe)
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = argv[ge_i]
+
+            mov     rf, ge_token
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; ge_check_wildcard: does ge_token's FINAL path component (after the
+; last '/', or the whole token if none) contain '*' or '?' ? Side
+; effect: always sets ge_last_slash (pointer to the final component's
+; own start) and ge_prefix_len (byte count from ge_token's start up
+; to there) -- needed by ge_expand_token/ge_emit_match regardless of
+; the wildcard result, and cheap to compute unconditionally.
+; Returns: DF = 0 if a wildcard was found, DF = 1 otherwise
+; Modifies: RF, R8, R9, RD
+;------------------------------------------------------------------
+ge_check_wildcard:
+            mov     rf, ge_token
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = ge_token (token start)
+            mov     r8, r9              ; R8 = scan cursor
+            mov     rd, r9              ; RD = last-slash position
+                                        ; (defaults to the token start)
+
+gcw_scan:
+            ldn     r8
+            lbz     gcw_scanned
+            xri     '/'
+            lbnz    gcw_next
+            inc     r8
+            mov     rd, r8              ; RD = position right after '/'
+            lbr     gcw_scan
+gcw_next:
+            inc     r8
+            lbr     gcw_scan
+
+gcw_scanned:
+            mov     rf, ge_last_slash
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            glo     r9
+            str     r2                  ; M(X) = token_start.lo
+            mov     rf, ge_prefix_len   ; BUG FIX (gotcha #4): mov
+                                        ; must happen BEFORE the sm
+                                        ; that computes the real value
+                                        ; -- doesn't touch R2/RD, so
+                                        ; moving it here is safe
+            glo     rd
+            sm                          ; D = last_slash.lo -
+                                        ; token_start.lo = prefix_len
+                                        ; (tokens live in LINE_BUF,
+                                        ; 128 bytes -- always fits a
+                                        ; single byte)
+            str     rf
+
+gcw_wild_scan:
+            ldn     rd
+            lbz     gcw_no_wild         ; reached the NUL: no wildcard
+            xri     '*'
+            lbz     gcw_yes
+            ldn     rd
+            xri     '?'
+            lbz     gcw_yes
+            inc     rd
+            lbr     gcw_wild_scan
+
+gcw_yes:
+            clc
+            rtn
+
+gcw_no_wild:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; ge_expand_token: resolve ge_token's directory part and scan it for
+; entries matching the final component (ge_last_slash), via
+; glob_match, emitting each match through ge_emit_match. A bad
+; directory path, or the himem buffer already being exhausted from an
+; earlier token, both fall through to ge_match_count staying 0 --
+; ge_expand_loop's own caller then falls back to the literal token,
+; same as a real zero-match result.
+; Args:    none (reads ge_token/ge_prefix_len/ge_last_slash)
+; Returns: nothing (ge_match_count set)
+; Modifies: everything (R7-RD)
+;------------------------------------------------------------------
+ge_expand_token:
+            mov     rf, ge_match_count
+            ldi     0
+            str     rf
+
+            mov     rf, ge_budget_exhausted
+            ldn     rf
+            lbnz    gex_done            ; already exhausted: 0 matches
+
+            mov     rf, ge_prefix_len
+            ldn     rf
+            lbnz    gex_resolve_path    ; nonzero prefix: real path
+                                        ; resolution needed
+
+            call    K_GETCURDIR         ; RD = cur_dir cluster
+            lbr     gex_have_clust
+
+gex_resolve_path:
+            mov     rb, ge_token
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = ge_token (full text,
+                                        ; including the pattern --
+                                        ; K_PATH_RESOLVE never looks
+                                        ; up the final component
+                                        ; itself, matching CD/COPY's
+                                        ; own use of it)
+            call    K_PATH_RESOLVE      ; RD = parent cluster, DF=0/1
+            lbdf    gex_done            ; bad path: 0 matches
+
+gex_have_clust:
+            call    K_DIR_OPEN          ; RD = cluster to scan
+
+gex_read_loop:
+            mov     rf, ge_dirent
+            call    K_DIR_READ
+            lbdf    gex_done            ; end of directory
+
+            mov     rf, ge_dirent
+            mov     rd, gex_dot
+            call    f_strcmp
+            lbz     gex_read_loop       ; skip "."
+
+            mov     rf, ge_dirent
+            mov     rd, gex_dotdot
+            call    f_strcmp
+            lbz     gex_read_loop       ; skip ".."
+
+            mov     rb, ge_last_slash
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = pattern
+            mov     rd, ge_dirent       ; RD = text (DIRENT_NAME is
+                                        ; offset 0 within ge_dirent)
+            call    glob_match
+            lbdf    gex_read_loop       ; no match: next entry
+
+            call    ge_emit_match
+            lbdf    gex_done            ; himem buffer just ran out:
+                                        ; stop this scan (ge_expand_
+                                        ; loop's caller will still
+                                        ; correctly fall back to
+                                        ; literal for every token
+                                        ; after this one)
+
+            lbr     gex_read_loop
+
+gex_done:
+            rtn
+
+gex_dot:        db      ".",0
+gex_dotdot:     db      "..",0
+
+;------------------------------------------------------------------
+; ge_emit_match: write "ge_token[0..ge_prefix_len) + the matched
+; entry's name (ge_dirent's DIRENT_NAME)" into the himem glob buffer
+; at the current write cursor, NUL-terminated, then append its
+; address to ge_argv_tmp via ge_append_tmp. Budget-checked, reserving
+; GLOB_ENTRY_RESERVE bytes per attempt -- if the remaining buffer
+; space is under that, sets ge_budget_exhausted and returns DF=1
+; without writing anything (ge_match_count NOT incremented).
+; Args:    none
+; Returns: DF = 0 on success (ge_match_count incremented), DF = 1 if
+;          the buffer's budget is exhausted
+; Modifies: everything (R7-RD)
+;------------------------------------------------------------------
+ge_emit_match:
+            mov     rf, ge_budget_exhausted
+            ldn     rf
+            lbnz    gem_fail            ; already exhausted (an
+                                        ; earlier match this command
+                                        ; already used up the budget)
+
+            mov     rf, ge_glob_used
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = ge_glob_used
+            mov     r9, r8
+            add16   r9, GLOB_ENTRY_RESERVE ; R9 = used + RESERVE
+                                        ; (immediate-form add16 --
+                                        ; never touches M(R2), gotcha
+                                        ; #18-safe regardless)
+            mov     rf, r9
+            sub16   rf, GLOB_BUF_LEN    ; RF = (used+RESERVE) - LEN;
+                                        ; DF=1 (no borrow) means
+                                        ; used+RESERVE >= LEN --
+                                        ; immediate-form, safe
+            lbdf    gem_exhausted
+
+            mov     rf, ge_glob_base
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = ge_glob_base
+            add16   rd, r8              ; RD = ge_glob_base +
+                                        ; ge_glob_used = this entry's
+                                        ; own start address (register-
+                                        ; register add16 -- nothing
+                                        ; staged via str r2 nearby,
+                                        ; gotcha #18-safe)
+            mov     rb, rd              ; RB = write cursor
+
+            mov     rf, ge_token
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = ge_token (prefix source)
+            mov     rf, ge_prefix_len
+            ldn     rf
+            plo     r8                  ; R8.0 = remaining prefix
+                                        ; bytes to copy
+gem_copy_prefix:
+            glo     r8
+            lbz     gem_copy_name
+            mov     rf, r9
+            ldn     rf
+            str     rb
+            inc     rb
+            inc     r9
+            dec     r8
+            lbr     gem_copy_prefix
+
+gem_copy_name:
+            mov     rf, ge_dirent
+gem_copy_name_loop:
+            ldn     rf
+            lbz     gem_name_done
+            str     rb
+            inc     rf
+            inc     rb
+            lbr     gem_copy_name_loop
+
+gem_name_done:
+            ldi     0
+            str     rb                  ; NUL-terminate
+            inc     rb                  ; RB = one past the terminator
+
+            mov     rf, gem_new_cursor
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf                  ; gem_new_cursor = RB (stashed
+                                        ; BEFORE the call below, which
+                                        ; may clobber RB)
+
+            call    ge_append_tmp       ; RD still holds this entry's
+                                        ; own start address (untouched
+                                        ; since being computed above)
+
+            mov     rf, gem_new_cursor
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = gem_new_cursor
+            mov     rf, ge_glob_base
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = ge_glob_base
+            sub16   rd, r9              ; RD = gem_new_cursor -
+                                        ; ge_glob_base = new
+                                        ; ge_glob_used (register-
+                                        ; register sub16 -- nothing
+                                        ; staged via str r2 nearby,
+                                        ; gotcha #18-safe)
+            mov     rf, ge_glob_used
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, ge_match_count
+            ldn     rf
+            adi     1
+            str     rf
+
+            clc
+            rtn
+
+gem_exhausted:
+            mov     rf, ge_budget_exhausted
+            ldi     $FF
+            str     rf
+
+gem_fail:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; ge_append_tmp: append RD as the next entry in ge_argv_tmp, bumping
+; ge_new_argc -- silently no-ops if ge_new_argc is already at
+; ARGV_MAX_ARGS (same "extra tokens silently dropped" precedent the
+; main tokenizer's own tok_check_end already established).
+; Args:    RD = pointer to append
+; Modifies: RF, RB, R8 (and D)
+;------------------------------------------------------------------
+ge_append_tmp:
+            mov     rf, ge_new_argc
+            ldn     rf
+            smi     ARGV_MAX_ARGS
+            lbdf    gat_done            ; already at capacity
+
+            mov     rf, ge_new_argc
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = ge_new_argc (zero-
+                                        ; extended)
+            shl16   r8                  ; R8 = ge_new_argc * 2
+            mov     rb, ge_argv_tmp
+            add16   rb, r8              ; RB = &ge_argv_tmp[ge_new_argc]
+                                        ; (register-register add16 --
+                                        ; nothing staged via str r2
+                                        ; nearby, gotcha #18-safe)
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+
+            mov     rf, ge_new_argc
+            ldn     rf
+            adi     1
+            str     rf
+
+gat_done:
+            rtn
+
+;------------------------------------------------------------------
+; ge_publish: copy ge_argv_tmp[0..ge_new_argc) into RUN_ARGV_TABLE,
+; and ge_new_argc into RUN_ARGC.
+; Modifies: R8, R9, RB, RF (and D)
+;------------------------------------------------------------------
+ge_publish:
+            mov     rf, ge_new_argc
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = ge_new_argc (zero-
+                                        ; extended)
+            shl16   r8                  ; R8 = ge_new_argc * 2 (byte
+                                        ; count to copy)
+
+            mov     r9, ge_argv_tmp
+            mov     rb, RUN_ARGV_TABLE
+gp_copy:
+            glo     r8
+            lbnz    gp_have
+            ghi     r8
+            lbz     gp_copy_done
+gp_have:
+            ldn     r9
+            str     rb
+            inc     r9
+            inc     rb
+            sub16   r8, 1               ; immediate-form, gotcha #18-
+                                        ; safe
+            lbr     gp_copy
+
+gp_copy_done:
+            mov     rf, RUN_ARGC
+            ldi     0
+            str     rf
+            inc     rf
+            mov     rb, ge_new_argc
+            ldn     rb
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; glob_match: does the text at RD match the wildcard pattern at RF?
+; '*' matches zero or more characters, '?' matches exactly one.
+; Case-sensitive. Classic non-recursive backtracking matcher --
+; independently verified against 35 hand-picked test cases in a
+; Python simulation before writing this (leading/trailing/multiple
+; '*', '?' mixed with literal characters, no-match cases, empty
+; pattern/text, case-sensitivity, etc. -- see this session's own
+; scratch glob_match_sim.py), matching this project's established
+; practice for new non-mechanical algorithmic logic.
+; Args:    RF = pattern (null-terminated), RD = text (null-terminated)
+; Returns: DF = 0 on match, DF = 1 on no match
+; Modifies: RF, RD, RB (star_p -- 0 means unset; safe sentinel, no
+;           real buffer in this system sits at address 0), R9
+;           (star_t), R8 (scratch)
+;------------------------------------------------------------------
+glob_match:
+            ldi     0
+            phi     rb
+            plo     rb                  ; RB = 0 (star_p unset)
+
+gm_loop:
+            ldn     rd                  ; D = *t
+            lbnz    gm_have_char
+
+gm_skip_stars:
+            ldn     rf
+            xri     '*'
+            lbnz    gm_check_pat_end
+            inc     rf
+            lbr     gm_skip_stars
+gm_check_pat_end:
+            ldn     rf
+            lbnz    gm_no               ; pattern has more: no match
+            lbr     gm_yes              ; both exhausted: match
+
+gm_have_char:
+            plo     r8                  ; R8.0 = *t
+            ldn     rf                  ; D = *p
+            str     r2                  ; M(X) = *p (consumed by the
+                                        ; very next instruction -- no
+                                        ; register-register add16/
+                                        ; sub16 runs between, gotcha
+                                        ; #18-safe)
+            glo     r8                  ; D = *t
+            sm                          ; D = *t - *p (zero iff equal)
+            lbz     gm_advance
+
+            ldn     rf                  ; D = *p (reload)
+            xri     '?'
+            lbz     gm_advance
+
+            ldn     rf
+            xri     '*'
+            lbz     gm_set_star
+
+            lbr     gm_try_backtrack
+
+gm_advance:
+            inc     rf
+            inc     rd
+            lbr     gm_loop
+
+gm_set_star:
+            mov     rb, rf              ; star_p = p
+            inc     rf                  ; p++ (consume the '*' itself)
+            mov     r9, rd              ; star_t = t
+            lbr     gm_loop
+
+gm_try_backtrack:
+            ghi     rb
+            lbnz    gm_backtrack
+            glo     rb
+            lbz     gm_no               ; star_p == 0: never set
+
+gm_backtrack:
+            mov     rf, rb
+            inc     rf                  ; p = star_p + 1
+            inc     r9                  ; star_t++
+            mov     rd, r9              ; t = star_t
+            lbr     gm_loop
+
+gm_yes:
+            clc
+            rtn
+
+gm_no:
+            stc
+            rtn
+
+ge_argc:            db      0
+ge_i:               db      0
+ge_new_argc:        db      0
+ge_needs_glob:       db      0
+ge_glob_base:        dw      0
+ge_glob_used:        dw      0
+ge_budget_exhausted: db      0
+ge_match_count:      db      0
+ge_token:            dw      0
+ge_last_slash:       dw      0
+ge_prefix_len:       db      0
+gem_new_cursor:       dw      0
+ge_dirent:           ds      DIRENT_LEN
+ge_argv_tmp:         ds      ARGV_MAX_ARGS * 2
 
 ;------------------------------------------------------------------
 ; Pipes ("cmd1 | cmd2"): a top-level '|' (found by pipe_scan, called

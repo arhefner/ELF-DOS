@@ -162,6 +162,39 @@ RUN_REDIR_IN:       equ     PROG_BASE-108   ; word: 0 = no input
 RUN_BATCH_ECHO_OFF: equ     PROG_BASE-109   ; byte: 0 = echo batch lines
                                             ; normally, nonzero = suppress
 
+; GLOB_BUF_LEN: size of the dynamic himem reservation progs/shell.asm's
+; own glob-expansion pass makes via K_GLOB_RESERVE (kernel/glob.asm) --
+; NOT a fixed PROG_BASE-relative address like the fields above, since
+; the reservation's actual address depends on mem_top at the moment
+; it's made (see kernel/glob.asm's own module header for the full
+; design). Restated in kernel_api.inc for progs/shell.asm's own use;
+; this copy is for kernel/glob.asm itself, which #includes this file,
+; not kernel_api.inc.
+GLOB_BUF_LEN:       equ     768
+
+; STACK_RESERVE_LEN: permanent margin at the very top of RAM, reserved
+; for the hardware stack (R2), subtracted from mem_top ONCE at boot
+; (kernel_init, kernel/kernel.asm) and never touched again. The stack
+; itself is NEVER relocated -- it always lives in
+; [mem_top+1 .. real RAM top], a fixed STACK_RESERVE_LEN-byte region.
+; This replaced an earlier design (2026-07-22) where _himem_reserve/
+; _himem_release physically relocated the stack (copying its live
+; content and shifting R2) to free space for a himem buffer -- that
+; approach was fundamentally broken for any reservation whose lifetime
+; spans a call-depth unwind back to a SHALLOWER point than where it
+; was made (exactly glob's case: reserved deep inside the shell,
+; released after the shell fully returns and a whole separate child
+; program runs) -- R2 naturally rises back toward RAM_TOP as calls
+; unwind, and could land ABOVE a "temporarily" reduced mem_top,
+; corrupting the stack_used computation and everything downstream of
+; it (confirmed on real hardware, repeatedly, before this redesign).
+; The user's own proposal: stop moving the stack at all -- leave it
+; fixed here, permanently, and have every himem buffer (redir's dual-
+; FCB pair, glob's expansion buffer) simply live BENEATH it, addressed
+; via mem_top+1 after subtracting the buffer's own length. No R2
+; arithmetic anywhere, so no call-depth dependency, ever.
+STACK_RESERVE_LEN:  equ     128
+
 ; ----------------------------------------------------------------
 ; Disk geometry
 ; ----------------------------------------------------------------
