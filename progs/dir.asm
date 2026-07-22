@@ -1,14 +1,23 @@
 ;
-; dir.asm - list a directory
+; dir.asm - list a directory, or show info for one or more files
 ;
-; Usage: DIR [path]
+; Usage: DIR [path...]
 ;
-; With no argument, lists the current directory. With a path argument
-; (bare name, relative path, or absolute path starting with '/'),
-; lists that directory instead -- without changing the current
-; directory, since K_DIR_OPEN/K_DIR_READ only drive this program's
-; own listing traversal and never touch cur_dir (only CD's
-; K_SETCURDIR does that). See K_PATH_RESOLVE in kernel_api.inc.
+; With no argument, lists the current directory. With ONE path argument
+; that resolves to a directory (bare name, relative path, or absolute
+; path starting with '/'), lists that directory instead -- without
+; changing the current directory, since K_DIR_OPEN/K_DIR_READ only drive
+; this program's own listing traversal and never touch cur_dir (only
+; CD's K_SETCURDIR does that). See K_PATH_RESOLVE in kernel_api.inc.
+;
+; With ONE path argument that resolves to a FILE, or with TWO OR MORE
+; arguments (e.g. via the shell's own file-globbing -- "DIR *.txt"),
+; each argument is K_STAT'd independently and shown as its own single
+; entry line -- a matched directory gets one line too (its own entry),
+; not a recursive listing of its contents. A bad argument prints its own
+; "Not found: " message and the rest still run (matching this project's
+; own DEL/COPY multi-argument precedent) rather than aborting the whole
+; command; the final exit code reflects whether any argument failed.
 ;
 ; Each entry is printed as a fixed-width line:
 ;   columns 1-5:   right-justified decimal byte count (files) or
@@ -47,14 +56,19 @@ start:
 
             ; RA = argv pointer, RC = argc (RC.0 alone is enough --
             ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
-            ; program's own name; argv[1] (if present) is the path
-            ; argument -- optional here, unlike most other programs,
-            ; since DIR with no argument lists the current directory.
+            ; program's own name.
+            glo     rc
+            smi     3
+            lbdf    dir_multi_arg       ; argc >= 3: two or more path
+                                        ; arguments
+
             glo     rc
             smi     2
             lbnf    dir_open_target     ; argc < 2: no path given, list
                                         ; the current directory
 
+            ; argc == 2: exactly one path argument -- unchanged from
+            ; before multi-argument support existed
             mov     rb, ra
             add16   rb, 2               ; RB = &argv[1]
             lda     rb
@@ -101,12 +115,14 @@ dir_find:
             call    f_strcmp
             lbnz    dir_find            ; no match: keep looking
 
-            ; must be a directory
+            ; a matching FILE (not a directory) just shows its own
+            ; entry line and exits -- dir_result is already filled by
+            ; the K_DIR_READ match above, no extra lookup needed
             mov     rf, dir_result
             add16   rf, DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_DIR
-            lbz     not_dir
+            lbz     dir_single_file
 
             ; RD = the matched entry's first cluster -- falls through
             ; to dir_open_target below, same as the "empty final
@@ -126,12 +142,152 @@ dir_loop:
             call    K_DIR_READ
             lbdf    dir_done            ; DF=1 = end of directory
 
+            call    print_dir_entry
+            lbr     dir_loop
+
+dir_done:
+            ldi     0                   ; exit code 0 = success
+            rtn
+
+dir_single_file:
+            call    print_dir_entry
+            ldi     0                   ; exit code 0 = success
+            rtn
+
+not_found:
+            call    K_INMSG
+            db      "Directory not found.",13,10,0
+            ldi     1
+            rtn
+
+;------------------------------------------------------------------
+; dir_multi_arg: two or more path arguments (typically via the shell's
+; own glob expansion, e.g. "DIR *.txt") -- K_STAT each one independently
+; and show its own entry line. A bad argument prints its own error and
+; the rest still run; the final exit code reflects whether any argument
+; failed.
+;------------------------------------------------------------------
+dir_multi_arg:
+            ; stash argv/argc to memory -- K_STAT's own clobber
+            ; footprint isn't proven anywhere in this codebase yet, so
+            ; nothing here is trusted to survive it in a register
+            ; (same defensive pattern progs/del.asm's own multi-
+            ; argument loop already established)
+            mov     rf, dir_argv
+            ghi     ra
+            str     rf
+            inc     rf
+            glo     ra
+            str     rf
+
+            mov     rf, dir_argc
+            glo     rc
+            str     rf
+
+            mov     rf, dir_any_error
+            ldi     0
+            str     rf
+
+            mov     rf, dir_i
+            ldi     1
+            str     rf
+
+dma_loop:
+            mov     rf, dir_i
+            ldn     rf
+            str     r2                  ; M(X) = dir_i
+            mov     rf, dir_argc
+            ldn     rf                  ; D = dir_argc
+            xor                         ; D = dir_argc XOR dir_i
+            lbz     dma_done            ; dir_i == argc: done
+
+            ; RD = argv[dir_i]
+            mov     rf, dir_i
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = dir_i (zero-extended)
+            shl16   r8                  ; R8 = dir_i * 2
+            mov     rb, dir_argv
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = dir_argv (base, reloaded
+                                        ; fresh every iteration)
+            add16   rf, r8              ; RF = &argv[dir_i]
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = argv[dir_i]
+
+            ; stash the path pointer for the possible error message
+            ; below BEFORE calling K_STAT
+            mov     rf, dir_cur_path
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, rd              ; RF = path string
+            mov     rd, dir_result      ; RD = result buffer
+            call    K_STAT              ; DF = 0/1
+            lbdf    dma_not_found
+
+            call    print_dir_entry
+            lbr     dma_next
+
+dma_not_found:
+            call    K_INMSG
+            db      "Not found: ",0
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, dir_any_error
+            ldi     $FF
+            str     rf
+
+dma_next:
+            mov     rf, dir_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     dma_loop
+
+dma_done:
+            mov     rf, dir_any_error
+            ldn     rf
+            lbnz    dma_exit_err
+
+            ldi     0                   ; exit code 0 = success
+            rtn
+
+dma_exit_err:
+            ldi     1
+            rtn
+
+;------------------------------------------------------------------
+; print_dir_entry: print dir_result (already filled by K_DIR_READ or
+; K_STAT) as one fixed-width listing line -- see the file header for
+; the column layout.
+; Args:    none (reads dir_result)
+; Returns: nothing
+; Modifies: R7-RD (and D)
+;------------------------------------------------------------------
+print_dir_entry:
             ; check ATTR_DIR bit
             mov     rf, dir_result
             add16   rf, DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_DIR
-            lbnz    dir_is_dir
+            lbnz    pde_is_dir
 
             ; ---- file: right-justified 5-column decimal size ----
             mov     rf, dir_result
@@ -151,15 +307,15 @@ dir_loop:
             mov     rf, size_buf
             ldi     0
             plo     rc                  ; RC.0 = digit count
-count_loop:
+pde_count_loop:
             ldn     rf
-            lbz     count_done
+            lbz     pde_count_done
             inc     rf
             glo     rc
             adi     1
             plo     rc
-            lbr     count_loop
-count_done:
+            lbr     pde_count_loop
+pde_count_done:
             ; leading spaces = a substring of the 5-space buffer,
             ; starting "digit count" chars in (fewer spaces needed
             ; the more digits there are; always <= 5 digits since
@@ -173,16 +329,16 @@ count_done:
 
             mov     rf, tag_blank       ; blank 7-column directory tag
             call    K_MSG
-            lbr     dir_print_datetime
+            lbr     pde_print_datetime
 
             ; ---- directory: blank size + " <DIR> " tag ----
-dir_is_dir:
+pde_is_dir:
             mov     rf, spaces5         ; blank 5-column size field
             call    K_MSG
             mov     rf, dir_tag
             call    K_MSG
 
-dir_print_datetime:
+pde_print_datetime:
             ; ---- unpack last-write date into day/month/year ----
             mov     rf, dir_result
             add16   rf, DIRENT_WRTDATE
@@ -315,27 +471,10 @@ dir_print_datetime:
             call    K_INMSG
             db      "  ",0
 
-dir_print_name:
             mov     rf, dir_result      ; RF = DIRENT_NAME (at offset 0)
             call    K_MSG
             call    K_INMSG
             db      13,10,0
-            lbr     dir_loop
-
-dir_done:
-            ldi     0                   ; exit code 0 = success
-            rtn
-
-not_found:
-            call    K_INMSG
-            db      "Directory not found.",13,10,0
-            ldi     1
-            rtn
-
-not_dir:
-            call    K_INMSG
-            db      "Not a directory.",13,10,0
-            ldi     1
             rtn
 
 ; ----------------------------------------------------------------
@@ -375,7 +514,8 @@ p2d_print:
             rtn
 
 arg_ptr:    dw      0
-dir_result: ds      DIRENT_LEN          ; 135-byte result buffer for K_DIR_READ
+dir_result: ds      DIRENT_LEN          ; 135-byte result buffer for
+                                        ; K_DIR_READ/K_STAT
 size_buf:   ds      6                   ; decimal size scratch (max "65535"+null)
 spaces5:    db      "     ",0           ; 5 spaces -- blank size field, and
                                         ; (via pointer offset) padding
@@ -389,5 +529,11 @@ wr_month:   db      0
 wr_year:    dw      0
 wr_hour:    db      0
 wr_minute:  db      0
+
+dir_argv:       dw      0
+dir_argc:       db      0
+dir_i:          db      0
+dir_any_error:  db      0
+dir_cur_path:   dw      0
 
             end     start

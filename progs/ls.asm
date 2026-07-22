@@ -150,73 +150,198 @@ start:
             ldi     0
             str     rf                  ; ls_patharg = 0 (no path arg)
 
-            ; ---- parse argv: optional "-l", optional path ----
-            glo     rc
-            smi     2
-            lbnf    ls_resolve          ; argc < 2: nothing to parse
+            mov     rf, ls_any_error
+            ldi     0
+            str     rf                  ; ls_any_error = 0 -- only
+                                        ; ls_multi_stat ever sets this
+                                        ; nonzero, but it must start
+                                        ; clean regardless of which of
+                                        ; the 0/1/2+-path cases below
+                                        ; actually runs
 
-            mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
-            lda     rb
+            ; ---- option scan: recognize flags (today just "-l",
+            ; exact-token match) ANYWHERE on the line, not just
+            ; argv[1] -- the user's own proposal, so a future flag
+            ; (-a, -F, ...) is just one more comparison in
+            ; ls_scan_options below, with zero changes needed here.
+            ; Builds a compacted, zero-based ls_paths[]/ls_num_paths
+            ; with every recognized flag token removed.
+            call    ls_scan_options
+
+            ; if exactly one path argument was found, capture it into
+            ; ls_patharg the same way the old single-slot parser did,
+            ; so the existing K_PATH_RESOLVE/ls_find_loop logic below
+            ; (unchanged) needs no further changes. 0 or 2+ paths
+            ; leave ls_patharg at 0 -- handled by ls_resolve_body's
+            ; own dispatch further down.
+            mov     rf, ls_num_paths
+            ldn     rf
+            smi     1
+            lbnz    ls_resolve
+
+            mov     rf, ls_paths
+            lda     rf
             phi     rd
-            ldn     rb
-            plo     rd                  ; RD = argv[1] pointer
-
-            mov     rf, rd
-            ldn     rf                  ; D = argv[1][0]
-            xri     '-'
-            lbnz    ls_arg1_path
-
-            inc     rf
-            ldn     rf                  ; D = argv[1][1]
-            xri     'l'
-            lbnz    ls_arg1_path
-
-            inc     rf
-            ldn     rf                  ; D = argv[1][2] -- must be NUL
-                                        ; for "-l" to be exactly this
-                                        ; whole token
-            lbnz    ls_arg1_path
-
-            mov     rf, ls_longmode
-            ldi     1
-            str     rf                  ; ls_longmode = 1
-
-            glo     rc
-            smi     3
-            lbnf    ls_resolve          ; argc < 3: no path after -l
-
-            mov     rb, ra
-            add16   rb, 4               ; RB = &argv[2]
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = argv[2] pointer
-            lbr     ls_save_patharg
-
-ls_arg1_path:
-            ; RD already holds argv[1]'s pointer, untouched by the "-l"
-            ; character checks above (same fallback shape as mr.asm's
-            ; own "not_flag" -- an unrecognized dash-prefixed token
-            ; just becomes the path argument, probably invalid)
-ls_save_patharg:
+            ldn     rf
+            plo     rd                  ; RD = ls_paths[0]
             mov     rb, ls_patharg
             ghi     rd
             str     rb
             inc     rb
             glo     rd
             str     rb
+            lbr     ls_resolve          ; BUG FIX (hardware-found,
+                                        ; 2026-07-22): this used to fall
+                                        ; straight through into
+                                        ; ls_scan_options' own body
+                                        ; below (no branch separated
+                                        ; them) -- a second, un-called
+                                        ; pass through that routine
+                                        ; would hit its own "rtn" and
+                                        ; pop the ORIGINAL call-into-
+                                        ; start return address, exiting
+                                        ; the whole program silently
+                                        ; before ever reaching
+                                        ; ls_resolve. Explains why every
+                                        ; single-path case (explicit
+                                        ; file, explicit dir, a single
+                                        ; glob match, even a not-found
+                                        ; name) printed nothing at all.
+
+;------------------------------------------------------------------
+; ls_scan_options: walk argv[1..argc-1] once, recognizing flags
+; anywhere on the line (today just "-l", exact-token match, same
+; convention progs/mr.asm/progs/ms.asm's own "-u"/"-b" flags already
+; use -- not combined-short-option parsing like "-la") and building a
+; compacted, zero-based list of the remaining (non-flag) arguments in
+; ls_paths/ls_num_paths. Adding a future flag (-a, -F, ...) is just
+; one more comparison block here -- everything downstream only ever
+; looks at ls_paths/ls_num_paths/ls_longmode, never argv directly.
+; Args:    none (reads RA/RC directly, at entry)
+; Returns: nothing (ls_paths/ls_num_paths/ls_longmode set)
+; Modifies: R7, R8, RB, RD, RF (and D)
+;------------------------------------------------------------------
+ls_scan_options:
+            ; stash argv/argc to memory -- needed since this loop
+            ; re-derives argv[i] fresh each iteration, and safe
+            ; regardless of what runs after this routine returns
+            ; (env_getenv/env_parse_uint's own broad clobber
+            ; footprint, in particular)
+            mov     rf, ls_argv
+            ghi     ra
+            str     rf
+            inc     rf
+            glo     ra
+            str     rf
+
+            mov     rf, ls_argc
+            glo     rc
+            str     rf
+
+            mov     rf, ls_num_paths
+            ldi     0
+            str     rf
+
+            mov     rf, ls_scan_i
+            ldi     1
+            str     rf
+
+lso_loop:
+            mov     rf, ls_scan_i
+            ldn     rf
+            str     r2                  ; M(X) = ls_scan_i
+            mov     rf, ls_argc
+            ldn     rf                  ; D = ls_argc
+            xor                         ; D = ls_argc XOR ls_scan_i
+            lbz     lso_done            ; ls_scan_i == argc: done
+
+            ; RD = argv[ls_scan_i]
+            mov     rf, ls_scan_i
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = ls_scan_i (zero-extended)
+            shl16   r8                  ; R8 = ls_scan_i * 2
+            mov     rb, ls_argv
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = ls_argv (base, reloaded
+                                        ; fresh every iteration)
+            add16   rf, r8              ; RF = &argv[ls_scan_i]
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = argv[ls_scan_i]
+
+            ; is it exactly "-l"?
+            mov     rf, rd
+            ldn     rf                  ; D = token[0]
+            xri     '-'
+            lbnz    lso_is_path
+
+            mov     rf, rd
+            inc     rf
+            ldn     rf                  ; D = token[1]
+            xri     'l'
+            lbnz    lso_is_path
+
+            mov     rf, rd
+            inc     rf
+            inc     rf
+            ldn     rf                  ; D = token[2] -- must be NUL
+                                        ; for "-l" to be exactly this
+                                        ; whole token
+            lbnz    lso_is_path
+
+            mov     rf, ls_longmode
+            ldi     1
+            str     rf                  ; recognized "-l": set the
+                                        ; flag, don't copy it forward
+            lbr     lso_next
+
+lso_is_path:
+            ; append RD to ls_paths[ls_num_paths]
+            mov     rf, ls_num_paths
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = ls_num_paths (zero-
+                                        ; extended)
+            shl16   r8                  ; R8 = ls_num_paths * 2
+            mov     rb, ls_paths
+            add16   rb, r8              ; RB = &ls_paths[ls_num_paths]
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+
+            mov     rf, ls_num_paths
+            ldn     rf
+            adi     1
+            str     rf
+
+lso_next:
+            mov     rf, ls_scan_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     lso_loop
+
+lso_done:
+            rtn
 
 ls_resolve:
             ; --- read COLUMNS from the environment, once, here -- the
             ; one point every argv-parsing path above converges
-            ; through (both the "lbnf ls_resolve" early-outs and the
-            ; ls_save_patharg fallthrough), and safely past every use
-            ; of the entry RA/RC this program still needs (env_getenv/
-            ; env_parse_uint's own broad clobber footprint includes
-            ; both). Falls back to LS_SCREEN_COLS (ls_screen_cols'
-            ; own compile-time initial value) if COLUMNS is unset,
-            ; non-numeric, or parses to 0.
+            ; through (ls_scan_options' own 0/1-path fallthroughs, and
+            ; the 1-path ls_patharg capture just above), and safely
+            ; past every use of the entry RA/RC this program still
+            ; needs (env_getenv/env_parse_uint's own broad clobber
+            ; footprint includes both). Falls back to LS_SCREEN_COLS
+            ; (ls_screen_cols' own compile-time initial value) if
+            ; COLUMNS is unset, non-numeric, or parses to 0.
             mov     rf, ls_columns_name
             call    env_getenv          ; RF = value or 0
             ghi     rf
@@ -240,6 +365,11 @@ ls_columns_set:
             str     rb
 
 ls_resolve_body:
+            mov     rf, ls_num_paths
+            ldn     rf
+            smi     2
+            lbdf    ls_multi_stat       ; 2+ paths: new multi-stat mode
+
             mov     rf, ls_patharg
             lda     rf
             phi     rd
@@ -289,7 +419,9 @@ ls_find_loop:
             add16   rf, DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_DIR
-            lbz     ls_not_dir
+            lbz     ls_single_file      ; a matching FILE (not a
+                                        ; directory) just shows its
+                                        ; own entry line and exits
 
             mov     rf, ls_scratch
             add16   rf, DIRENT_CLUST
@@ -314,6 +446,35 @@ ls_open:
             plo     rd
             call    K_DIR_OPEN
 
+            call    ls_init_collect     ; falls through into the
+                                        ; collect loop below
+
+;------------------------------------------------------------------
+; Collect loop: K_DIR_READ each entry, hand it to ls_add_entry (which
+; copies the fields we need into a fixed-size struct, records it in
+; the pointer table, and advances/caps at LS_MAX_ENTRIES -- see its
+; own header below).
+;------------------------------------------------------------------
+ls_collect_loop:
+            mov     rf, ls_scratch
+            call    K_DIR_READ
+            lbdf    ls_collect_done     ; end of directory
+
+            call    ls_add_entry        ; DF=1: out of RAM, stop
+                                        ; collecting entirely
+            lbdf    ls_collect_done
+            lbr     ls_collect_loop
+
+;------------------------------------------------------------------
+; ls_init_collect: reset the entry-collection state (ls_count,
+; ls_next_entry, ls_next_ptrslot) -- must run before the FIRST
+; ls_add_entry call, regardless of which of the three paths
+; (directory scan via ls_open above, a single-file match via
+; ls_single_file, or ls_multi_stat) is about to populate the table.
+; Args:    none
+; Returns: nothing
+;------------------------------------------------------------------
+ls_init_collect:
             mov     rb, ls_count
             ldi     0
             str     rb
@@ -336,28 +497,30 @@ ls_open:
             inc     rb
             glo     rf
             str     rb                  ; ls_next_ptrslot = ls_ptrs
+            rtn
 
 ;------------------------------------------------------------------
-; Collect loop: K_DIR_READ each entry, copy the fields we need into
-; a fixed-size struct at ls_next_entry, record that struct's address
-; in the pointer table at ls_next_ptrslot, advance both, cap at
-; LS_MAX_ENTRIES (extras are silently dropped rather than failing).
+; ls_add_entry: given ls_scratch already filled (by K_DIR_READ or
+; K_STAT -- same DIRENT_LEN field layout either way), copy the fields
+; we need into a fixed-size struct at ls_next_entry, record that
+; struct's address in the pointer table at ls_next_ptrslot, advance
+; both, cap at LS_MAX_ENTRIES (extras are silently dropped rather than
+; failing).
+; Args:    none (reads ls_scratch)
+; Returns: nothing
+; Modifies: R7-RD (and D)
 ;------------------------------------------------------------------
-ls_collect_loop:
-            mov     rf, ls_scratch
-            call    K_DIR_READ
-            lbdf    ls_collect_done     ; end of directory
-
+ls_add_entry:
             mov     rf, ls_count
             lda     rf
             phi     rd
             ldn     rf
             plo     rd                  ; RD = ls_count
             ghi     rd
-            lbnz    ls_collect_loop     ; count >= 256: drop this entry
+            lbnz    ls_add_entry_drop   ; count >= 256: drop this entry
             glo     rd
             smi     LS_MAX_ENTRIES
-            lbdf    ls_collect_loop     ; count >= LS_MAX_ENTRIES: drop
+            lbdf    ls_add_entry_drop   ; count >= LS_MAX_ENTRIES: drop
 
             ; ---- compute this entry's real name length, bounded at
             ; LS_NAME_CAP (a safety bound -- DIRENT_NAME is always
@@ -402,11 +565,26 @@ ls_alloc_name:
             lbnz    ls_have_namebuf
             glo     rf
             lbnz    ls_have_namebuf
-            lbr     ls_collect_done     ; out of RAM: stop collecting,
-                                        ; sort/print whatever we already
-                                        ; have (same graceful-cap shape
-                                        ; as the LS_MAX_ENTRIES check
-                                        ; above)
+
+            ; BUG FIX (caught in review, before ever assembling): this
+            ; used to be "lbr ls_collect_done" directly, safe back when
+            ; this code ran inline (never via "call"). Now that
+            ; ls_add_entry is a real callable routine, jumping away
+            ; instead of returning would leave the return address
+            ; ls_collect_loop/ls_single_file/ls_multi_stat's own "call
+            ; ls_add_entry" just pushed sitting unpopped on the stack
+            ; -- every later "rtn" would then pop the WRONG address.
+            ; Signal "stop collecting entirely" via DF instead, and let
+            ; each caller decide what that means for its own loop (see
+            ; each call site).
+            stc                         ; DF=1: out of RAM, caller
+                                        ; should stop collecting
+                                        ; entirely and go straight to
+                                        ; sort/print (same graceful-cap
+                                        ; shape as the LS_MAX_ENTRIES
+                                        ; check above, just signaled
+                                        ; instead of jumped-to directly)
+            rtn
 
 ls_have_namebuf:
             mov     rb, ls_curnamebuf
@@ -561,7 +739,142 @@ ls_store_ptr:
             glo     rd
             str     rf                  ; ls_count++
 
-            lbr     ls_collect_loop
+            clc                         ; DF=0: caller should keep
+                                        ; collecting (explicit, not
+                                        ; relying on whatever DF the
+                                        ; add16 above happened to
+                                        ; leave -- that's a 16-bit
+                                        ; overflow carry, unrelated to
+                                        ; "should I stop collecting")
+            rtn
+
+ls_add_entry_drop:
+            ; BUG FIX (caught in review, before ever assembling): this
+            ; used to be "lbr ls_collect_loop" from back when this code
+            ; was inline inside that loop -- now that it's a separate
+            ; callable routine, also called from ls_single_file/
+            ; ls_multi_stat (neither of which ever did a K_DIR_OPEN),
+            ; jumping back into ls_collect_loop here would have issued
+            ; a K_DIR_READ against whatever directory happened to be
+            ; open (or none), corrupting the collection. A plain
+            ; return here has the same effect the old jump-back had
+            ; from ls_collect_loop's own perspective -- "don't add
+            ; this entry, go on to whatever's next" -- correctly for
+            ; every caller, since each caller already loops on its
+            ; own. Unreachable in practice today (LS_MAX_ENTRIES=255
+            ; comfortably exceeds anything ls_single_file/
+            ; ls_multi_stat can ever produce, capped by
+            ; ARGV_MAX_ARGS=16), but wrong regardless.
+            clc                         ; DF=0: caller should keep
+                                        ; collecting -- dropping one
+                                        ; entry for being over the cap
+                                        ; isn't the fatal "stop
+                                        ; entirely" case bump_alloc
+                                        ; failure is
+            rtn
+
+;------------------------------------------------------------------
+; ls_single_file: the one path argument resolved to a FILE (not a
+; directory) -- ls_scratch is already filled by ls_find_loop's own
+; successful match, so this just adds that one entry and jumps
+; straight to sort+print (which produces a single-line result, same
+; as any other one-entry collection).
+;------------------------------------------------------------------
+ls_single_file:
+            call    ls_init_collect
+            call    ls_add_entry        ; DF result deliberately
+                                        ; unchecked -- only one entry
+                                        ; is ever added here, and the
+                                        ; next step is ls_collect_done
+                                        ; either way
+            lbr     ls_collect_done
+
+;------------------------------------------------------------------
+; ls_multi_stat: two or more path arguments (typically via the
+; shell's own glob expansion, e.g. "LS *.txt") -- K_STAT each one
+; independently and add it to the collection via ls_add_entry, same
+; as a directory-scan entry (works for both columnar and -l output
+; with no changes to either print routine, since a multi-stat match's
+; attribute byte is exactly what -l mode's own per-entry logic
+; already branches on). A bad argument prints its own error and the
+; rest still run; ls_any_error drives the final exit code.
+;------------------------------------------------------------------
+ls_multi_stat:
+            call    ls_init_collect
+
+            mov     rf, ls_multi_i
+            ldi     0
+            str     rf
+
+lms_loop:
+            mov     rf, ls_multi_i
+            ldn     rf
+            str     r2                  ; M(X) = ls_multi_i
+            mov     rf, ls_num_paths
+            ldn     rf                  ; D = ls_num_paths
+            xor                         ; D = ls_num_paths XOR ls_multi_i
+            lbz     lms_done            ; ls_multi_i == ls_num_paths: done
+
+            ; RD = ls_paths[ls_multi_i]
+            mov     rf, ls_multi_i
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = ls_multi_i (zero-extended)
+            shl16   r8                  ; R8 = ls_multi_i * 2
+            mov     rf, ls_paths
+            add16   rf, r8              ; RF = &ls_paths[ls_multi_i]
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = ls_paths[ls_multi_i]
+
+            ; stash the path pointer for the possible error message
+            ; below BEFORE calling K_STAT -- its own clobber footprint
+            ; isn't proven anywhere in this codebase yet
+            mov     rf, ls_cur_path
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, rd              ; RF = path string
+            mov     rd, ls_scratch      ; RD = result buffer
+            call    K_STAT              ; DF = 0/1
+            lbdf    lms_not_found
+
+            call    ls_add_entry        ; DF=1: out of RAM, stop
+                                        ; collecting entirely
+            lbdf    ls_collect_done
+            lbr     lms_next
+
+lms_not_found:
+            call    K_INMSG
+            db      "Not found: ",0
+            mov     rf, ls_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, ls_any_error
+            ldi     $FF
+            str     rf
+
+lms_next:
+            mov     rf, ls_multi_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     lms_loop
+
+lms_done:
+            lbr     ls_collect_done
 
 ;------------------------------------------------------------------
 ; Insertion sort ls_ptrs[0 .. ls_count-1] by name (ls_namecmp).
@@ -1631,18 +1944,20 @@ ls_long_count_done:
             lbr     ls_long_loop
 
 ls_print_done:
+            mov     rf, ls_any_error
+            ldn     rf
+            lbnz    ls_exit_err
+
             ldi     0                   ; exit code 0 = success
+            rtn
+
+ls_exit_err:
+            ldi     1
             rtn
 
 ls_not_found:
             call    K_INMSG
             db      "Directory not found.",13,10,0
-            ldi     1
-            rtn
-
-ls_not_dir:
-            call    K_INMSG
-            db      "Not a directory.",13,10,0
             ldi     1
             rtn
 
@@ -1751,6 +2066,20 @@ ls_cluster:     dw      0
 ls_patharg:     dw      0
 ls_argptr2:     dw      0
 ls_scratch:     ds      DIRENT_LEN
+
+; ---- multi-argument / option-scan state (2026-07-22) ----
+ls_argv:        dw      0           ; stashed argv pointer (ls_scan_options)
+ls_argc:        db      0           ; stashed argc
+ls_scan_i:      db      0           ; ls_scan_options' own loop index
+ls_paths:       ds      ARGV_MAX_ARGS * 2  ; compacted, zero-based
+                                    ; non-flag argv pointers
+ls_num_paths:   db      0           ; count of entries in ls_paths
+ls_multi_i:     db      0           ; ls_multi_stat's own loop index
+                                    ; (0-based, indexes ls_paths)
+ls_cur_path:    dw      0           ; ls_multi_stat's current path,
+                                    ; stashed before each K_STAT call
+ls_any_error:   db      0           ; set if any ls_multi_stat lookup
+                                    ; failed -- drives the exit code
 
 ls_count:       dw      0
 ls_next_entry:  dw      0
