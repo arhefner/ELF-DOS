@@ -1,7 +1,11 @@
 ;
 ; ls.asm - list a directory, Linux ls-style
 ;
-; Usage: LS [-l] [path]
+; Usage: LS [-lF] [path...]
+;
+; Options may appear anywhere on the line, combined or separate ("-lF"
+; and "-l -F" behave identically -- see ls_scan_options), and don't
+; count as path arguments.
 ;
 ; Default output: sorted file/directory names only, printed in
 ; columns (column-major fill order, matching real Unix ls -- entries
@@ -18,6 +22,19 @@
 ; same FAT packed-date/time unpacking logic, copied rather than
 ; shared -- this project's established precedent, see DIR/STAT), then
 ; the name.
+;
+; -F: append "/" after directory entries (no executable-attribute
+; concept on ELF-DOS, so unlike real ls -F this is the only suffix
+; case). Composes with quoting below -- a directory name containing a
+; space prints as 'my dir'/, quotes around the name, slash outside.
+;
+; A name containing a space (2026-07-22) prints single-quoted, e.g.
+; 'my file.txt' -- shows exactly how the name would need to be typed
+; on a future command line, and makes an otherwise invisible trailing
+; space (legal in an LFN entry, though never in an 8.3 short name)
+; visible. Precomputed once per entry at collection time
+; (ls_add_entry's own namelen scan, LSENT_QUOTE) rather than
+; rescanned at print time -- see ls_print_name.
 ;
 ; With no path argument, lists the current directory (matching DIR's
 ; own default). A path argument (bare name, relative, or absolute)
@@ -72,12 +89,31 @@ LSENT_NAMEPTR:  equ     7           ; 2 bytes: pointer to a heap_bump-
                                     ; (sized to the real name's length,
                                     ; not a fixed buffer -- see the file
                                     ; header comment)
-LSENT_NAMELEN:  equ     9           ; 1 byte: the name's real length
-                                    ; (0-127), precomputed at collection
-                                    ; time so the per-column-width
-                                    ; layout pass (2026-07-19) never
-                                    ; needs to re-strlen a name
-LSENT_LEN:      equ     10
+LSENT_NAMELEN:  equ     9           ; 1 byte: this entry's DISPLAY
+                                    ; length (2026-07-22: redefined from
+                                    ; "real name length" -- now the real
+                                    ; length + 2 if LSENT_QUOTE is set +
+                                    ; 1 if -F applies to this entry),
+                                    ; precomputed at collection time so
+                                    ; the per-column-width layout pass
+                                    ; (2026-07-19) and the print-time
+                                    ; padding calculation both just read
+                                    ; this back rather than rescanning
+                                    ; the name or re-checking -F/ATTR_DIR
+                                    ; live. The real string length used
+                                    ; for the bump_alloc size and the
+                                    ; name-copy loop's bound is a
+                                    ; SEPARATE local (ls_namelen) that
+                                    ; never includes these adjustments --
+                                    ; conflating the two would make the
+                                    ; copy loop read past the real name.
+LSENT_QUOTE:    equ     10          ; 1 byte: 1 if this entry's name
+                                    ; contains a space and should be
+                                    ; printed single-quoted, else 0 --
+                                    ; precomputed at collection time
+                                    ; (ls_add_entry) so print time never
+                                    ; needs to rescan for a space either.
+LSENT_LEN:      equ     11
 
 LS_NAME_CAP:    equ     127         ; matches K_DIR_READ's own DIRENT_NAME
                                     ; limit -- caps the length-counting
@@ -87,14 +123,15 @@ LS_NAME_CAP:    equ     127         ; matches K_DIR_READ's own DIRENT_NAME
 
 ; LS_MAX_ENTRIES raised back up (2026-07-19, alongside the switch to
 ; heap_bump for name storage) now that the fixed per-entry cost is tiny
-; (LSENT_LEN=9 + 2 bytes in ls_ptrs = 11 bytes/entry, vs. the 137
-; bytes/entry the old fixed-inline-name design cost). Capped at 255,
-; not raised further, so the collect loop's existing single-byte
-; ls_count bounds check (below) needs no changes -- it already treats
-; 256 as a hard ceiling. 255 * 11 = 2805 bytes fixed -- well under the
-; OLD 48-entry budget (6576 bytes) while supporting over 5x as many
-; entries; actual name storage now scales with the real directory
-; content instead of a worst-case per-slot reservation.
+; (LSENT_LEN=11 [was 10 before the 2026-07-22 LSENT_QUOTE addition] + 2
+; bytes in ls_ptrs = 13 bytes/entry, vs. the 137 bytes/entry the old
+; fixed-inline-name design cost). Capped at 255, not raised further, so
+; the collect loop's existing single-byte ls_count bounds check (below)
+; needs no changes -- it already treats 256 as a hard ceiling.
+; 255 * 13 = 3315 bytes fixed -- well under the OLD 48-entry budget
+; (6576 bytes) while supporting over 5x as many entries; actual name
+; storage now scales with the real directory content instead of a
+; worst-case per-slot reservation.
 LS_MAX_ENTRIES: equ     255
 LS_MAX_COLS:    equ     32
 LS_SCREEN_COLS: equ     80
@@ -142,6 +179,10 @@ start:
             mov     rf, ls_longmode
             ldi     0
             str     rf                  ; ls_longmode = 0
+
+            mov     rf, ls_fmode
+            ldi     0
+            str     rf                  ; ls_fmode = 0
 
             mov     rf, ls_patharg
             ldi     0
@@ -210,15 +251,23 @@ start:
 
 ;------------------------------------------------------------------
 ; ls_scan_options: walk argv[1..argc-1] once, recognizing flags
-; anywhere on the line (today just "-l", exact-token match, same
-; convention progs/mr.asm/progs/ms.asm's own "-u"/"-b" flags already
-; use -- not combined-short-option parsing like "-la") and building a
-; compacted, zero-based list of the remaining (non-flag) arguments in
-; ls_paths/ls_num_paths. Adding a future flag (-a, -F, ...) is just
-; one more comparison block here -- everything downstream only ever
-; looks at ls_paths/ls_num_paths/ls_longmode, never argv directly.
+; anywhere on the line. A token is an option cluster if it starts with
+; "-" and has at least one character after it ("-l", "-F", "-lF", ...
+; -- real getopt-style clustering, so "-lF" and "-l -F" behave
+; identically); every character after the leading "-" is scanned
+; independently ('l' sets ls_longmode, 'F' sets ls_fmode, anything else
+; is silently ignored -- a deliberate minimal choice, matching this
+; project's generally lenient argument handling elsewhere, e.g. echo/
+; args don't validate either). The whole token is consumed either way,
+; never copied into ls_paths, even if some/all of its characters went
+; unrecognized. A bare "-" (nothing after it) falls through and is
+; treated as an ordinary path token instead, avoiding an ambiguous
+; empty cluster. Builds a compacted, zero-based list of the remaining
+; (non-flag) arguments in ls_paths/ls_num_paths -- everything
+; downstream only ever looks at ls_paths/ls_num_paths/ls_longmode/
+; ls_fmode, never argv directly.
 ; Args:    none (reads RA/RC directly, at entry)
-; Returns: nothing (ls_paths/ls_num_paths/ls_longmode set)
+; Returns: nothing (ls_paths/ls_num_paths/ls_longmode/ls_fmode set)
 ; Modifies: R7, R8, RB, RD, RF (and D)
 ;------------------------------------------------------------------
 ls_scan_options:
@@ -274,31 +323,45 @@ lso_loop:
             ldn     rf
             plo     rd                  ; RD = argv[ls_scan_i]
 
-            ; is it exactly "-l"?
+            ; is this token an option cluster ("-" followed by at
+            ; least one flag character)? A bare "-" (nothing after it)
+            ; falls through and is treated as an ordinary path token.
             mov     rf, rd
             ldn     rf                  ; D = token[0]
             xri     '-'
             lbnz    lso_is_path
 
             mov     rf, rd
-            inc     rf
+            inc     rf                  ; RF = &token[1]
             ldn     rf                  ; D = token[1]
+            lbz     lso_is_path         ; bare "-": treat as a path
+
+lso_optchar_loop:
+            ldn     rf                  ; D = current option character
+            lbz     lso_next            ; end of cluster: whole token
+                                        ; consumed, move to the next
+                                        ; argv slot (never added to
+                                        ; ls_paths)
+
             xri     'l'
-            lbnz    lso_is_path
-
-            mov     rf, rd
-            inc     rf
-            inc     rf
-            ldn     rf                  ; D = token[2] -- must be NUL
-                                        ; for "-l" to be exactly this
-                                        ; whole token
-            lbnz    lso_is_path
-
-            mov     rf, ls_longmode
+            lbnz    lso_opt_notl
+            mov     rb, ls_longmode
             ldi     1
-            str     rf                  ; recognized "-l": set the
-                                        ; flag, don't copy it forward
-            lbr     lso_next
+            str     rb                  ; recognized 'l': set the flag
+            lbr     lso_optchar_next
+
+lso_opt_notl:
+            ldn     rf                  ; reload -- xri above clobbered D
+            xri     'F'
+            lbnz    lso_optchar_next    ; unrecognized: silently ignore,
+                                        ; just advance past it
+            mov     rb, ls_fmode
+            ldi     1
+            str     rb                  ; recognized 'F': set the flag
+
+lso_optchar_next:
+            inc     rf
+            lbr     lso_optchar_loop
 
 lso_is_path:
             ; append RD to ls_paths[ls_num_paths]
@@ -525,14 +588,30 @@ ls_add_entry:
             ; ---- compute this entry's real name length, bounded at
             ; LS_NAME_CAP (a safety bound -- DIRENT_NAME is always
             ; NUL-terminated within its own buffer, so this is never
-            ; expected to actually trigger) ----
+            ; expected to actually trigger). Also detects a space
+            ; anywhere in the name (2026-07-22, ls_hasquote) -- position
+            ; doesn't matter, so this catches a trailing space (the
+            ; user's own motivating case, otherwise invisible) the same
+            ; as an embedded one. ----
             mov     rd, ls_scratch      ; RD = DIRENT_NAME (offset 0)
             ldi     0
             plo     r9                  ; R9.0 = length so far
 
+            mov     rb, ls_hasquote
+            ldi     0
+            str     rb                  ; ls_hasquote = 0 (reset fresh
+                                        ; for every entry)
+
 ls_namelen_loop:
             ldn     rd
             lbz     ls_namelen_done     ; source NUL: done
+            xri     ' '
+            lbnz    ls_namelen_notspace
+            mov     rb, ls_hasquote
+            ldi     1
+            str     rb
+
+ls_namelen_notspace:
             glo     r9
             smi     LS_NAME_CAP
             lbdf    ls_namelen_done     ; cap reached: truncate here
@@ -682,9 +761,48 @@ ls_namecopy_done:
             str     rf                  ; entry->nameptr = ls_curnamebuf
             inc     rf                  ; RF now at LSENT_NAMELEN in dest
 
+            ; ---- compute this entry's DISPLAY length (real name
+            ; length + 2 if it'll be single-quoted for containing a
+            ; space + 1 if -F is active and this entry is a
+            ; directory) -- precomputed here, once, so BOTH the
+            ; column-width layout pass and the print-time padding
+            ; calculation can just read it back rather than rescanning
+            ; the name or re-checking -F/ATTR_DIR at print time. The
+            ; REAL string length (ls_namelen) is left untouched --
+            ; it's still needed as-is for the bump_alloc size and the
+            ; name-copy loop's bound above, both already done by this
+            ; point. ----
             mov     rd, ls_namelen
             ldn     rd
-            str     rf                  ; entry->namelen = ls_namelen
+            plo     r9                  ; R9.0 = real name length
+
+            mov     rb, ls_hasquote
+            ldn     rb
+            lbz     ladd_dlen_noquote
+            glo     r9
+            adi     2
+            plo     r9
+ladd_dlen_noquote:
+
+            mov     rb, ls_fmode
+            ldn     rb
+            lbz     ladd_dlen_nof       ; -F not active: skip
+            mov     rd, ls_scratch
+            add16   rd, DIRENT_ATTR
+            ldn     rd
+            ani     ATTR_DIR
+            lbz     ladd_dlen_nof       ; not a directory: skip
+            glo     r9
+            adi     1
+            plo     r9
+ladd_dlen_nof:
+            glo     r9
+            str     rf                  ; entry->namelen = display len
+            inc     rf                  ; RF now at LSENT_QUOTE in dest
+
+            mov     rd, ls_hasquote
+            ldn     rd
+            str     rf                  ; entry->quote = ls_hasquote
 
 ls_store_ptr:
             mov     rf, ls_next_ptrslot
@@ -771,6 +889,81 @@ ls_add_entry_drop:
                                         ; isn't the fatal "stop
                                         ; entirely" case bump_alloc
                                         ; failure is
+            rtn
+
+;------------------------------------------------------------------
+; ls_print_name: print one entry's display name -- single-quoted if
+; LSENT_QUOTE is set (a space anywhere in the name, precomputed at
+; collection time so this never needs to rescan), with a trailing "/"
+; appended if -F is active and the entry is a directory (outside the
+; closing quote, e.g. 'my dir'/). Shared by both the columnar and -l
+; print paths so the quote/-F logic exists in exactly one place.
+;
+; Reads ls_curentry (entry struct address) / ls_curname (name pointer)
+; from memory rather than taking register args -- neither R8 nor RF is
+; confirmed to survive a K_MSG/K_INMSG call (gotcha #8/#10, only R9
+; has ever been confirmed safe across these), so both are reloaded
+; fresh from memory at each point they're needed, matching this file's
+; own established discipline (see ls_pad_loop's own header comment for
+; the same reasoning). Callers must set both before calling.
+;
+; Args:    none (reads ls_curentry/ls_curname)
+; Returns: nothing
+; Modifies: RD, RF (and D)
+;------------------------------------------------------------------
+ls_print_name:
+            mov     rd, ls_curentry
+            lda     rd
+            phi     rf
+            ldn     rd
+            plo     rf                  ; RF = entry struct address
+            add16   rf, LSENT_QUOTE
+            ldn     rf                  ; D = quote flag
+            lbz     lpn_open_done
+
+            call    K_INMSG
+            db      "'",0
+
+lpn_open_done:
+            mov     rf, ls_curname
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd              ; RF = name address
+            call    K_MSG
+
+            mov     rd, ls_curentry
+            lda     rd
+            phi     rf
+            ldn     rd
+            plo     rf                  ; RF = entry struct address
+            add16   rf, LSENT_QUOTE
+            ldn     rf                  ; D = quote flag
+            lbz     lpn_close_done
+
+            call    K_INMSG
+            db      "'",0
+
+lpn_close_done:
+            mov     rf, ls_fmode
+            ldn     rf
+            lbz     lpn_done            ; -F not active: no suffix
+
+            mov     rd, ls_curentry
+            lda     rd
+            phi     rf
+            ldn     rd
+            plo     rf                  ; RF = entry struct address
+            add16   rf, LSENT_ATTR
+            ldn     rf                  ; D = attr byte
+            ani     ATTR_DIR
+            lbz     lpn_done            ; not a directory: no suffix
+
+            call    K_INMSG
+            db      "/",0
+
+lpn_done:
             rtn
 
 ;------------------------------------------------------------------
@@ -1535,7 +1728,8 @@ ls_col_loop:
                                         ; skip printing (leaves a gap,
                                         ; matching the last, short row)
 
-            ; print ls_ptrs[idx]->name, padded to col_width
+            ; print ls_ptrs[idx]->name (quoted/-F suffixed as
+            ; appropriate -- see ls_print_name), padded to col_width
             shl16   rd                  ; RD = idx * 2
             mov     rf, ls_ptrs
             add16   rf, rd              ; RF = &ls_ptrs[idx]
@@ -1543,6 +1737,16 @@ ls_col_loop:
             phi     r8
             ldn     rf
             plo     r8                  ; R8 = entry struct address
+
+            mov     rb, ls_curentry
+            ghi     r8
+            str     rb
+            inc     rb
+            glo     r8
+            str     rb                  ; ls_curentry = entry struct
+                                        ; address (ls_print_name's own
+                                        ; memory-argument convention --
+                                        ; see its header comment)
 
             mov     rf, r8
             add16   rf, LSENT_NAMEPTR   ; RF = &(entry->nameptr)
@@ -1565,36 +1769,31 @@ ls_col_loop:
                                         ; ever been confirmed safe
                                         ; across these)
 
-            mov     rf, r9              ; RF = name address (K_MSG's arg)
-            call    K_MSG
+            call    ls_print_name
 
-            ; pad with spaces to this column's own width: track printed
-            ; length via
-            ; a fresh strlen scan, reloading ls_curname from memory
-            ; rather than trusting any register across the call above
-            mov     rf, ls_curname
+            ; pad with spaces to this column's own width: length comes
+            ; from entry->LSENT_NAMELEN, the precomputed DISPLAY length
+            ; (already including quote/-F adjustments -- see
+            ; ls_add_entry) rather than a live rescan of the raw name,
+            ; which would under-pad once quoting/-F print characters
+            ; that were never part of the raw name text at all.
+            mov     rf, ls_curentry
             lda     rf
             phi     rd
             ldn     rf
-            plo     rd
-            mov     rf, rd              ; RF = name address (fresh)
+            plo     rd                  ; RD = entry struct address
+            add16   rd, LSENT_NAMELEN
+            mov     rf, rd
+            ldn     rf
+            plo     r9
             ldi     0
-            plo     r9                  ; R9.0 = name length -- R9 IS
+            phi     r9                  ; R9 = display length -- R9 IS
                                         ; confirmed to survive K_INMSG
                                         ; (gotcha #8, and the redirect
                                         ; dispatcher's own explicit R9
                                         ; preservation), so it's safe to
                                         ; carry across ls_pad_loop's own
                                         ; call below
-ls_pad_len_loop:
-            ldn     rf
-            lbz     ls_pad_len_done
-            inc     rf
-            glo     r9
-            adi     1
-            plo     r9
-            lbr     ls_pad_len_loop
-ls_pad_len_done:
 ls_pad_loop:
             ; col_width is looked up fresh from ls_colwidths[ls_col]
             ; every iteration (2026-07-19: per-column widths, not one
@@ -1922,8 +2121,19 @@ ls_long_count_done:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = entry's real name pointer
-            mov     rf, rd              ; RF = name address (K_MSG's arg)
-            call    K_MSG
+
+            mov     rb, ls_curname
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; ls_curname = name address
+                                        ; (ls_curentry is already set
+                                        ; earlier in this loop --
+                                        ; ls_print_name's own
+                                        ; memory-argument convention)
+
+            call    ls_print_name
 
             call    K_INMSG
             db      13,10,0
@@ -2062,6 +2272,12 @@ lp2d_print:
 
 ; ---- scratch / state ----
 ls_longmode:    db      0
+ls_fmode:       db      0           ; -F: append "/" to directory entries
+ls_hasquote:    db      0           ; per-entry scratch, set during
+                                    ; ls_add_entry's own namelen scan --
+                                    ; NOT a global mode flag like
+                                    ; ls_longmode/ls_fmode, reset fresh
+                                    ; for every entry
 ls_cluster:     dw      0
 ls_patharg:     dw      0
 ls_argptr2:     dw      0
