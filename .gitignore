@@ -65,3 +65,7 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Claude Code local tooling state (permission allowlists etc.) --
+# accumulated tool-approval history, not project source or shared config
+/.claude/
