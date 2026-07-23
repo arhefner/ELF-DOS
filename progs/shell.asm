@@ -113,15 +113,18 @@ start_check_echo_off:
 start_interactive:
             call    print_prompt
 
-            mov     rf, LINE_BUF
-            ldi     127
-            plo     rc
-            ldi     0
-            phi     rc                  ; RC = 127 (buffer length for K_INPUTL)
-            call    K_INPUTL
+            call    read_line_with_history  ; owns echo/backspace/
+                                        ; Up-Down recall itself -- see
+                                        ; its own header comment. Same
+                                        ; contract K_INPUTL had: LINE_BUF
+                                        ; filled, NUL-terminated, on
+                                        ; return.
 
             call    K_INMSG
             db      13,10,0
+
+            call    hist_append         ; best-effort; no-op for a
+                                        ; blank line
 
 start_have_line:
             ; skip leading whitespace
@@ -2129,5 +2132,821 @@ pp_drive:   db      0                   ; K_GETCURDIR's D return
                                         ; (cur_drive), stashed at
                                         ; print_prompt's own entry
 pp_dirent:  ds      DIRENT_LEN
+
+;------------------------------------------------------------------
+; Command-line history (2026-07-22). Persistent, disk-backed --
+; "<shell_drive letter>:/bin/history.dat" -- the user's own proposal
+; over a kernel-resident buffer, since it survives reboots and costs
+; zero permanent kernel bytes. Recall only for v1: Up/Down cycle
+; through history, replacing the line wholesale -- no mid-line cursor
+; movement. Escape sequences: hardware-confirmed 2026-07-23 that this
+; terminal actually sends the older VT52 convention for arrow keys --
+; bare ESC A (Up) / ESC B (Down), no bracket -- not the ANSI/VT100 CSI
+; form (ESC [ A / ESC [ B) originally assumed. Both are handled: VT52's
+; bare letter is checked first (since it's what's actually in use
+; here), with the bracketed CSI form kept as a fallback in case this
+; shell is ever used through a terminal/emulator in ANSI mode instead.
+; Anything else after ESC (in either form) is silently discarded rather
+; than corrupting the line. Backspace is 0x08 -- hardware-confirmed
+; working. Enter is CR (0x0D) or LF (0x0A) -- treating either as a
+; terminator was a deliberate defensive choice made before hardware
+; testing, since the exact byte(s) a live Enter keypress sends wasn't
+; independently confirmed the way the arrow keys/backspace now are;
+; hardware-confirmed 2026-07-22 that a blank Enter produces an
+; immediate clean reprompt with no spurious extra blank line, so
+; whatever this terminal actually sends for Enter, the CR-or-LF
+; handling deals with it correctly.
+;
+; read_line_with_history replaces K_INPUTL at its one call site
+; (start_interactive) -- this call site is NEVER redirected (shell
+; input redirection only ever applies to a CHILD program's own I/O,
+; never the shell's own prompt read), so there's no EOF/redirect case
+; to handle here. Reads use f_uread (the raw UART BIOS entry point,
+; EBIOS+0Ch), not K_READ -- hardware-confirmed 2026-07-23 that K_READ's
+; own two-layer indirection (kernel jump table, then the BIOS's own
+; internal RAM-vector redirect) was slow enough between this routine's
+; per-byte branching to drop the '[' byte of a real "ESC [ A"/"ESC [ B"
+; arrow-key sequence -- the exact bug progs/mr.asm/progs/ms.asm already
+; hit and fixed the same way (see their own header comments); nothing
+; is lost bypassing K_READ here since redirection never applies to this
+; call site regardless. Echo still uses K_TYPE, not K_TTY -- K_TYPE is
+; already exercised once per byte by TYPE.exe's own hot loop across
+; this project's whole history, while K_TTY has a documented hardware
+; caution under repeated calls (/CLAUDE.md gotcha #14); the byte-drop
+; risk that motivated switching reads to f_uread is specifically about
+; input arriving faster than it's read, which doesn't apply to output
+; we control the timing of ourselves.
+;
+; HISTORY_LOAD_BUDGET is deliberately kept under 256 bytes so the
+; "bytes actually loaded this session" bookkeeping (hist_loaded_len)
+; and the tail-scan's own remaining-byte countdown can both stay
+; single-byte arithmetic throughout hist_split -- trading a little
+; recall depth (still enough for "a handful of recent commands") for
+; meaningfully simpler, lower-risk code. The FILE itself is never
+; capped -- only the tail loaded into RAM for any one session is.
+;------------------------------------------------------------------
+HISTORY_LOAD_BUDGET: equ 255
+HISTORY_MAX_LINES:   equ 16
+
+;------------------------------------------------------------------
+; read_line_with_history: see the section header above.
+; Args:    none
+; Returns: nothing (LINE_BUF filled, NUL-terminated -- identical
+;          contract to the K_INPUTL call this replaces)
+;------------------------------------------------------------------
+read_line_with_history:
+            mov     rf, hist_cur_len
+            ldi     0
+            str     rf
+
+            mov     rf, LINE_BUF
+            ldi     0
+            str     rf
+
+            mov     rf, hist_loaded
+            ldi     0
+            str     rf
+
+            mov     rf, hist_recalling
+            ldi     0
+            str     rf
+
+            mov     rf, hist_index
+            ldi     0
+            str     rf
+
+rlwh_loop:
+            call    f_uread             ; D = char (blocking) -- direct
+                                        ; BIOS call, not K_READ (see this
+                                        ; routine's own header comment:
+                                        ; hardware-confirmed 2026-07-23
+                                        ; that K_READ's own indirection
+                                        ; drops bytes arriving in rapid
+                                        ; succession, exactly the mr.asm/
+                                        ; ms.asm precedent this mirrors)
+            plo     rc                  ; RC.0 = char (D unchanged,
+                                        ; plo doesn't touch it)
+
+            ; ESC checked FIRST (not last) -- minimizes the latency
+            ; between reading ESC and rlwh_escape's own next f_uread
+            ; call, giving maximum headroom against the exact byte-drop
+            ; risk that motivated switching to f_uread in the first
+            ; place (see that routine's own header comment). Costs one
+            ; extra comparison on every OTHER byte (ordinary chars, CR/
+            ; LF, backspace) to buy this -- negligible, since none of
+            ; those paths are timing-sensitive the way a multi-byte
+            ; escape sequence is.
+            glo     rc
+            xri     27                  ; ESC
+            lbz     rlwh_escape
+
+            glo     rc
+            xri     13                  ; CR
+            lbz     rlwh_done
+            glo     rc
+            xri     10                  ; LF
+            lbz     rlwh_done
+
+            glo     rc
+            xri     8                   ; backspace
+            lbz     rlwh_backspace
+
+            ; ---- ordinary character: append if there's room ----
+            mov     rf, hist_cur_len
+            ldn     rf
+            smi     127
+            lbdf    rlwh_loop           ; at cap: silently drop
+
+            mov     rf, hist_cur_len
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = hist_cur_len (zero-ext)
+            mov     rf, LINE_BUF
+            add16   rf, r8              ; RF = LINE_BUF + hist_cur_len
+            glo     rc
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf                  ; NUL-terminate right after
+
+            mov     rf, hist_cur_len
+            ldn     rf
+            adi     1
+            str     rf                  ; hist_cur_len++
+
+            glo     rc
+            call    K_TYPE              ; echo
+
+            lbr     rlwh_loop
+
+rlwh_backspace:
+            mov     rf, hist_cur_len
+            ldn     rf
+            lbz     rlwh_loop           ; empty: no-op
+
+            smi     1
+            plo     r8                  ; stash the decremented value
+                                        ; (gotcha #4: the mov below
+                                        ; would clobber D first)
+            mov     rf, hist_cur_len
+            glo     r8
+            str     rf                  ; hist_cur_len--
+
+            mov     rf, hist_cur_len
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            mov     rf, LINE_BUF
+            add16   rf, r8
+            ldi     0
+            str     rf                  ; LINE_BUF[new_len] = NUL
+
+            ldi     8
+            call    K_TYPE
+            ldi     ' '
+            call    K_TYPE
+            ldi     8
+            call    K_TYPE
+
+            lbr     rlwh_loop
+
+rlwh_escape:
+            call    f_uread             ; direct BIOS call, not K_READ
+                                        ; -- see below
+            plo     rc                  ; RC.0 = byte immediately after ESC
+
+            ; The terminal sends real ANSI/VT100 "ESC [ A"/"ESC [ B" --
+            ; an earlier bare-ESC-letter theory turned out to be wrong,
+            ; see the CLAUDE.md write-up for the full history. What
+            ; actually happened: K_READ's own two-layer indirection
+            ; (kernel jump table, then the BIOS's own internal RAM-
+            ; vector redirect) was slow enough, between this routine's
+            ; own per-byte branching, to lose the '[' byte to the
+            ; UART's single-byte holding register being overwritten by
+            ; 'A'/'B' before it was ever read -- the exact bug
+            ; progs/mr.asm/progs/ms.asm already hit and fixed the same
+            ; way (see their own header comments): call the raw BIOS
+            ; entry point (f_uread, EBIOS+0Ch) directly, skipping both
+            ; indirection hops. Every read in this routine goes through
+            ; f_uread instead of K_READ for that reason -- input
+            ; redirection never applies to this call site anyway (see
+            ; the section header comment above), so nothing is lost by
+            ; bypassing K_READ's own redirect-aware dispatch.
+            ;
+            ; HARDWARE-CONFIRMED 2026-07-23, including a test round that
+            ; specifically ruled out a masked failure: a bare-letter
+            ; ("ESC A"/"ESC B", no bracket) fallback was tried first as
+            ; defense-in-depth, then deliberately removed for one test
+            ; round specifically because its presence couldn't
+            ; distinguish "the real CSI path arrives intact" from "'['
+            ; is still being dropped and we're silently landing on the
+            ; fallback every time" -- recall worked with ONLY the real
+            ; CSI path reachable, confirming f_uread actually fixed the
+            ; byte-drop rather than papering over it. Deliberately left
+            ; out permanently (the user's own call): accepting a
+            ; malformed sequence here would risk masking a real
+            ; regression the same way, e.g. if a future baud-rate change
+            ; or the bit-bang UART path reintroduces byte loss -- better
+            ; for Up/Down to visibly stop working than to silently
+            ; degrade to whatever partial byte arrived.
+            glo     rc
+            xri     '['
+            lbnz    rlwh_loop           ; neither form: discard, continue
+
+            call    f_uread
+            plo     rc
+            glo     rc
+            xri     'A'
+            lbz     rlwh_up
+            glo     rc
+            xri     'B'
+            lbz     rlwh_down
+            lbr     rlwh_loop           ; unrecognized: discard
+
+rlwh_up:
+            call    hist_recall_up
+            lbr     rlwh_loop
+
+rlwh_down:
+            call    hist_recall_down
+            lbr     rlwh_loop
+
+rlwh_done:
+            rtn
+
+;------------------------------------------------------------------
+; hist_copy_entry: copy hist_lines[index] (a NUL-terminated pointer
+; into hist_buf) into LINE_BUF.
+; Args:    D = index into hist_lines
+; Returns: nothing
+; Modifies: R8, RD, RF (and D)
+;------------------------------------------------------------------
+hist_copy_entry:
+            plo     r8
+            ldi     0
+            phi     r8
+            shl16   r8                  ; R8 = index * 2
+            mov     rf, hist_lines
+            add16   rf, r8              ; RF = &hist_lines[index]
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = hist_lines[index]
+
+            mov     rf, rd
+            mov     rd, LINE_BUF
+hce_loop:
+            lda     rf
+            str     rd
+            lbz     hce_done
+            inc     rd
+            lbr     hce_loop
+hce_done:
+            rtn
+
+;------------------------------------------------------------------
+; hist_redraw_linebuf: erase the currently-displayed hist_cur_len
+; characters and reprint LINE_BUF's CURRENT content -- caller has
+; already written the new content into LINE_BUF before calling this.
+; The erase-count is kept in memory, not a register, across the
+; repeated K_TYPE calls (gotcha #8/#10 -- only R9 is confirmed to
+; survive these, and it isn't used here).
+; Args:    none (reads hist_cur_len, LINE_BUF)
+; Returns: nothing (hist_cur_len updated to LINE_BUF's new length)
+; Modifies: RC, RD, RF (and D)
+;------------------------------------------------------------------
+hist_redraw_linebuf:
+            mov     rf, hist_erase_count
+            mov     rb, hist_cur_len
+            ldn     rb
+            str     rf
+
+hrl_erase_loop:
+            mov     rf, hist_erase_count
+            ldn     rf
+            lbz     hrl_erase_done
+
+            ldi     8
+            call    K_TYPE
+            ldi     ' '
+            call    K_TYPE
+            ldi     8
+            call    K_TYPE
+
+            mov     rf, hist_erase_count
+            ldn     rf
+            smi     1
+            str     rf
+            lbr     hrl_erase_loop
+
+hrl_erase_done:
+            mov     rf, LINE_BUF
+            call    shell_strlen        ; RC = new length, RF unchanged
+            mov     rf, hist_cur_len
+            glo     rc
+            str     rf
+
+            mov     rf, LINE_BUF
+            call    K_MSG
+
+            rtn
+
+;------------------------------------------------------------------
+; hist_recall_up: Up arrow -- lazy-load history on first use, then
+; move to an older entry (clamped at the oldest loaded one).
+;------------------------------------------------------------------
+hist_recall_up:
+            mov     rf, hist_loaded
+            ldn     rf
+            lbnz    hru_loaded
+
+            call    hist_load
+
+hru_loaded:
+            mov     rf, hist_count
+            ldn     rf
+            lbz     hru_none            ; no history at all: no-op
+
+            mov     rf, hist_recalling
+            ldn     rf
+            lbnz    hru_move
+
+            ; first recall this session: save the line as currently
+            ; typed, so Down can restore it later
+            mov     rf, hist_recalling
+            ldi     1
+            str     rf
+
+            mov     rf, LINE_BUF
+            mov     rd, hist_saved_line
+hru_save_loop:
+            lda     rf
+            str     rd
+            lbz     hru_save_done
+            inc     rd
+            lbr     hru_save_loop
+hru_save_done:
+
+            ; start at the newest entry: index = hist_count - 1
+            mov     rf, hist_count
+            ldn     rf
+            smi     1
+            plo     r8
+            mov     rb, hist_index
+            glo     r8
+            str     rb
+            lbr     hru_redraw
+
+hru_move:
+            mov     rf, hist_index
+            ldn     rf
+            lbz     hru_redraw          ; already oldest: redraw as-is
+
+            smi     1
+            plo     r8
+            mov     rb, hist_index
+            glo     r8
+            str     rb
+
+hru_redraw:
+            mov     rf, hist_index
+            ldn     rf
+            call    hist_copy_entry
+            call    hist_redraw_linebuf
+hru_none:
+            rtn
+
+;------------------------------------------------------------------
+; hist_recall_down: Down arrow -- move to a newer entry, or (if
+; already at the newest loaded one) restore the originally-typed
+; line. No-op if not currently recalling.
+;------------------------------------------------------------------
+hist_recall_down:
+            mov     rf, hist_recalling
+            ldn     rf
+            lbz     hrd_none            ; not currently recalling: no-op
+
+            mov     rf, hist_count
+            ldn     rf
+            smi     1
+            plo     r8                  ; R8.0 = newest_index
+
+            mov     rf, hist_index
+            ldn     rf
+            str     r2                  ; M(R2) = hist_index
+            glo     r8
+            xor                         ; D = newest_index XOR hist_index
+            lbz     hrd_restore         ; equal: at the newest, restore
+
+            mov     rf, hist_index
+            ldn     rf
+            adi     1
+            plo     r9
+            mov     rb, hist_index
+            glo     r9
+            str     rb
+
+            mov     rf, hist_index
+            ldn     rf
+            call    hist_copy_entry
+            call    hist_redraw_linebuf
+hrd_none:
+            rtn
+
+hrd_restore:
+            mov     rf, hist_recalling
+            ldi     0
+            str     rf
+
+            mov     rf, hist_saved_line
+            mov     rd, LINE_BUF
+hrd_restore_loop:
+            lda     rf
+            str     rd
+            lbz     hrd_restore_done
+            inc     rd
+            lbr     hrd_restore_loop
+hrd_restore_done:
+            call    hist_redraw_linebuf
+            rtn
+
+;------------------------------------------------------------------
+; hist_load: lazily load the tail of the history file into hist_buf
+; and split it into lines. Called at most once per shell invocation
+; (hist_loaded guards a repeat call -- see hist_recall_up, the only
+; caller). A missing file, or any I/O error along the way, just
+; leaves hist_count at 0 -- Up is then a quiet no-op, matching this
+; project's generally quiet style for a non-essential convenience.
+; Args:    none
+; Returns: nothing (hist_lines/hist_count/hist_loaded set)
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF (and D)
+;------------------------------------------------------------------
+hist_load:
+            mov     rf, hist_loaded
+            ldi     1
+            str     rf
+
+            mov     rf, hist_count
+            ldi     0
+            str     rf
+
+            mov     rf, hist_loaded_len
+            ldi     0
+            str     rf                  ; safe default if any early
+                                        ; exit below skips the real read
+                                        ; (hist_split then just scans 0
+                                        ; bytes)
+
+            ; build hist_path = "<shell_drive letter>:/bin/history.dat"
+            call    K_GETSHELLDRIVE     ; D = shell_drive (0-3) --
+                                        ; kernel_getshelldrive's own
+                                        ; body uses RF as scratch, so RF
+                                        ; can't be set before this call
+                                        ; either -- must come after
+            adi     'C'
+            plo     r8                  ; stash the drive letter (R8
+                                        ; survives the mov below; gotcha
+                                        ; #4 -- mov itself clobbers D)
+            mov     rf, hist_path
+            glo     r8
+            str     rf
+            inc     rf
+            ldi     ':'
+            str     rf
+            inc     rf
+            mov     rd, hist_suffix
+hl_path_loop:
+            lda     rd
+            str     rf
+            lbz     hl_path_done
+            inc     rf
+            lbr     hl_path_loop
+hl_path_done:
+
+            mov     rd, hist_fcb
+            mov     ra, hist_iobuf
+            mov     rf, hist_path
+            ldi     0                   ; mode 0: read
+            call    K_FILE_OPEN
+            lbdf    hl_done             ; doesn't exist / open failed:
+                                        ; hist_count stays 0
+
+            ; SEEK_END(0) -> file size
+            ldi     0
+            phi     ra
+            plo     ra
+            ldi     0
+            phi     r9
+            plo     r9
+            ldi     2                   ; SEEK_END
+            plo     rc
+            mov     rd, hist_fcb
+            call    K_FILE_SEEK
+            lbdf    hl_close            ; seek failed: treat as no
+                                        ; history (hist_loaded_len is
+                                        ; already 0)
+
+            mov     rf, hist_filesize
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            ; start_offset = max(0, filesize - HISTORY_LOAD_BUDGET)
+            mov     rf, hist_filesize
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = filesize
+            sub16   rd, HISTORY_LOAD_BUDGET
+            lbdf    hl_have_start       ; DF=1: no underflow
+            ldi     0
+            phi     rd
+            plo     rd                  ; clamp to 0
+
+hl_have_start:
+            mov     rf, hist_start_offset
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            ; SEEK_SET(start_offset). KNOWN LIMITATION: K_FILE_SEEK's
+            ; documented offset convention only supports a value that's
+            ; a valid sign-extension of 16 bits (RA=$0000 with bit 15
+            ; clear -- i.e. 0-32767; RA=$FFFF with bit 15 set covers
+            ; negative offsets, not used here). start_offset is always
+            ; a non-negative 16-bit quantity, but once the history file
+            ; grows past ~32KB it can itself exceed 32767, at which
+            ; point this SEEK_SET starts failing K_FILE_SEEK's own
+            ; range check -- lbdf hl_close below treats that exactly
+            ; like "no history this session" (graceful, not a crash),
+            ; so the practical effect is just that recall quietly stops
+            ; working once the file crosses that size, not a bug this
+            ; shell-side code can work around without a kernel change
+            ; to K_FILE_SEEK's own offset convention. Not expected to
+            ; matter for a long time at realistic usage (roughly
+            ; 1500-3000+ typical command lines), but worth knowing.
+            mov     rf, hist_start_offset
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     ra
+            plo     ra
+            ldi     0                   ; SEEK_SET
+            plo     rc
+            mov     rd, hist_fcb
+            call    K_FILE_SEEK
+            lbdf    hl_close
+
+            ; read_len = filesize - start_offset (always < BUDGET by
+            ; construction -- see start_offset's own clamp above)
+            mov     rf, hist_filesize
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, hist_start_offset
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            sub16   rd, r8              ; RD = read_len
+
+            mov     rc, rd              ; RC = read_len (byte count)
+            mov     rf, hist_buf
+            mov     rd, hist_fcb
+            call    K_FILE_READ         ; RC = bytes actually read
+
+            mov     rf, hist_loaded_len
+            glo     rc
+            str     rf                  ; single byte -- always < 256
+                                        ; since we requested < 256
+
+hl_close:
+            mov     rd, hist_fcb
+            call    K_FILE_CLOSE
+
+            call    hist_split
+
+hl_done:
+            rtn
+
+;------------------------------------------------------------------
+; hist_split: split hist_buf[0..hist_loaded_len) into lines (LF ->
+; NUL, recording each start pointer into hist_lines[]), discarding a
+; leading partial fragment if hist_start_offset > 0, and any empty
+; span (including a trailing one, since every real append ends in a
+; real LF). No calls made anywhere in this loop, so scan state stays
+; in registers throughout -- only the final hist_lines[]/hist_count
+; results are written to memory.
+; Args:    none (reads hist_buf/hist_loaded_len/hist_start_offset)
+; Returns: nothing (hist_lines/hist_count populated)
+; Modifies: R7, R8, R9, RB, RC, RD, RF (and D)
+;------------------------------------------------------------------
+hist_split:
+            mov     r7, hist_buf        ; R7 = scan pointer
+            mov     r8, hist_buf        ; R8 = current line's start
+            ldi     0
+            phi     r9                  ; R9.1 = "first span already
+                                        ; seen" flag (see guard 2 below
+                                        ; -- deliberately NOT the same
+                                        ; thing as hist_count, which
+                                        ; only increments on a RECORDED
+                                        ; entry)
+            plo     r9                  ; R9.0 = hist_count so far
+
+            mov     rf, hist_loaded_len
+            ldn     rf
+            plo     rc                  ; RC.0 = remaining bytes
+
+hsplit_loop:
+            glo     rc
+            lbz     hsplit_end          ; no bytes left: done
+
+            ldn     r7                  ; D = *scan_ptr
+            xri     10                  ; is it LF?
+            lbnz    hsplit_advance
+
+            ldi     0
+            str     r7                  ; NUL it out in place
+
+            ; guard 1: empty span? (line_start == scan_ptr)
+            glo     r8
+            str     r2
+            glo     r7
+            sm
+            lbnz    hsplit_g2           ; low bytes differ: not empty
+            ghi     r8
+            str     r2
+            ghi     r7
+            sm
+            lbz     hsplit_next_line    ; both bytes equal: empty, skip
+
+hsplit_g2:
+            ; guard 2: the very first span encountered in this scan
+            ; (regardless of whether it ends up recorded or
+            ; discarded), AND we started reading mid-file
+            ; (hist_start_offset > 0)? presumed partial, discard.
+            ;
+            ; BUG CAUGHT BY INDEPENDENT PYTHON SIMULATION (before ever
+            ; assembling): this used to test hist_count (R9.0) instead
+            ; of a dedicated flag -- but hist_count only increments on
+            ; a RECORDED entry, so if the true first (partial) span
+            ; was itself discarded here, hist_count was STILL 0 when
+            ; the very next (real, complete) span was scanned, wrongly
+            ; re-triggering this same discard a second time. R9.1 is a
+            ; separate flag, set unconditionally the moment the first
+            ; LF is seen, so this guard only ever fires once per scan
+            ; regardless of what happened to that first span.
+            ghi     r9
+            lbnz    hsplit_g3           ; already seen a first span:
+                                        ; this guard never applies again
+
+            ldi     1
+            phi     r9                  ; mark "first span seen" now,
+                                        ; whether it's kept or discarded
+
+            mov     rf, hist_start_offset
+            lda     rf
+            lbnz    hsplit_next_line
+            ldn     rf
+            lbnz    hsplit_next_line
+
+hsplit_g3:
+            ; guard 3: at capacity?
+            glo     r9
+            smi     HISTORY_MAX_LINES
+            lbdf    hsplit_next_line
+
+            ; record: hist_lines[hist_count] = line_start (R8)
+            mov     rf, hist_lines
+            glo     r9
+            plo     rd
+            ldi     0
+            phi     rd
+            shl16   rd                  ; RD = hist_count * 2
+            add16   rf, rd              ; RF = &hist_lines[hist_count]
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
+
+            glo     r9
+            adi     1
+            plo     r9                  ; hist_count++
+
+hsplit_next_line:
+            mov     r8, r7
+            inc     r8                  ; next line starts right after
+                                        ; this LF
+
+hsplit_advance:
+            inc     r7
+            glo     rc
+            smi     1
+            plo     rc
+            lbr     hsplit_loop
+
+hsplit_end:
+            mov     rf, hist_count
+            glo     r9
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; hist_append: append LINE_BUF to the history file if it's non-blank
+; (an all-whitespace or empty line is not recorded). Best-effort --
+; any I/O failure here is silently ignored, matching this feature's
+; "a convenience, never something that should block a command" role.
+; Rebuilds hist_path itself (cheap) rather than relying on hist_load
+; having already run this session -- Enter can happen with no recall
+; ever attempted.
+; Args:    none (reads LINE_BUF)
+; Returns: nothing
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF (and D)
+;------------------------------------------------------------------
+hist_append:
+            mov     rf, LINE_BUF
+            call    f_ltrim             ; RF = first non-space char
+            ldn     rf
+            lbz     ha_done             ; blank line: don't record it
+
+            call    K_GETSHELLDRIVE     ; D = shell_drive (0-3) --
+                                        ; kernel_getshelldrive's own
+                                        ; body uses RF as scratch, so RF
+                                        ; can't be set before this call
+                                        ; either -- must come after
+            adi     'C'
+            plo     r8                  ; stash the drive letter (R8
+                                        ; survives the mov below; gotcha
+                                        ; #4 -- mov itself clobbers D)
+            mov     rf, hist_path
+            glo     r8
+            str     rf
+            inc     rf
+            ldi     ':'
+            str     rf
+            inc     rf
+            mov     rd, hist_suffix
+ha_path_loop:
+            lda     rd
+            str     rf
+            lbz     ha_path_done
+            inc     rf
+            lbr     ha_path_loop
+ha_path_done:
+
+            mov     rd, hist_fcb
+            mov     ra, hist_iobuf
+            mov     rf, hist_path
+            ldi     2                   ; mode 2: create-or-append
+            call    K_FILE_OPEN
+            lbdf    ha_done             ; couldn't open: give up quietly
+
+            mov     rf, LINE_BUF
+            call    shell_strlen        ; RC = length, RF unchanged
+            mov     rf, LINE_BUF
+            mov     rd, hist_fcb
+            call    K_FILE_WRITE
+
+            mov     rf, hist_nl_byte
+            ldi     1
+            plo     rc
+            ldi     0
+            phi     rc
+            mov     rd, hist_fcb
+            call    K_FILE_WRITE        ; trailing LF
+
+            mov     rd, hist_fcb
+            call    K_FILE_CLOSE
+
+ha_done:
+            rtn
+
+hist_fcb:           ds      FCB_LEN
+hist_iobuf:         ds      FCB_IOBUF_LEN
+hist_path:          ds      24
+hist_suffix:        db      "/bin/history.dat",0
+hist_nl_byte:       db      10
+hist_buf:           ds      HISTORY_LOAD_BUDGET
+hist_lines:         ds      HISTORY_MAX_LINES * 2
+hist_count:         db      0
+hist_loaded:        db      0
+hist_loaded_len:     db      0
+hist_recalling:     db      0
+hist_index:         db      0
+hist_saved_line:    ds      128
+hist_filesize:      dw      0
+hist_start_offset:  dw      0
+hist_cur_len:       db      0
+hist_erase_count:   db      0
 
             end     start
