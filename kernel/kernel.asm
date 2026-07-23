@@ -33,6 +33,7 @@
             extrn   drive_present
             extrn   drive_cur_dir
             extrn   cur_drive
+            extrn   autoexec_path
             extrn   _switch_drive
             extrn   shell_drive
             extrn   shell_elba
@@ -324,6 +325,32 @@ kinit_dcd_zero:
             mov     rf, cur_drive
             ldi     0
             str     rf                  ; cur_drive = C: (0)
+
+            ; Run /autoexec.bat automatically at boot, if it exists --
+            ; reuses the existing batch machinery wholesale rather than
+            ; inventing a parallel mechanism (2026-07-23, the user's own
+            ; realization mid-design-discussion, after an earlier
+            ; "prime LINE_BUF and have the shell detect it" proposal
+            ; turned out to have real one-shot-correctness edge cases).
+            ; batch_start just opens the file and marks the kernel-
+            ; resident batch state active; if the file doesn't exist it
+            ; fails silently (DF=1, "couldn't be opened" -- the exact
+            ; same outcome an ordinary missing .bat already produces),
+            ; and DF is deliberately not checked here since either way
+            ; execution falls straight into run_loop below with no
+            ; special-casing needed: progs/shell.asm's start: already
+            ; calls K_BATCH_READLINE as the very first thing it does,
+            ; every cycle, including its first ever -- an already-
+            ; active batch is picked up completely transparently,
+            ; identical to a user having just typed "autoexec.bat" and
+            ; the shell's own .bat-extension detection having started
+            ; it (same echo behavior, same empty-file EOF handling, no
+            ; new code paths in the shell at all). Must run AFTER
+            ; cur_drive is set (just above), since the leading '/' in
+            ; "/autoexec.bat" resolves from the root of whatever drive
+            ; is currently active.
+            mov     rf, autoexec_path
+            call    batch_start
 
 ;------------------------------------------------------------------
 ; run_loop: alternately load+run the shell (which resolves one
@@ -859,6 +886,12 @@ active_bpb_drive:   db      $FF
                                         ; at $0080-$00FF instead of
                                         ; reserving space here)
 
+; autoexec_path: literal path kernel_init hands to batch_start as its
+; own last boot-time act (2026-07-23) -- see kernel_init's own call
+; site for the full design. Cross-proc same-file reference (gotcha #6),
+; hence the extrn near the top of this file plus the public below.
+autoexec_path:      db      "/autoexec.bat",0
+
                 public  drive_present
                 public  drive_bpb_table
                 public  shell_drive
@@ -867,6 +900,7 @@ active_bpb_drive:   db      $FF
                 public  drive_cur_dir
                 public  cur_drive
                 public  active_bpb_drive
+                public  autoexec_path
 
                 endp
 
