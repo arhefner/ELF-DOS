@@ -1,0 +1,250 @@
+#
+# Makefile.win - ELF-DOS kernel build (Windows nmake port)
+#
+# Usage:
+#   nmake /F Makefile.win            build kernel-full.bin (default)
+#   nmake /F Makefile.win mbr        build mbr.bin only
+#   nmake /F Makefile.win progs      build every progs\*.asm into bin\<name>
+#   nmake /F Makefile.win clean      remove all generated files
+#
+# Mirrors the project's Linux Makefile as closely as nmake allows -- see
+# that file for the authoritative build design. Differences are called
+# out below. Assumes asm02.exe and link02.exe are already on PATH.
+#
+# NOT PORTED: "install"/"update" (writing kernel-full.bin + mbr.bin to a
+# raw device via sys/elfdos-sys) -- that tool is a Linux binary talking
+# to Linux block-device paths (/dev/mmcblk0 etc.) with no Windows build
+# here. Build with this Makefile, then flash kernel-full.bin/mbr.bin
+# from Linux (or however you currently write the SD card). Both targets
+# exist below as a one-line stub so running them tells you this instead
+# of nmake just saying "unknown target."
+#
+# DIFFERENCE FROM THE LINUX MAKEFILE: nmake has no equivalent of GNU
+# Make's $(wildcard ...)/$(patsubst ...), so "progs" can't build a real
+# per-file dependency graph for arbitrary progs\*.asm the way the Linux
+# Makefile does. The 9 programs that link against lib\ (envtest,
+# printenv, export, unset, bumptest, malloctest, ls, more, edlin) keep
+# real nmake rules below, same as the Linux Makefile's own explicit
+# overrides for them, with proper incremental rebuilds. Every OTHER
+# progs\*.asm file is auto-discovered (no Makefile.win edit needed for
+# a new one, matching the Linux Makefile's own praised property) and
+# built by the companion script build_progs.bat, which this Makefile
+# calls -- but it rebuilds that whole set unconditionally each time
+# "progs" runs, rather than tracking each file's own timestamp. asm02/
+# link02 are fast enough that this hasn't been worth the extra
+# complexity of a real incremental check in batch.
+#
+
+ASM         = asm02
+ASMFLAGS    = -L -C -I .. -r
+LINK        = link02
+LFLAGS      = -b -be -r
+
+# ---- Output files (all land in project root) ----
+MBR_BIN     = mbr.bin
+KRNBOOT_BIN = krnboot.bin
+KERNEL_BIN  = kernel.bin
+FULL_BIN    = kernel-full.bin
+
+# ---- Kernel object files (in kernel\ subdir, link order matters) ----
+KOBJ =  kernel\kernel.prg  \
+        kernel\fat.prg     \
+        kernel\dir.prg     \
+        kernel\path.prg    \
+        kernel\rtc.prg     \
+        kernel\file.prg    \
+        kernel\loader.prg  \
+        kernel\batch.prg   \
+        kernel\redir.prg   \
+        kernel\glob.prg
+
+# ---- Common include dependencies ----
+INCS =  include\bios.inc    \
+        include\opcodes.def \
+        include\kernel.inc
+
+# ---- The 9 progs\*.asm that link against lib\ -- see build_progs.bat's
+# own exclusion list, which must be kept in sync with this set ----
+SPECIAL_BINS = bin\envtest bin\printenv bin\export bin\unset \
+        bin\bumptest bin\malloctest bin\ls bin\more bin\edlin
+
+all: $(FULL_BIN)
+
+#------------------------------------------------------------------
+# Assembly rules -- asm02 places output alongside the source file, so
+# .prg files live in the same directory as their .asm source. The cd
+# ensures asm02 finds #include files via its own relative -I ..
+#------------------------------------------------------------------
+
+boot\mbr.prg: boot\mbr.asm include\bios.inc include\opcodes.def
+	cd boot && $(ASM) $(ASMFLAGS) mbr.asm
+
+boot\krnboot.prg: boot\krnboot.asm $(INCS)
+	cd boot && $(ASM) $(ASMFLAGS) krnboot.asm
+
+kernel\kernel.prg: kernel\kernel.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) kernel.asm
+
+kernel\fat.prg: kernel\fat.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) fat.asm
+
+kernel\dir.prg: kernel\dir.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) dir.asm
+
+kernel\path.prg: kernel\path.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) path.asm
+
+kernel\rtc.prg: kernel\rtc.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) rtc.asm
+
+kernel\file.prg: kernel\file.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) file.asm
+
+kernel\loader.prg: kernel\loader.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) loader.asm
+
+kernel\batch.prg: kernel\batch.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) batch.asm
+
+kernel\redir.prg: kernel\redir.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) redir.asm
+
+kernel\glob.prg: kernel\glob.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) glob.asm
+
+bin:
+	if not exist bin mkdir bin
+
+#------------------------------------------------------------------
+# Reusable libraries (lib\ subdir) -- NOT standalone programs, no EDF
+# header/entry point of their own; assembled separately and linked
+# alongside whichever program wants them. See the Linux Makefile's own
+# comment on this for the full reasoning.
+#------------------------------------------------------------------
+lib\heap_bump.prg: lib\heap_bump.asm include\opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) heap_bump.asm
+
+lib\heap_malloc.prg: lib\heap_malloc.asm include\opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) heap_malloc.asm
+
+lib\env.prg: lib\env.asm include\opcodes.def include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) env.asm
+
+#------------------------------------------------------------------
+# The 9 progs\*.asm that link against lib\ -- explicit rules, real
+# incremental rebuilds, matching the Linux Makefile's own overrides for
+# the exact same set (see its own comment for why: each needs an extra
+# lib\*.prg linked in, which the generic single-file case doesn't).
+#------------------------------------------------------------------
+progs\envtest.prg: progs\envtest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) envtest.asm
+
+bin\envtest: progs\envtest.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\envtest progs\envtest.prg lib\env.prg
+	-del /F /Q bin\envtest.lkb
+
+progs\printenv.prg: progs\printenv.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) printenv.asm
+
+bin\printenv: progs\printenv.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\printenv progs\printenv.prg lib\env.prg
+	-del /F /Q bin\printenv.lkb
+
+progs\export.prg: progs\export.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) export.asm
+
+bin\export: progs\export.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\export progs\export.prg lib\env.prg
+	-del /F /Q bin\export.lkb
+
+progs\unset.prg: progs\unset.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) unset.asm
+
+bin\unset: progs\unset.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\unset progs\unset.prg lib\env.prg
+	-del /F /Q bin\unset.lkb
+
+progs\bumptest.prg: progs\bumptest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) bumptest.asm
+
+bin\bumptest: progs\bumptest.prg lib\heap_bump.prg bin
+	$(LINK) $(LFLAGS) -o bin\bumptest progs\bumptest.prg lib\heap_bump.prg
+	-del /F /Q bin\bumptest.lkb
+
+progs\malloctest.prg: progs\malloctest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) malloctest.asm
+
+bin\malloctest: progs\malloctest.prg lib\heap_malloc.prg bin
+	$(LINK) $(LFLAGS) -o bin\malloctest progs\malloctest.prg lib\heap_malloc.prg
+	-del /F /Q bin\malloctest.lkb
+
+progs\ls.prg: progs\ls.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) ls.asm
+
+bin\ls: progs\ls.prg lib\heap_bump.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\ls progs\ls.prg lib\heap_bump.prg lib\env.prg
+	-del /F /Q bin\ls.lkb
+
+progs\more.prg: progs\more.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) more.asm
+
+bin\more: progs\more.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\more progs\more.prg lib\env.prg
+	-del /F /Q bin\more.lkb
+
+progs\edlin.prg: progs\edlin.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) edlin.asm
+
+bin\edlin: progs\edlin.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg
+	-del /F /Q bin\edlin.lkb
+
+#------------------------------------------------------------------
+# Link rules (boot/kernel)
+#------------------------------------------------------------------
+
+$(MBR_BIN): boot\mbr.prg
+	$(LINK) $(LFLAGS) -o $(MBR_BIN) boot\mbr.prg
+
+$(KRNBOOT_BIN): boot\krnboot.prg
+	$(LINK) $(LFLAGS) -o $(KRNBOOT_BIN) boot\krnboot.prg
+
+$(KERNEL_BIN): $(KOBJ)
+	$(LINK) $(LFLAGS) -o $(KERNEL_BIN) $(KOBJ)
+
+#------------------------------------------------------------------
+# Concatenate bootstrap + kernel proper into the final install image --
+# same layout as the Linux Makefile's own FULL_BIN rule (krnboot.bin
+# then kernel.bin). copy /b does a binary-safe concatenation, the
+# Windows equivalent of "cat a b > c".
+#------------------------------------------------------------------
+$(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
+	copy /b /y $(KRNBOOT_BIN)+$(KERNEL_BIN) $(FULL_BIN)
+
+#------------------------------------------------------------------
+# Convenience targets
+#------------------------------------------------------------------
+
+mbr: $(MBR_BIN)
+
+# Build every progs\*.asm into bin\<name> (bare name, no extension --
+# matches the on-device \bin layout). The 9 lib-linked programs above
+# get real nmake incremental rebuilds via SPECIAL_BINS; everything else
+# is auto-discovered and (re)built by build_progs.bat -- see this
+# file's own header comment for why the split exists.
+progs: bin $(SPECIAL_BINS)
+	build_progs.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
+
+install:
+	@echo install is not available in Makefile.win -- sys\elfdos-sys is a Linux tool with no Windows port here. Build with this Makefile, then flash kernel-full.bin/mbr.bin from Linux.
+	@exit /b 1
+
+update: install
+
+clean:
+	-del /F /Q boot\*.prg boot\*.lst
+	-del /F /Q kernel\*.prg kernel\*.lst
+	-del /F /Q progs\*.prg progs\*.lst progs\*.build progs\*.lkb
+	-del /F /Q lib\*.prg lib\*.lst
+	-del /F /Q $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
+	-if exist bin rmdir /S /Q bin
