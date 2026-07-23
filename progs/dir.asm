@@ -19,6 +19,11 @@
 ; own DEL/COPY multi-argument precedent) rather than aborting the whole
 ; command; the final exit code reflects whether any argument failed.
 ;
+; A bare directory listing skips entries with the hidden attribute set
+; (2026-07-22, no override flag for now -- see ATTRIB). An explicit
+; single-file/multi-arg reference still shows a hidden entry, matching
+; DOS's "hidden only affects casual listing" convention.
+;
 ; Each entry is printed as a fixed-width line:
 ;   columns 1-5:   right-justified decimal byte count (files) or
 ;                  blank (directories) -- low 16 bits only, since
@@ -141,6 +146,17 @@ dir_loop:
             mov     rf, dir_result      ; RF = result buffer
             call    K_DIR_READ
             lbdf    dir_done            ; DF=1 = end of directory
+
+            ; skip hidden entries in the bare listing (2026-07-22) --
+            ; no override flag for now (dir has no flag-parsing
+            ; machinery today); an explicit reference via dir_single_file/
+            ; dir_multi_arg or STAT still shows a hidden entry, matching
+            ; DOS's "hidden only affects casual listing" convention
+            mov     rf, dir_result
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_HIDDEN
+            lbnz    dir_loop            ; hidden: skip, read the next
 
             call    print_dir_entry
             lbr     dir_loop

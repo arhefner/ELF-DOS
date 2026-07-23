@@ -1,7 +1,7 @@
 ;
 ; ls.asm - list a directory, Linux ls-style
 ;
-; Usage: LS [-lF] [path...]
+; Usage: LS [-laF] [path...]
 ;
 ; Options may appear anywhere on the line, combined or separate ("-lF"
 ; and "-l -F" behave identically -- see ls_scan_options), and don't
@@ -27,6 +27,13 @@
 ; concept on ELF-DOS, so unlike real ls -F this is the only suffix
 ; case). Composes with quoting below -- a directory name containing a
 ; space prints as 'my dir'/, quotes around the name, slash outside.
+;
+; -a: show entries with the hidden attribute set too (2026-07-22). A
+; bare directory-scan listing normally skips them; an explicit
+; file/dir argument or a shell glob match is never filtered regardless
+; of -a, matching DOS's "hidden only affects casual listing, not
+; access" convention -- see K_STAT/ATTRIB (progs/attrib.asm) for
+; setting/clearing the bit.
 ;
 ; A name containing a space (2026-07-22) prints single-quoted, e.g.
 ; 'my file.txt' -- shows exactly how the name would need to be typed
@@ -184,6 +191,10 @@ start:
             ldi     0
             str     rf                  ; ls_fmode = 0
 
+            mov     rf, ls_amode
+            ldi     0
+            str     rf                  ; ls_amode = 0
+
             mov     rf, ls_patharg
             ldi     0
             str     rf
@@ -255,19 +266,20 @@ start:
 ; "-" and has at least one character after it ("-l", "-F", "-lF", ...
 ; -- real getopt-style clustering, so "-lF" and "-l -F" behave
 ; identically); every character after the leading "-" is scanned
-; independently ('l' sets ls_longmode, 'F' sets ls_fmode, anything else
-; is silently ignored -- a deliberate minimal choice, matching this
-; project's generally lenient argument handling elsewhere, e.g. echo/
-; args don't validate either). The whole token is consumed either way,
-; never copied into ls_paths, even if some/all of its characters went
-; unrecognized. A bare "-" (nothing after it) falls through and is
-; treated as an ordinary path token instead, avoiding an ambiguous
-; empty cluster. Builds a compacted, zero-based list of the remaining
-; (non-flag) arguments in ls_paths/ls_num_paths -- everything
+; independently ('l' sets ls_longmode, 'F' sets ls_fmode, 'a' sets
+; ls_amode, anything else is silently ignored -- a deliberate minimal
+; choice, matching this project's generally lenient argument handling
+; elsewhere, e.g. echo/args don't validate either). The whole token is
+; consumed either way, never copied into ls_paths, even if some/all of
+; its characters went unrecognized. A bare "-" (nothing after it) falls
+; through and is treated as an ordinary path token instead, avoiding an
+; ambiguous empty cluster. Builds a compacted, zero-based list of the
+; remaining (non-flag) arguments in ls_paths/ls_num_paths -- everything
 ; downstream only ever looks at ls_paths/ls_num_paths/ls_longmode/
-; ls_fmode, never argv directly.
+; ls_fmode/ls_amode, never argv directly.
 ; Args:    none (reads RA/RC directly, at entry)
-; Returns: nothing (ls_paths/ls_num_paths/ls_longmode/ls_fmode set)
+; Returns: nothing (ls_paths/ls_num_paths/ls_longmode/ls_fmode/ls_amode
+;          set)
 ; Modifies: R7, R8, RB, RD, RF (and D)
 ;------------------------------------------------------------------
 ls_scan_options:
@@ -353,11 +365,20 @@ lso_optchar_loop:
 lso_opt_notl:
             ldn     rf                  ; reload -- xri above clobbered D
             xri     'F'
-            lbnz    lso_optchar_next    ; unrecognized: silently ignore,
-                                        ; just advance past it
+            lbnz    lso_opt_nota
             mov     rb, ls_fmode
             ldi     1
             str     rb                  ; recognized 'F': set the flag
+            lbr     lso_optchar_next
+
+lso_opt_nota:
+            ldn     rf                  ; reload -- xri above clobbered D
+            xri     'a'
+            lbnz    lso_optchar_next    ; unrecognized: silently ignore,
+                                        ; just advance past it
+            mov     rb, ls_amode
+            ldi     1
+            str     rb                  ; recognized 'a': set the flag
 
 lso_optchar_next:
             inc     rf
@@ -523,6 +544,22 @@ ls_collect_loop:
             call    K_DIR_READ
             lbdf    ls_collect_done     ; end of directory
 
+            ; skip hidden entries unless -a is active (2026-07-22) --
+            ; this loop is only ever reached via ls_open's own bare
+            ; directory-scan path, never ls_single_file/ls_multi_stat's
+            ; explicit-reference paths, so this filter can't accidentally
+            ; hide an explicitly-named/glob-matched hidden entry
+            mov     rf, ls_amode
+            ldn     rf
+            lbnz    ls_collect_add      ; -a active: don't filter
+
+            mov     rf, ls_scratch
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_HIDDEN
+            lbnz    ls_collect_loop     ; hidden, -a not active: skip
+
+ls_collect_add:
             call    ls_add_entry        ; DF=1: out of RAM, stop
                                         ; collecting entirely
             lbdf    ls_collect_done
@@ -2273,6 +2310,11 @@ lp2d_print:
 ; ---- scratch / state ----
 ls_longmode:    db      0
 ls_fmode:       db      0           ; -F: append "/" to directory entries
+ls_amode:       db      0           ; -a: show hidden entries too (bare
+                                    ; directory-scan listing only --
+                                    ; ls_single_file/ls_multi_stat's own
+                                    ; explicit-reference paths never
+                                    ; filter regardless of this flag)
 ls_hasquote:    db      0           ; per-entry scratch, set during
                                     ; ls_add_entry's own namelen scan --
                                     ; NOT a global mode flag like

@@ -3810,6 +3810,132 @@ fst_err:
 fst_buf:        dw      0
 
 ; ----------------------------------------------------------------
+; file_setattr: change an existing directory entry's attribute byte --
+; works on either a file or a directory (an attribute change should be
+; legal on either, matching file_stat's own "caller decides" philosophy
+; rather than file_delete/dir_remove's file-only/dir-only restrictions).
+; Deliberately a general set/clear-mask primitive, not narrowed to
+; hidden specifically, so a future R/S-bit ATTRIB extension needs no
+; kernel change, only more userland argument parsing (same "general
+; primitive, minimal current caller" precedent as K_STAT).
+;
+; Reuses _find_dirent wholesale for the locate step, then patches
+; dir_buf[dir_last_off+DE_ATTR] and writes the sector back -- the exact
+; same locate-then-patch-then-write-back shape _mark_entry_deleted
+; already uses for marking an entry deleted, just patching to a
+; computed value instead of $E5, and with no LFN walk needed (unlike
+; delete) since only the short entry's own attribute byte changes --
+; LFN entries always carry ATTR_LFN and are untouched.
+;
+; Args:    RF = pointer to null-terminated path string
+;          RC (low byte, glo rc)  = bits to SET
+;          RC (high byte, ghi rc) = bits to CLEAR
+;          new_attr = (old_attr & ~clear) | set
+; Returns: DF = 0 on success, DF = 1 on error (not found, bad path,
+;          target is "." or "..", or an I/O error writing the sector)
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    file_setattr
+
+            ; stash both masks to memory -- must survive _find_dirent's
+            ; own broad clobber footprint
+            mov     rb, fsa_setmask
+            glo     rc
+            str     rb
+            mov     rb, fsa_clearmask
+            ghi     rc
+            str     rb
+
+            call    _find_dirent        ; DF = 0/1; file_dirent/
+                                        ; dir_last_off/dir_cur_lba/
+                                        ; dir_buf describe the match on
+                                        ; success
+            lbdf    fsa_err
+
+            ; reject "." and ".." as the target -- same reasoning and
+            ; placement as dir_remove's own guard (checked AFTER the
+            ; scan, via fo_name: _find_dirent legitimately finds a
+            ; match for either name, so the reject has to happen
+            ; regardless of whether the search itself succeeded)
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    _is_dot_or_dotdot
+            lbdf    fsa_err
+
+            ; new_attr = (old_attr & ~clear_mask) | set_mask -- the
+            ; established "str r2, reload the other operand, and/or"
+            ; idiom already used elsewhere in this file (e.g.
+            ; fat_alloc's sector-in-cluster mask) and in
+            ; kernel/rtc.asm's date-packing. xri $FF inverts
+            ; clear_mask (no dedicated NOT on the 1802).
+            mov     rb, fsa_clearmask
+            ldn     rb
+            xri     $FF                 ; D = ~clear_mask
+            str     r2                  ; M(R2) = ~clear_mask
+
+            mov     rf, file_dirent+DIRENT_ATTR
+            ldn     rf                  ; D = old attr byte
+            and                         ; D = old_attr & ~clear_mask
+            str     r2                  ; M(R2) = that intermediate
+                                        ; result (restaged for the OR
+                                        ; below)
+
+            mov     rb, fsa_setmask
+            ldn     rb                  ; D = set_mask
+            or                          ; D = new_attr
+            plo     r9                  ; R9.0 = new_attr -- stash off
+                                        ; D before the movs below
+                                        ; clobber it (gotcha #4)
+
+            mov     rf, dir_last_off
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = short entry's own byte
+                                        ; offset within dir_buf
+
+            mov     rf, dir_buf+DE_ATTR
+            add16   rf, rd              ; RF = on-disk attribute byte's
+                                        ; in-memory address (DE_ATTR
+                                        ; folded into the mov, gotcha
+                                        ; #15/#17, confirmed safe)
+            glo     r9
+            str     rf                  ; patch the attribute byte in
+                                        ; memory
+
+            ; write the patched sector back -- same 3-byte-LBA
+            ; extraction + f_idewrite pattern _mark_entry_deleted
+            ; already uses
+            mov     rf, dir_cur_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+
+            mov     rf, dir_buf
+            call    f_idewrite
+            lbdf    fsa_err
+
+            clc                         ; DF = 0, success
+            rtn
+
+fsa_err:
+            stc                         ; DF = 1, error
+            rtn
+
+fsa_setmask:    db      0
+fsa_clearmask:  db      0
+
+; ----------------------------------------------------------------
 ; file_read: read bytes from an open file into a buffer
 ; Args:   RD = FCB pointer (the same one passed to file_open)
 ;         RF = destination buffer

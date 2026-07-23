@@ -306,6 +306,11 @@ DIRENT_WRTDATE: equ     137         ; last-write date, 2 bytes, big-endian,
                                     ; 8-5=month, 4-0=day
 DIRENT_LEN:     equ     139         ; total result buffer size
 ATTR_DIR:       equ     $10         ; DIRENT_ATTR bit set for subdirectories
+ATTR_HIDDEN:    equ     $02         ; DIRENT_ATTR bit set for hidden
+                                    ; entries (2026-07-22) -- restated
+                                    ; from kernel.inc, same "decoupled,
+                                    ; not #included" reasoning as
+                                    ; ATTR_DIR above
 
 ; ---- BIOS passthroughs (see include/bios.inc for each one's convention) ----
 ; Calling through here rather than directly into BIOS means a program
@@ -505,6 +510,20 @@ K_BATCH_READLINE:   equ     $0173       ; -> batch_readline
 ;          the whole command line rather than attempt a half-expanded
 ;          one.
 K_GLOB_RESERVE:     equ     $0176       ; -> kernel_glob_reserve
+
+; K_FILE_SETATTR: change an existing directory entry's attribute byte.
+; Works on either a file or a directory. Deliberately a general
+; set/clear-mask primitive, not narrowed to hidden specifically -- a
+; future ATTRIB extension to R/S bits needs no kernel change, only more
+; userland argument parsing (same "general primitive, minimal current
+; caller" precedent as K_STAT above).
+; Args:    RF = pointer to null-terminated path string
+;          RC (low byte, glo rc)  = bits to SET
+;          RC (high byte, ghi rc) = bits to CLEAR
+;          new_attr = (old_attr & ~clear) | set
+; Returns: DF = 0 on success, DF = 1 on error (not found, bad path,
+;          target is "." or "..", or an I/O error writing the sector)
+K_FILE_SETATTR:     equ     $0179       ; -> file_setattr
 
 ; GLOB_BUF_LEN: size of the reservation K_GLOB_RESERVE makes --
 ; progs/shell.asm's own glob-expansion pass budgets its writes against

@@ -49,6 +49,7 @@
             extrn   dir_remove
             extrn   file_rename
             extrn   file_stat
+            extrn   file_setattr
             extrn   batch_start
             extrn   batch_readline
             extrn   dir_open
@@ -239,7 +240,13 @@ k_batch_readline: lbr   batch_readline      ; $0173
 ; the shell itself, when its own pre-scan finds a token that needs
 ; expansion.
 k_glob_reserve: lbr     kernel_glob_reserve ; $0176
-                ; next free jump-table address: $0179
+
+; K_FILE_SETATTR: change an existing directory entry's attribute byte
+; (2026-07-22) -- see kernel/file.asm's file_setattr for the full
+; design. General set/clear-mask primitive; ATTRIB currently only
+; exposes +H/-H, but this needs no kernel change to grow further.
+k_file_setattr: lbr     file_setattr        ; $0179
+                ; next free jump-table address: $017C
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
