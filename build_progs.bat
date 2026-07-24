@@ -43,6 +43,8 @@ for %%f in (progs\*.asm) do (
     if /I "!name!"=="ls"         set "skip=1"
     if /I "!name!"=="more"       set "skip=1"
     if /I "!name!"=="edlin"      set "skip=1"
+    if /I "!name!"=="move"       set "skip=1"
+    if /I "!name!"=="xcopy"      set "skip=1"
 
     if not defined skip (
         echo Building !name!...

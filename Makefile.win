@@ -22,9 +22,9 @@
 # DIFFERENCE FROM THE LINUX MAKEFILE: nmake has no equivalent of GNU
 # Make's $(wildcard ...)/$(patsubst ...), so "progs" can't build a real
 # per-file dependency graph for arbitrary progs\*.asm the way the Linux
-# Makefile does. The 9 programs that link against lib\ (envtest,
-# printenv, export, unset, bumptest, malloctest, ls, more, edlin) keep
-# real nmake rules below, same as the Linux Makefile's own explicit
+# Makefile does. The 11 programs that link against lib\ (envtest,
+# printenv, export, unset, bumptest, malloctest, ls, more, edlin, move,
+# xcopy) keep real nmake rules below, same as the Linux Makefile's own explicit
 # overrides for them, with proper incremental rebuilds. Every OTHER
 # progs\*.asm file is auto-discovered (no Makefile.win edit needed for
 # a new one, matching the Linux Makefile's own praised property) and
@@ -66,7 +66,7 @@ INCS =  include\bios.inc    \
 # ---- The 9 progs\*.asm that link against lib\ -- see build_progs.bat's
 # own exclusion list, which must be kept in sync with this set ----
 SPECIAL_BINS = bin\envtest bin\printenv bin\export bin\unset \
-        bin\bumptest bin\malloctest bin\ls bin\more bin\edlin
+        bin\bumptest bin\malloctest bin\ls bin\more bin\edlin bin\move bin\xcopy
 
 all: $(FULL_BIN)
 
@@ -130,8 +130,11 @@ lib\heap_malloc.prg: lib\heap_malloc.asm include\opcodes.def
 lib\env.prg: lib\env.asm include\opcodes.def include\kernel_api.inc
 	cd lib && $(ASM) $(ASMFLAGS) env.asm
 
+lib\move.prg: lib\move.asm include\opcodes.def include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) move.asm
+
 #------------------------------------------------------------------
-# The 9 progs\*.asm that link against lib\ -- explicit rules, real
+# The 10 progs\*.asm that link against lib\ -- explicit rules, real
 # incremental rebuilds, matching the Linux Makefile's own overrides for
 # the exact same set (see its own comment for why: each needs an extra
 # lib\*.prg linked in, which the generic single-file case doesn't).
@@ -171,6 +174,13 @@ bin\bumptest: progs\bumptest.prg lib\heap_bump.prg bin
 	$(LINK) $(LFLAGS) -o bin\bumptest progs\bumptest.prg lib\heap_bump.prg
 	-del /F /Q bin\bumptest.lkb
 
+progs\xcopy.prg: progs\xcopy.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) xcopy.asm
+
+bin\xcopy: progs\xcopy.prg lib\heap_bump.prg bin
+	$(LINK) $(LFLAGS) -o bin\xcopy progs\xcopy.prg lib\heap_bump.prg
+	-del /F /Q bin\xcopy.lkb
+
 progs\malloctest.prg: progs\malloctest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) malloctest.asm
 
@@ -198,6 +208,13 @@ progs\edlin.prg: progs\edlin.asm include\kernel_api.inc include\bios.inc include
 bin\edlin: progs\edlin.prg lib\env.prg bin
 	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg
 	-del /F /Q bin\edlin.lkb
+
+progs\move.prg: progs\move.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) move.asm
+
+bin\move: progs\move.prg lib\move.prg bin
+	$(LINK) $(LFLAGS) -o bin\move progs\move.prg lib\move.prg
+	-del /F /Q bin\move.lkb
 
 #------------------------------------------------------------------
 # Link rules (boot/kernel)

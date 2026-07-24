@@ -247,7 +247,15 @@ k_glob_reserve: lbr     kernel_glob_reserve ; $0176
 ; design. General set/clear-mask primitive; ATTRIB currently only
 ; exposes +H/-H, but this needs no kernel change to grow further.
 k_file_setattr: lbr     file_setattr        ; $0179
-                ; next free jump-table address: $017C
+
+; K_GET_ERRORLEVEL: read the last command's exit code (2026-07-25) --
+; ERRORLEVEL prelude to batch IF/GOTO. RUN_ERRORLEVEL (kernel.inc) is
+; kernel/shell-internal plumbing, same category as RUN_PATH -- this is
+; the real jump-table entry point for an ORDINARY program to read it
+; (progs/errorlevel.asm), rather than baking the fixed relay address
+; directly into its own compiled binary.
+k_get_errorlevel: lbr   kernel_get_errorlevel ; $017C
+                ; next free jump-table address: $017F
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
@@ -352,6 +360,15 @@ kinit_dcd_zero:
             mov     rf, autoexec_path
             call    batch_start
 
+            ; ERRORLEVEL starts at 0 for a fresh boot, before any
+            ; command has ever run -- run_loop below is the only other
+            ; place RUN_ERRORLEVEL is ever written, once per resolved
+            ; command, so this boot-time init is the sole reason
+            ; %ERRORLEVEL% reads 0 rather than garbage on first use.
+            mov     rf, RUN_ERRORLEVEL
+            ldi     0
+            str     rf
+
 ;------------------------------------------------------------------
 ; run_loop: alternately load+run the shell (which resolves one
 ; command line and returns) and whatever it resolved. Lives entirely
@@ -439,7 +456,7 @@ run_loop:
             mov     rf, RUN_PATH        ; RF = resolved path (RA/RC
                                         ; already set above -- mov
                                         ; only touches RF/D)
-            call    prog_run            ; D = exit code (unused), DF=0/1
+            call    prog_run            ; D = exit code, DF=0/1
             lbdf    run_bad_program     ; exists (the shell already
                                         ; confirmed that) but isn't a
                                         ; valid EDF program, OR its own
@@ -454,6 +471,18 @@ run_loop:
                                         ; of not needing a second
                                         ; memory flag just to tell them
                                         ; apart
+
+            ; capture the real exit code into RUN_ERRORLEVEL -- D is
+            ; still exactly what prog_run left it as (the intervening
+            ; lbdf doesn't touch D whether taken or not), but the mov
+            ; below would clobber it (gotcha #4), so stash it in RC's
+            ; low byte first: RC's own argc value was already consumed
+            ; by prog_run's own RA/RC arguments above and is never
+            ; read again before run_loop reloads it fresh next cycle.
+            plo     rc
+            mov     rf, RUN_ERRORLEVEL
+            glo     rc
+            str     rf
 
             call    _redir_teardown     ; close whatever prog_run's own
                                         ; _redir_setup call opened/
@@ -473,6 +502,13 @@ run_loop:
             lbr     run_loop
 
 run_bad_program:
+            ; prog_run's own D value isn't a meaningful exit code here
+            ; (its own header: "DF = 1 on error... nothing is run in
+            ; that case") -- write a fixed sentinel instead
+            mov     rf, RUN_ERRORLEVEL
+            ldi     1
+            str     rf
+
             ; safe to call unconditionally even when _redir_setup was
             ; never reached (_prog_finish_load failed first) or already
             ; cleaned up after its own failure -- redir_*_active/
@@ -672,6 +708,14 @@ ksd_absent:
 kernel_getshelldrive:
             mov     rf, shell_drive
             ldn     rf
+            rtn
+
+; kernel_get_errorlevel: read the last command's exit code -- see
+; K_GET_ERRORLEVEL's own kernel_api.inc doc comment.
+kernel_get_errorlevel:
+            mov     rf, RUN_ERRORLEVEL
+            ldn     rf
+            clc
             rtn
 
 ;------------------------------------------------------------------

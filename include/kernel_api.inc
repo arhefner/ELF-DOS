@@ -103,6 +103,23 @@ RUN_REDIR_IN:       equ     PROG_BASE-108
 RUN_BATCH_ECHO_OFF: equ     PROG_BASE-109   ; byte: 0 = echo batch lines
                                             ; normally, nonzero = suppress
 
+; RUN_ERRORLEVEL: the last command's exit code (see kernel.inc's own
+; copy of this comment for the full reasoning) -- kernel/shell-internal
+; only, same as RUN_PATH/RUN_ARGC above. Ordinary programs should use
+; K_GET_ERRORLEVEL below instead of referencing this fixed address
+; directly.
+RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
+                                            ; code (0-255)
+
+; K_GET_ERRORLEVEL: read the last command's exit code. A real jump-table
+; call rather than a direct RUN_ERRORLEVEL read, unlike the shell's own
+; internal access -- an ordinary program shouldn't bake a kernel/shell-
+; internal relay address into its own compiled binary (the same mistake
+; the argv/argc ABI redesign already moved away from).
+; Args:    none
+; Returns: D = the last command's exit code (0-255), DF = 0 always
+K_GET_ERRORLEVEL: equ   $017C       ; -> kernel_get_errorlevel
+
 K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
 
 ; FCB_LEN/FCB_IOBUF_LEN: sizes only, not the field layout (which stays

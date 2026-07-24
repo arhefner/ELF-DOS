@@ -162,6 +162,23 @@ RUN_REDIR_IN:       equ     PROG_BASE-108   ; word: 0 = no input
 RUN_BATCH_ECHO_OFF: equ     PROG_BASE-109   ; byte: 0 = echo batch lines
                                             ; normally, nonzero = suppress
 
+; RUN_ERRORLEVEL: the last command's exit code (D, as left by its own
+; rtn -- see kernel/loader.asm's _prog_exec_now/prog_run), same fixed-
+; address/kernel-and-shell-shared convention as the fields above.
+; Written by run_loop (kernel/kernel.asm) after every prog_run call --
+; the real value on success, a fixed sentinel (1) if the resolved path
+; turned out not to be a valid program at all (prog_run's own DF=1
+; case never really ran anything, so D isn't a meaningful exit code
+; there). Reset to 0 once, at boot, by kernel_init -- NOT reset per
+; command cycle otherwise, so it always reflects the most recently
+; completed command, matching real MS-DOS ERRORLEVEL semantics.
+; Read directly by progs/shell.asm's own tokenizer (%ERRORLEVEL%
+; substitution) as internal plumbing, same as RUN_PATH/RUN_ARGC above;
+; ordinary programs go through K_GET_ERRORLEVEL instead (kernel_api.inc)
+; rather than referencing this fixed address directly.
+RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
+                                            ; code (0-255)
+
 ; GLOB_BUF_LEN: size of the dynamic himem reservation progs/shell.asm's
 ; own glob-expansion pass makes via K_GLOB_RESERVE (kernel/glob.asm) --
 ; NOT a fixed PROG_BASE-relative address like the fields above, since

@@ -151,6 +151,9 @@ lib/heap_malloc.prg: lib/heap_malloc.asm include/opcodes.def
 lib/env.prg: lib/env.asm include/opcodes.def include/kernel_api.inc
 	cd lib && $(ASM) $(ASMFLAGS) env.asm
 
+lib/move.prg: lib/move.asm include/opcodes.def include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) move.asm
+
 bin/envtest: progs/envtest.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/envtest progs/envtest.prg lib/env.prg
 	rm -f bin/envtest.lkb
@@ -171,6 +174,10 @@ bin/bumptest: progs/bumptest.prg lib/heap_bump.prg | bin
 	$(LINK) $(LFLAGS) -o bin/bumptest progs/bumptest.prg lib/heap_bump.prg
 	rm -f bin/bumptest.lkb
 
+bin/xcopy: progs/xcopy.prg lib/heap_bump.prg | bin
+	$(LINK) $(LFLAGS) -o bin/xcopy progs/xcopy.prg lib/heap_bump.prg
+	rm -f bin/xcopy.lkb
+
 bin/malloctest: progs/malloctest.prg lib/heap_malloc.prg | bin
 	$(LINK) $(LFLAGS) -o bin/malloctest progs/malloctest.prg lib/heap_malloc.prg
 	rm -f bin/malloctest.lkb
@@ -186,6 +193,10 @@ bin/more: progs/more.prg lib/env.prg | bin
 bin/edlin: progs/edlin.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg
 	rm -f bin/edlin.lkb
+
+bin/move: progs/move.prg lib/move.prg | bin
+	$(LINK) $(LFLAGS) -o bin/move progs/move.prg lib/move.prg
+	rm -f bin/move.lkb
 
 #------------------------------------------------------------------
 # Link rules

@@ -574,10 +574,166 @@ tok_in_squote:
             lbr     tok_char
 
 tok_ordinary:
+            ; %ERRORLEVEL% substitution (added 2026-07-25, ERRORLEVEL
+            ; prelude to batch IF/GOTO) -- reached from BOTH the
+            ; unquoted/double-quoted path (tok_check_bs's own "not a
+            ; backslash" fallthrough) and the single-quoted path
+            ; (tok_in_squote's own "not the closing quote" fallthrough)
+            ; -- R8.0 (this tokenizer's own live quote-state register,
+            ; see not_drive_cmd's header comment) is the single source
+            ; of truth for which case this is, reused here rather than
+            ; duplicating any quote-tracking logic of its own. Single-
+            ; quote mode ($01) skips this entirely and falls straight
+            ; to the original plain copy, matching the existing "100%
+            ; literal, bash-style" rule for '...' (tok_in_squote's own
+            ; header) -- 'echo '%ERRORLEVEL%'' must print the literal
+            ; text. Unquoted (0) and double-quoted ($FF) both get
+            ; substituted, matching how double-quoted content already
+            ; allows backslash-escape processing rather than being
+            ; fully literal like single-quoted content is.
+            glo     r8
+            xri     $01
+            lbz     tok_ordinary_plain
+
+            ; check for the literal "%ERRORLEVEL%" (12 bytes), case-
+            ; insensitive over the 10 middle LETTERS only -- the
+            ; leading/trailing '%' are checked EXACTLY, never folded.
+            ; REAL BUG CAUGHT BY THE PYTHON SIMULATION before this ever
+            ; reached hardware: "ani $DF" clears bit 5, which folds a
+            ; lowercase LETTER to uppercase -- but '%' is $25 (0010
+            ; 0101), which already HAS bit 5 set, so folding it
+            ; produces $05, not '%' itself. A uniform fold-then-compare
+            ; over all 12 bytes (the first draft) silently broke the
+            ; match exactly at the leading/trailing '%' positions. This
+            ; codebase's existing drive-letter fold precedent is safe
+            ; specifically because it's only ever applied to an
+            ; already-confirmed letter -- never generalized to
+            ; arbitrary bytes the way this first draft did.
+            ldn     rf
+            xri     '%'
+            lbnz    tok_ordinary_plain  ; not even a '%': can't match
+
+            mov     r7, rf
+            inc     r7                  ; R7 = scan cursor, one past
+                                        ; the confirmed leading '%' --
+                                        ; RF itself must stay untouched
+                                        ; unless this turns out to be a
+                                        ; real match
+            mov     ra, tok_errlvl_pat  ; RA = pattern cursor ("ERRORLEVEL"
+                                        ; only -- no percent signs, see
+                                        ; the data declaration below)
+tok_errlvl_cmp:
+            ldn     ra
+            lbz     tok_errlvl_checktail ; letters exhausted: check for
+                                        ; the trailing '%'
+            str     r2                  ; M(R2) = pattern letter
+                                        ; (already uppercase)
+            ldn     r7
+            ani     $DF                 ; fold to uppercase (same idiom
+                                        ; the shell's own drive-letter
+                                        ; check already uses) -- safe
+                                        ; HERE specifically, since every
+                                        ; byte compared in this loop is
+                                        ; a real letter, never '%'
+            xor
+            lbnz    tok_ordinary_plain  ; mismatch (including hitting a
+                                        ; real NUL before the letters
+                                        ; are exhausted -- a folded 0
+                                        ; never equals a real letter):
+                                        ; not our pattern -- R7/RA are
+                                        ; scratch, dead from here, RF is
+                                        ; untouched, so falling through
+                                        ; correctly copies just *RF
+            inc     r7
+            inc     ra
+            lbr     tok_errlvl_cmp
+
+tok_errlvl_checktail:
+            ldn     r7
+            xri     '%'
+            lbnz    tok_ordinary_plain  ; the letters matched but
+                                        ; there's no trailing '%' right
+                                        ; after -- not our pattern
+
+tok_errlvl_match:
+            ; full match -- R7 -> the trailing '%' itself. Consume it
+            ; too (R7 -> one past the whole matched text), then that IS
+            ; the correct advanced read-cursor value -- no separate
+            ; length constant needed, the scan itself already found
+            ; exactly where the match ends.
+            inc     r7
+            mov     rf, r7              ; RF = real read cursor,
+                                        ; advanced past the whole match
+
+            ; protect everything that must survive the f_uintout call
+            ; below -- its own clobber footprint isn't confirmed in
+            ; this codebase (gotcha #8/#10), and not_drive_cmd's own
+            ; header comment documents RF/RD/RB/R9.0/R8.0 as live
+            ; across the WHOLE tokenizing loop. push/pop (the software
+            ; stack) is this project's own established pattern for
+            ; exactly this situation across a call with an unconfirmed
+            ; footprint (e.g. kernel/redir.asm's dispatchers protecting
+            ; RF/RC/RA the same way around file_write).
+            push    rf                  ; the real (already-advanced)
+                                        ; read cursor
+            push    rd                  ; the real write cursor
+            push    rb                  ; argv-table slot pointer
+            push    r9                  ; argc (whole register pushed
+                                        ; for simplicity -- its high
+                                        ; byte is unused elsewhere in
+                                        ; this tokenizer)
+            push    r8                  ; quote state + redirect flag
+
+            mov     rf, RUN_ERRORLEVEL
+            ldn     rf
+            plo     rd
+            ldi     0
+            phi     rd                  ; RD = RUN_ERRORLEVEL's current
+                                        ; value (zero-extended byte)
+
+            mov     rf, tok_errlvl_buf
+            call    f_uintout           ; writes 1-3 decimal digit
+                                        ; bytes at *rf, does NOT null-
+                                        ; terminate (gotcha #5)
+            ldi     0
+            str     rf                  ; null-terminate right after
+                                        ; the digits -- RF still holds
+                                        ; f_uintout's own returned
+                                        ; pointer here, consumed
+                                        ; immediately, before any of
+                                        ; the pushed registers below
+                                        ; are restored
+
+            pop     r8
+            pop     r9
+            pop     rb
+            pop     rd                  ; RD = real write cursor,
+                                        ; restored
+            pop     rf                  ; RF = real read cursor,
+                                        ; restored -- LIFO, reversing
+                                        ; the push order above
+
+            ; copy tok_errlvl_buf's digits into *RD -- RA (confirmed
+            ; dead/unused elsewhere in this tokenizer) as the digit-
+            ; buffer source pointer, so RF (the just-restored real read
+            ; cursor) is never disturbed
+            mov     ra, tok_errlvl_buf
+tok_errlvl_copy:
+            ldn     ra
+            lbz     tok_ordinary_next   ; digits exhausted (the NUL
+                                        ; just written above)
+            str     rd
+            inc     rd
+            inc     ra
+            lbr     tok_errlvl_copy
+
+tok_ordinary_plain:
             ldn     rf
             str     rd
             inc     rd
             inc     rf
+
+tok_ordinary_next:
             lbr     tok_char
 
 tok_end_token:
@@ -2184,9 +2340,24 @@ pp_dirent:  ds      DIRENT_LEN
 ; recall depth (still enough for "a handful of recent commands") for
 ; meaningfully simpler, lower-risk code. The FILE itself is never
 ; capped -- only the tail loaded into RAM for any one session is.
+;
+; HISTORY_MAX_LINES raised 16->25 (2026-07-25, user's own "compromise"
+; call after weighing the tradeoff): hist_lines[] is the only cost
+; (ordinary shell RAM, HISTORY_MAX_LINES*2 bytes -- 50 vs 32, no kernel-
+; margin impact at all) and hist_split's own shift-on-full logic is
+; already fully parametric (no hardcoded 16 anywhere in the actual
+; logic, confirmed by grep before changing this). HISTORY_LOAD_BUDGET
+; deliberately left at 255, NOT raised to match -- at a true ~10-char
+; command average, 255 bytes realistically holds something in the
+; low-to-mid 20s of lines, not a guaranteed 25 every time, but raising
+; the budget past 255 would cross the single-byte-arithmetic boundary
+; above and require widening hist_loaded_len/hist_split's countdown to
+; a real word -- a genuine (if modest) change to code that's already
+; had two real hardware-found bugs in its history, not worth the added
+; risk just to guarantee the last few slots of headroom.
 ;------------------------------------------------------------------
 HISTORY_LOAD_BUDGET: equ 255
-HISTORY_MAX_LINES:   equ 16
+HISTORY_MAX_LINES:   equ 25
 
 ;------------------------------------------------------------------
 ; read_line_with_history: see the section header above.
@@ -2820,12 +2991,30 @@ hsplit_g2:
             lbnz    hsplit_next_line
 
 hsplit_g3:
-            ; guard 3: at capacity?
+            ; guard 3: at capacity? REAL BUG, found from a hardware
+            ; report (2026-07-25): this used to just stop recording
+            ; once hist_count reached HISTORY_MAX_LINES -- but the
+            ; scan runs oldest-to-newest through the loaded window, so
+            ; once the window holds MORE than HISTORY_MAX_LINES
+            ; complete lines (easy with short commands -- the window
+            ; is 255 bytes), hist_lines[] filled with the OLDEST
+            ; HISTORY_MAX_LINES lines in the window and every NEWER
+            ; line after that was scanned but silently never recorded.
+            ; hist_recall_up's "newest = hist_count-1" then pointed at
+            ; a stale entry, and Down could never reach anything past
+            ; it, since the true newest lines were never in the array
+            ; at all -- exactly "Up gives a command from several back,
+            ; further presses anchored there." Fixed: once full, shift
+            ; the array down by one slot (dropping the oldest, slot 0)
+            ; and always write the new entry into the last slot, so
+            ; hist_lines[hist_count-1] is always the true newest line
+            ; seen so far, capped at the most recent HISTORY_MAX_LINES.
             glo     r9
             smi     HISTORY_MAX_LINES
-            lbdf    hsplit_next_line
+            lbdf    hsplit_full         ; hist_count >= MAX: shift,
+                                        ; don't just stop recording
 
-            ; record: hist_lines[hist_count] = line_start (R8)
+            ; --- room available: append normally, hist_count++ ---
             mov     rf, hist_lines
             glo     r9
             plo     rd
@@ -2842,6 +3031,41 @@ hsplit_g3:
             glo     r9
             adi     1
             plo     r9                  ; hist_count++
+            lbr     hsplit_next_line
+
+hsplit_full:
+            ; shift hist_lines[1..MAX-1] down to [0..MAX-2] (2 bytes/
+            ; entry), dropping the oldest slot -- R7/R8/R9/RC are all
+            ; live across the OUTER scan loop and must survive this,
+            ; so only RF/RD/RB (confirmed unused elsewhere in this
+            ; proc) are used as scratch here. hist_count (R9.0) stays
+            ; pinned at HISTORY_MAX_LINES -- already at capacity, and
+            ; this path doesn't change that.
+            mov     rd, hist_lines
+            inc     rd
+            inc     rd                  ; RD = &hist_lines[1] (source)
+            mov     rf, hist_lines      ; RF = &hist_lines[0] (dest)
+            ldi     (HISTORY_MAX_LINES-1)*2
+            plo     rb
+hsplit_shift_loop:
+            glo     rb
+            lbz     hsplit_shift_done
+            lda     rd
+            str     rf
+            inc     rf
+            glo     rb
+            smi     1
+            plo     rb
+            lbr     hsplit_shift_loop
+hsplit_shift_done:
+            ; RF now points exactly at hist_lines[MAX-1] (the last
+            ; slot) -- write the new entry (R8 = its line-start
+            ; pointer) there
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
 
 hsplit_next_line:
             mov     r8, r7
@@ -2930,6 +3154,13 @@ ha_path_done:
 
 ha_done:
             rtn
+
+tok_errlvl_pat:     db      "ERRORLEVEL",0  ; letters only -- the
+                                            ; leading/trailing '%' are
+                                            ; checked exactly, in code,
+                                            ; not folded (see
+                                            ; tok_ordinary's own header)
+tok_errlvl_buf:     ds      4           ; up to 3 decimal digits + NUL
 
 hist_fcb:           ds      FCB_LEN
 hist_iobuf:         ds      FCB_IOBUF_LEN
