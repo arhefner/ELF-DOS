@@ -3,18 +3,18 @@
 ;
 ; Usage: ERRORLEVEL
 ;
-; No-argument utility, same shape as progs/ver.asm's own version print
-; -- part of the ERRORLEVEL prelude to batch IF/GOTO (2026-07-25). Goes
-; through K_GET_ERRORLEVEL rather than reading RUN_ERRORLEVEL's own
-; fixed relay address directly: that address is kernel/shell-internal
-; plumbing (same category as RUN_PATH), and an ordinary program
-; shouldn't bake it into its own compiled binary -- the exact mistake
-; the argv/argc ABI redesign already moved away from. The shell's own
-; %ERRORLEVEL% substitution (progs/shell.asm's tokenizer) IS the direct
-; consumer that reads RUN_ERRORLEVEL itself, as internal plumbing; this
-; utility exists for interactive/scripted use where %ERRORLEVEL% isn't
-; convenient (e.g. piping its output, or before %ERRORLEVEL% expansion
-; existed at all).
+; Lives in test/, not progs/: it always prints exactly what "echo
+; %ERRORLEVEL%" already would (and %ERRORLEVEL% is strictly more
+; flexible -- inline in any command, usable inside batch scripts), so
+; it isn't something a normal install needs day to day. What it's
+; actually for is proving K_GET_ERRORLEVEL itself works: it's the one
+; call site that goes through the real jump-table API rather than
+; reading RUN_ERRORLEVEL directly the way the shell's own
+; %ERRORLEVEL% substitution (progs/shell.asm's tokenizer) does as
+; internal plumbing -- exercising the path any FUTURE program would
+; use to branch on the previous exit code programmatically, even
+; though nothing does that yet. No-argument utility, same shape as
+; progs/ver.asm's own version print.
 ;
 
 #include    include/opcodes.def

@@ -8,6 +8,9 @@
 #   update     build and write kernel only (MBR already installed)
 #   progs      build every progs/*.asm into bin/<name> (bare, no
 #              extension -- mirrors the on-device /bin layout exactly)
+#   test       build every test/*.asm into test/bin/<name> -- diagnostic/
+#              subsystem-exercising programs, kept out of bin/ entirely
+#              so a normal install's /bin never includes them
 #   clean      remove all generated files
 #
 # Override DEV on the command line to target a specific device:
@@ -67,11 +70,22 @@ INCS =  include/bios.inc    \
 # ---- User programs (progs/ subdir) ----
 # template.asm is a starting point, not a program -- excluded here.
 # Built executables land in bin/, bare-named (no extension), so bin/'s
-# entire contents can be copied straight onto the card as /bin.
+# entire contents can be copied straight onto the card as /bin -- test/
+# programs (below) are deliberately NOT part of this, so bin/ only ever
+# holds what a normal install actually wants.
 PROG_SRCS = $(filter-out progs/template.asm, $(wildcard progs/*.asm))
 PROG_EXES = $(patsubst progs/%.asm,bin/%,$(PROG_SRCS))
 
-.PHONY: all mbr install update progs clean
+# ---- Test/diagnostic programs (test/ subdir) ----
+# Exercise a specific subsystem (a lib/ allocator, K_FILE_SEEK, etc.)
+# rather than being something a normal install wants day to day --
+# segregated from progs/ (2026-07-25) so bin/ stays install-only. Same
+# bare-name build convention as progs/, just landing in test/bin/
+# instead of bin/.
+TEST_SRCS = $(wildcard test/*.asm)
+TEST_EXES = $(patsubst test/%.asm,test/bin/%,$(TEST_SRCS))
+
+.PHONY: all mbr install update progs test clean
 
 all: $(FULL_BIN)
 
@@ -130,17 +144,31 @@ bin/%: progs/%.prg | bin
 	$(LINK) $(LFLAGS) -o bin/$* progs/$*.prg
 	rm -f bin/$*.lkb
 
+# test/ mirrors progs/'s own single-file assemble+link pattern exactly,
+# just landing in test/bin/ instead of bin/ -- see TEST_SRCS/TEST_EXES
+# above for why they're kept separate.
+test/%.prg: test/%.asm include/kernel_api.inc include/bios.inc include/opcodes.def
+	cd test && $(ASM) $(ASMFLAGS) $*.asm
+
+test/bin:
+	mkdir -p test/bin
+
+test/bin/%: test/%.prg | test/bin
+	$(LINK) $(LFLAGS) -o test/bin/$* test/$*.prg
+	rm -f test/bin/$*.lkb
+
 #------------------------------------------------------------------
 # Reusable libraries (lib/ subdir) -- NOT standalone programs, no EDF
 # header/entry point of their own. Assembled separately and linked
 # alongside whichever program wants them, same idea as the kernel's
-# own multi-module KOBJ link. progs/bumptest.asm and
-# progs/malloctest.asm were the first consumers; progs/ls.asm (switched
-# to heap_bump for its per-entry name storage, 2026-07-19) is the
-# first REAL (non-test) one. See their own explicit link rules below,
-# which override the generic "bin/%: progs/%.prg" pattern rule above
-# for just those targets (GNU Make always prefers an explicit
-# target-specific rule over a pattern rule that also matches).
+# own multi-module KOBJ link. test/bumptest.asm and test/malloctest.asm
+# (moved from progs/ 2026-07-25, see TEST_SRCS/TEST_EXES above) were the
+# first consumers; progs/ls.asm (switched to heap_bump for its per-entry
+# name storage, 2026-07-19) is the first REAL (non-test) one. See their
+# own explicit link rules below, which override the generic
+# "bin/%: progs/%.prg"/"test/bin/%: test/%.prg" pattern rules above for
+# just those targets (GNU Make always prefers an explicit target-
+# specific rule over a pattern rule that also matches).
 #------------------------------------------------------------------
 lib/heap_bump.prg: lib/heap_bump.asm include/opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) heap_bump.asm
@@ -154,10 +182,6 @@ lib/env.prg: lib/env.asm include/opcodes.def include/kernel_api.inc
 lib/move.prg: lib/move.asm include/opcodes.def include/kernel_api.inc
 	cd lib && $(ASM) $(ASMFLAGS) move.asm
 
-bin/envtest: progs/envtest.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/envtest progs/envtest.prg lib/env.prg
-	rm -f bin/envtest.lkb
-
 bin/printenv: progs/printenv.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/printenv progs/printenv.prg lib/env.prg
 	rm -f bin/printenv.lkb
@@ -170,17 +194,21 @@ bin/unset: progs/unset.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/unset progs/unset.prg lib/env.prg
 	rm -f bin/unset.lkb
 
-bin/bumptest: progs/bumptest.prg lib/heap_bump.prg | bin
-	$(LINK) $(LFLAGS) -o bin/bumptest progs/bumptest.prg lib/heap_bump.prg
-	rm -f bin/bumptest.lkb
-
 bin/xcopy: progs/xcopy.prg lib/heap_bump.prg | bin
 	$(LINK) $(LFLAGS) -o bin/xcopy progs/xcopy.prg lib/heap_bump.prg
 	rm -f bin/xcopy.lkb
 
-bin/malloctest: progs/malloctest.prg lib/heap_malloc.prg | bin
-	$(LINK) $(LFLAGS) -o bin/malloctest progs/malloctest.prg lib/heap_malloc.prg
-	rm -f bin/malloctest.lkb
+test/bin/envtest: test/envtest.prg lib/env.prg | test/bin
+	$(LINK) $(LFLAGS) -o test/bin/envtest test/envtest.prg lib/env.prg
+	rm -f test/bin/envtest.lkb
+
+test/bin/bumptest: test/bumptest.prg lib/heap_bump.prg | test/bin
+	$(LINK) $(LFLAGS) -o test/bin/bumptest test/bumptest.prg lib/heap_bump.prg
+	rm -f test/bin/bumptest.lkb
+
+test/bin/malloctest: test/malloctest.prg lib/heap_malloc.prg | test/bin
+	$(LINK) $(LFLAGS) -o test/bin/malloctest test/malloctest.prg lib/heap_malloc.prg
+	rm -f test/bin/malloctest.lkb
 
 bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg
@@ -249,9 +277,16 @@ update: $(FULL_BIN)
 # onto the FAT16 partition.
 progs: $(PROG_EXES)
 
+# Build every test/*.asm into test/bin/<name> -- same bare-name
+# convention as progs/, deliberately never mixed into bin/ itself (see
+# TEST_SRCS/TEST_EXES above).
+test: $(TEST_EXES)
+
 clean:
 	rm -f boot/*.prg boot/*.lst \
 	      kernel/*.prg kernel/*.lst \
 	      progs/*.prg progs/*.lst progs/*.build progs/*.lkb \
+	      test/*.prg test/*.lst test/*.build test/*.lkb \
 	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
+	rm -rf test/bin
 	rm -rf bin

@@ -1,13 +1,15 @@
 @echo off
 rem build_progs.bat - auto-discover and build every "ordinary"
 rem (single-file) progs\*.asm into bin\<name>, skipping template.asm
-rem and the 9 programs that link against lib\ (those get real nmake
+rem and the 8 programs that link against lib\ (those get real nmake
 rem rules in Makefile.win instead, with proper incremental rebuilds --
 rem see its own header comment). Invoked by "nmake /F Makefile.win
 rem progs" so that adding a new progs\*.asm file needs no Makefile.win
 rem edit, matching the Linux Makefile's own auto-discovery property
 rem (nmake itself has no equivalent of GNU Make's $(wildcard ...) to
-rem do this at parse time, hence offloading it to this script).
+rem do this at parse time, hence offloading it to this script). See
+rem build_test.bat for the equivalent over test\*.asm (2026-07-25 --
+rem diagnostic/subsystem-exercising programs, kept out of bin\ entirely).
 rem
 rem Args: %1=ASM  %2=ASMFLAGS  %3=LINK  %4=LFLAGS -- passed in from
 rem Makefile.win's own macros, so the flags live in exactly one place
@@ -34,12 +36,9 @@ for %%f in (progs\*.asm) do (
     set "name=%%~nf"
     set "skip="
     if /I "!name!"=="template"   set "skip=1"
-    if /I "!name!"=="envtest"    set "skip=1"
     if /I "!name!"=="printenv"   set "skip=1"
     if /I "!name!"=="export"     set "skip=1"
     if /I "!name!"=="unset"      set "skip=1"
-    if /I "!name!"=="bumptest"   set "skip=1"
-    if /I "!name!"=="malloctest" set "skip=1"
     if /I "!name!"=="ls"         set "skip=1"
     if /I "!name!"=="more"       set "skip=1"
     if /I "!name!"=="edlin"      set "skip=1"

@@ -1,6 +1,10 @@
 # Build output: bare-named executables mirroring the on-device /bin
 /bin/
 
+# Build output: test/diagnostic program binaries, deliberately kept
+# separate from /bin/ above
+/test/bin/
+
 # Prerequisites
 *.d
 

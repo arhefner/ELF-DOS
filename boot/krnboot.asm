@@ -805,9 +805,6 @@ boot_drive_copy:
                                             ; severity as any other
                                             ; boot-time failure here
 
-            call        f_inmsg
-            db          "Type a command.",13,10,0
-
             lbr         KERN_ENTRY          ; continue into kernel_init proper
 
 ;--------------------------------------------------------------

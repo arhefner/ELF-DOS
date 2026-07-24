@@ -5,6 +5,7 @@
 #   nmake /F Makefile.win            build kernel-full.bin (default)
 #   nmake /F Makefile.win mbr        build mbr.bin only
 #   nmake /F Makefile.win progs      build every progs\*.asm into bin\<name>
+#   nmake /F Makefile.win test       build every test\*.asm into test\bin\<name>
 #   nmake /F Makefile.win clean      remove all generated files
 #
 # Mirrors the project's Linux Makefile as closely as nmake allows -- see
@@ -20,19 +21,21 @@
 # of nmake just saying "unknown target."
 #
 # DIFFERENCE FROM THE LINUX MAKEFILE: nmake has no equivalent of GNU
-# Make's $(wildcard ...)/$(patsubst ...), so "progs" can't build a real
-# per-file dependency graph for arbitrary progs\*.asm the way the Linux
-# Makefile does. The 11 programs that link against lib\ (envtest,
-# printenv, export, unset, bumptest, malloctest, ls, more, edlin, move,
-# xcopy) keep real nmake rules below, same as the Linux Makefile's own explicit
-# overrides for them, with proper incremental rebuilds. Every OTHER
-# progs\*.asm file is auto-discovered (no Makefile.win edit needed for
-# a new one, matching the Linux Makefile's own praised property) and
-# built by the companion script build_progs.bat, which this Makefile
-# calls -- but it rebuilds that whole set unconditionally each time
-# "progs" runs, rather than tracking each file's own timestamp. asm02/
-# link02 are fast enough that this hasn't been worth the extra
-# complexity of a real incremental check in batch.
+# Make's $(wildcard ...)/$(patsubst ...), so "progs"/"test" can't build a
+# real per-file dependency graph for arbitrary progs\*.asm/test\*.asm the
+# way the Linux Makefile does. The 8 progs\ programs that link against
+# lib\ (printenv, export, unset, ls, more, edlin, move, xcopy) and the 3
+# test\ programs that do (envtest, bumptest, malloctest -- moved out of
+# progs\ 2026-07-25, see the Linux Makefile's own TEST_SRCS/TEST_EXES
+# comment) keep real nmake rules below, same as the Linux Makefile's own
+# explicit overrides for them, with proper incremental rebuilds. Every
+# OTHER progs\*.asm/test\*.asm file is auto-discovered (no Makefile.win
+# edit needed for a new one, matching the Linux Makefile's own praised
+# property) and built by the companion scripts build_progs.bat/
+# build_test.bat, which this Makefile calls -- but they rebuild their
+# whole set unconditionally each time, rather than tracking each file's
+# own timestamp. asm02/link02 are fast enough that this hasn't been
+# worth the extra complexity of a real incremental check in batch.
 #
 
 ASM         = asm02
@@ -63,10 +66,14 @@ INCS =  include\bios.inc    \
         include\opcodes.def \
         include\kernel.inc
 
-# ---- The 9 progs\*.asm that link against lib\ -- see build_progs.bat's
+# ---- The 8 progs\*.asm that link against lib\ -- see build_progs.bat's
 # own exclusion list, which must be kept in sync with this set ----
-SPECIAL_BINS = bin\envtest bin\printenv bin\export bin\unset \
-        bin\bumptest bin\malloctest bin\ls bin\more bin\edlin bin\move bin\xcopy
+SPECIAL_BINS = bin\printenv bin\export bin\unset \
+        bin\ls bin\more bin\edlin bin\move bin\xcopy
+
+# ---- The 3 test\*.asm that link against lib\ -- see build_test.bat's
+# own exclusion list, which must be kept in sync with this set ----
+TEST_SPECIAL_BINS = test\bin\envtest test\bin\bumptest test\bin\malloctest
 
 all: $(FULL_BIN)
 
@@ -115,6 +122,9 @@ kernel\glob.prg: kernel\glob.asm $(INCS)
 bin:
 	if not exist bin mkdir bin
 
+test\bin:
+	if not exist test\bin mkdir test\bin
+
 #------------------------------------------------------------------
 # Reusable libraries (lib\ subdir) -- NOT standalone programs, no EDF
 # header/entry point of their own; assembled separately and linked
@@ -139,12 +149,12 @@ lib\move.prg: lib\move.asm include\opcodes.def include\kernel_api.inc
 # the exact same set (see its own comment for why: each needs an extra
 # lib\*.prg linked in, which the generic single-file case doesn't).
 #------------------------------------------------------------------
-progs\envtest.prg: progs\envtest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
-	cd progs && $(ASM) $(ASMFLAGS) envtest.asm
+test\envtest.prg: test\envtest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd test && $(ASM) $(ASMFLAGS) envtest.asm
 
-bin\envtest: progs\envtest.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\envtest progs\envtest.prg lib\env.prg
-	-del /F /Q bin\envtest.lkb
+test\bin\envtest: test\envtest.prg lib\env.prg test\bin
+	$(LINK) $(LFLAGS) -o test\bin\envtest test\envtest.prg lib\env.prg
+	-del /F /Q test\bin\envtest.lkb
 
 progs\printenv.prg: progs\printenv.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) printenv.asm
@@ -167,12 +177,12 @@ bin\unset: progs\unset.prg lib\env.prg bin
 	$(LINK) $(LFLAGS) -o bin\unset progs\unset.prg lib\env.prg
 	-del /F /Q bin\unset.lkb
 
-progs\bumptest.prg: progs\bumptest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
-	cd progs && $(ASM) $(ASMFLAGS) bumptest.asm
+test\bumptest.prg: test\bumptest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd test && $(ASM) $(ASMFLAGS) bumptest.asm
 
-bin\bumptest: progs\bumptest.prg lib\heap_bump.prg bin
-	$(LINK) $(LFLAGS) -o bin\bumptest progs\bumptest.prg lib\heap_bump.prg
-	-del /F /Q bin\bumptest.lkb
+test\bin\bumptest: test\bumptest.prg lib\heap_bump.prg test\bin
+	$(LINK) $(LFLAGS) -o test\bin\bumptest test\bumptest.prg lib\heap_bump.prg
+	-del /F /Q test\bin\bumptest.lkb
 
 progs\xcopy.prg: progs\xcopy.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) xcopy.asm
@@ -181,12 +191,12 @@ bin\xcopy: progs\xcopy.prg lib\heap_bump.prg bin
 	$(LINK) $(LFLAGS) -o bin\xcopy progs\xcopy.prg lib\heap_bump.prg
 	-del /F /Q bin\xcopy.lkb
 
-progs\malloctest.prg: progs\malloctest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
-	cd progs && $(ASM) $(ASMFLAGS) malloctest.asm
+test\malloctest.prg: test\malloctest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd test && $(ASM) $(ASMFLAGS) malloctest.asm
 
-bin\malloctest: progs\malloctest.prg lib\heap_malloc.prg bin
-	$(LINK) $(LFLAGS) -o bin\malloctest progs\malloctest.prg lib\heap_malloc.prg
-	-del /F /Q bin\malloctest.lkb
+test\bin\malloctest: test\malloctest.prg lib\heap_malloc.prg test\bin
+	$(LINK) $(LFLAGS) -o test\bin\malloctest test\malloctest.prg lib\heap_malloc.prg
+	-del /F /Q test\bin\malloctest.lkb
 
 progs\ls.prg: progs\ls.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) ls.asm
@@ -245,12 +255,20 @@ $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
 mbr: $(MBR_BIN)
 
 # Build every progs\*.asm into bin\<name> (bare name, no extension --
-# matches the on-device \bin layout). The 9 lib-linked programs above
+# matches the on-device \bin layout). The 8 lib-linked programs above
 # get real nmake incremental rebuilds via SPECIAL_BINS; everything else
 # is auto-discovered and (re)built by build_progs.bat -- see this
 # file's own header comment for why the split exists.
 progs: bin $(SPECIAL_BINS)
 	build_progs.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
+
+# Build every test\*.asm into test\bin\<name> -- diagnostic/subsystem-
+# exercising programs, kept out of bin\ entirely (moved out of progs\
+# 2026-07-25) so a normal install's \bin never includes them. Same
+# split as "progs" above: the 3 lib-linked ones via TEST_SPECIAL_BINS,
+# everything else auto-discovered by build_test.bat.
+test: test\bin $(TEST_SPECIAL_BINS)
+	build_test.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
 
 install:
 	@echo install is not available in Makefile.win -- sys\elfdos-sys is a Linux tool with no Windows port here. Build with this Makefile, then flash kernel-full.bin/mbr.bin from Linux.
@@ -262,6 +280,8 @@ clean:
 	-del /F /Q boot\*.prg boot\*.lst
 	-del /F /Q kernel\*.prg kernel\*.lst
 	-del /F /Q progs\*.prg progs\*.lst progs\*.build progs\*.lkb
+	-del /F /Q test\*.prg test\*.lst test\*.build test\*.lkb
 	-del /F /Q lib\*.prg lib\*.lst
 	-del /F /Q $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
 	-if exist bin rmdir /S /Q bin
+	-if exist test\bin rmdir /S /Q test\bin
