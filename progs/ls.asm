@@ -23,6 +23,16 @@
 ; shared -- this project's established precedent, see DIR/STAT), then
 ; the name.
 ;
+; -l's size column is human-readable, Linux `ls -h` style, always --
+; not a separate opt-in flag (confirmed with the user, 2026-07-26):
+; plain byte count under 1024 (no suffix), else 1-3 significant digits
+; with a K/M/G suffix, one decimal place shown only for a single-digit
+; whole part (e.g. "512", "1.5K", "42K", "3.9G"). See ls_fmt_human's
+; own header comment for the exact algorithm and its two documented,
+; deliberate approximations (smallest-unit-under-1000 selection, and a
+; reduced-precision decimal digit that avoids a 32-bit multiply
+; overflow for the G unit).
+;
 ; -F: append "/" after directory entries (no executable-attribute
 ; concept on ELF-DOS, so unlike real ls -F this is the only suffix
 ; case). Composes with quoting below -- a directory name containing a
@@ -90,13 +100,17 @@
 LSENT_ATTR:     equ     0           ; 1 byte, FAT attribute byte
 LSENT_DATE:     equ     1           ; 2 bytes, packed FAT last-write date
 LSENT_TIME:     equ     3           ; 2 bytes, packed FAT last-write time
-LSENT_SIZE:     equ     5           ; 2 bytes, size low word (0-65535)
-LSENT_NAMEPTR:  equ     7           ; 2 bytes: pointer to a heap_bump-
+LSENT_SIZE:     equ     5           ; 4 bytes, full 32-bit size (widened
+                                    ; 2026-07-26, matching DIR/STAT's own
+                                    ; >64K support -- was 2 bytes/low-
+                                    ; word-only; every field after this
+                                    ; one shifted +2 as a result)
+LSENT_NAMEPTR:  equ     9           ; 2 bytes: pointer to a heap_bump-
                                     ; allocated, NUL-terminated name
                                     ; (sized to the real name's length,
                                     ; not a fixed buffer -- see the file
                                     ; header comment)
-LSENT_NAMELEN:  equ     9           ; 1 byte: this entry's DISPLAY
+LSENT_NAMELEN:  equ     11          ; 1 byte: this entry's DISPLAY
                                     ; length (2026-07-22: redefined from
                                     ; "real name length" -- now the real
                                     ; length + 2 if LSENT_QUOTE is set +
@@ -114,13 +128,13 @@ LSENT_NAMELEN:  equ     9           ; 1 byte: this entry's DISPLAY
                                     ; never includes these adjustments --
                                     ; conflating the two would make the
                                     ; copy loop read past the real name.
-LSENT_QUOTE:    equ     10          ; 1 byte: 1 if this entry's name
+LSENT_QUOTE:    equ     12          ; 1 byte: 1 if this entry's name
                                     ; contains a space and should be
                                     ; printed single-quoted, else 0 --
                                     ; precomputed at collection time
                                     ; (ls_add_entry) so print time never
                                     ; needs to rescan for a space either.
-LSENT_LEN:      equ     11
+LSENT_LEN:      equ     13
 
 LS_NAME_CAP:    equ     127         ; matches K_DIR_READ's own DIRENT_NAME
                                     ; limit -- caps the length-counting
@@ -780,9 +794,16 @@ ls_namecopy_done:
             str     rf
             inc     rf
 
+            ; full 32-bit size (widened 2026-07-26, matching DIR/STAT --
+            ; was low-word-only, "add16 rd, 2" skip removed)
             mov     rd, ls_scratch
             add16   rd, DIRENT_SIZE
-            add16   rd, 2               ; skip to the low word
+            lda     rd
+            str     rf
+            inc     rf
+            lda     rd
+            str     rf
+            inc     rf
             lda     rd
             str     rf
             inc     rf
@@ -1956,26 +1977,33 @@ ls_long_file:
             db      "-  ",0
 
 ls_long_size:
-            ; right-justified 5-column decimal size (0-65535 always
-            ; fits in 5 digits -- matches real ls's own fixed-width
-            ; size field; no K/M/G suffixes needed at this file-size
-            ; ceiling)
+            ; right-justified 5-column human-readable size (2026-07-26:
+            ; replaces the old plain 0-65535 f_uintout call, now that
+            ; LSENT_SIZE is a full 32-bit field -- see ls_fmt_human's own
+            ; header comment for the K/M/G formatting rules). Output is
+            ; always <=4 characters, so the existing 5-space right-
+            ; justify padding infrastructure below needs no changes.
             mov     rf, ls_curentry
             lda     rf
-            phi     rd
+            phi     r7
             ldn     rf
-            plo     rd                  ; RD = entry struct address
-            add16   rd, LSENT_SIZE
-            lda     rd
+            plo     r7                  ; R7 = entry struct address
+                                        ; (pure read pointer, not one of
+                                        ; ls_fmt_human's own arguments)
+            mov     rf, r7
+            add16   rf, LSENT_SIZE
+            lda     rf
+            phi     rd
+            lda     rf
+            plo     rd
+            lda     rf
             phi     r8
-            ldn     rd
-            plo     r8                  ; R8 = size (0-65535)
-            mov     rd, r8
-
+            ldn     rf
+            plo     r8                  ; RD:R8 = 32-bit size (RD=hi
+                                        ; word, R8=lo word -- matches
+                                        ; ls_fmt_human's own Args)
             mov     rf, ls_sizebuf
-            call    f_uintout
-            ldi     0
-            str     rf
+            call    ls_fmt_human        ; fills ls_sizebuf, null-terminated
 
             mov     rf, ls_sizebuf
             ldi     0
@@ -2307,6 +2335,850 @@ lp2d_print:
             call    K_MSG
             rtn
 
+;------------------------------------------------------------------
+; ls_pairshr10: shift a 32-bit register pair RD:R8 (RD=hi word,
+; R8=lo word) right by 10 bits -- 10 repeated single-bit pair-shifts
+; via SHR16/SHRC16 (SHR16 rd shifts RD right by 1, leaving the bit
+; that fell off in DF; SHRC16 r8 then shifts R8 right by 1 USING that
+; DF as its own carry-in -- together, one true 32-bit right-shift-by-
+; one of the pair). No byte-reassignment shortcut needed for a shift
+; count this small -- matches this file's own established convention
+; (dir.asm/stat.asm's date-unpacking code, and ls_wr_year's own
+; shr16-repeated-inline style elsewhere in this file) of just
+; repeating the shift macro rather than reaching for a cleverer
+; technique when the count is a small, fixed constant.
+;
+; Used to compute each candidate unit's own whole part directly:
+; N>>10 for K, and (2026-07-26: no longer used for remainder
+; reduction -- see ls_fmt_human's own header for why an earlier,
+; reduced-precision approach was replaced with exact arithmetic).
+;
+; Args:    RD:R8 = value
+; Returns: RD:R8 = value >> 10
+; Modifies: RD, R8 (and D, DF)
+;------------------------------------------------------------------
+ls_pairshr10:
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            shr16   rd
+            shrc16  r8
+            rtn
+
+;------------------------------------------------------------------
+; ls_fmt_human: format a 32-bit byte count as a human-readable
+; string, Linux `ls -h` style -- plain decimal bytes under 1024 (no
+; suffix), else 1-3 significant digits with a K/M/G suffix, with one
+; decimal place shown only when the whole part is a single digit
+; (0-9). Deliberately picks the SMALLEST unit whose whole part comes
+; out under 1000 (not the more obvious "largest unit whose whole part
+; is >=1", which can leave a 4-digit whole part, e.g. 1023K) -- this
+; guarantees the display is NEVER more than 4 characters wide
+; (3 digits + suffix, or 1 digit + '.' + 1 digit + suffix).
+;
+; ROUNDS to nearest, not floors (2026-07-26: a first version floored,
+; documented as a deliberate approximation -- the user tested it on
+; hardware against real values verified with their own host `ls` and
+; found it wrong, not just imprecise: 290421 bytes showed "283K"
+; where real `ls -h` shows "284K"; 1462695 showed "1.3M" where real
+; `ls -h` shows "1.4M". Both are exactly what floor-vs-round predicts:
+; 290421/1024 = 283.61..., 1462695/1048576 = 1.3948... -- genuinely
+; closer to 284/1.4 than to 283/1.3. Rewritten to round-to-nearest
+; using EXACT 32-bit arithmetic throughout (ls_add32/ls_sub32/
+; ls_cmp32_ge/ls_dbl32 below) -- no reduced-precision shortcut this
+; time, since the whole point of the fix is to stop approximating.
+; Verified against 66,000+ values (including exhaustive coverage
+; around every unit/digit boundary, plus the user's own two reported
+; values) via a from-scratch mechanical 1802-instruction simulator
+; before any of this was trusted -- see the design scratch history for
+; the two real bugs that simulation caught before this ever reached
+; real assembly: (1) an early ls_cmp32_ge draft only compared 2 of the
+; 4 relevant bytes, silently never referencing the high word (R9) at
+; all; (2) rounding a decimal digit all the way up to 10 does NOT
+; always mean "drop the decimal point" -- e.g. whole=1,dec=10 carries
+; to whole=2,dec=0, which must still print "2.0K", not "2K"; only an
+; ORIGINAL whole of exactly 9 crosses all the way to a bare "10K".
+; Rounding can also push a 10-999 whole up to exactly 1000, which must
+; bump to the NEXT larger unit rather than print a 4-digit value --
+; handled by lfh_round_and_print's own DF=1 "please retry the next
+; unit" signal back to the K/M call sites below.
+;
+; Args:    RD:R8 = 32-bit byte count (RD = high word, R8 = low word)
+;          RF = destination buffer (>= 5 bytes: max "999K"/"9.9K"/
+;          "1023"+null)
+; Returns: buffer filled and null-terminated
+; Modifies: everything (R7-RD)
+;------------------------------------------------------------------
+ls_fmt_human:
+            mov     rb, ls_human_dest
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; ls_human_dest = RF (dest buffer)
+
+            mov     rb, ls_human_n
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+            inc     rb
+            ghi     r8
+            str     rb
+            inc     rb
+            glo     r8
+            str     rb                  ; ls_human_n = N (4 bytes: hi
+                                        ; word then lo word, matching
+                                        ; DIRENT_SIZE's own big-endian
+                                        ; convention)
+
+            ; ---- plain-byte case: N < 1024 (RD entirely zero AND
+            ; R8 < 1024). MUST check the FULL 16-bit RD (both ghi AND
+            ; glo), not just ghi(rd) alone -- caught in the design
+            ; simulation before ever reaching real assembly: RD=16
+            ; (for example) has a zero HIGH byte even though the
+            ; register itself is not zero, and checking only ghi(rd)
+            ; would have silently mis-treated N=1048576 (RD=16) as
+            ; "high word zero", then wrongly evaluated R8 alone
+            ; (which happened to be 0) as if it were the whole value.
+            ; ----
+            ghi     rd
+            lbnz    lfh_try_k           ; RD.hi nonzero: N >= 65536,
+                                        ; definitely not plain-byte
+            glo     rd
+            lbnz    lfh_try_k           ; RD.lo nonzero (hi was 0):
+                                        ; RD is 1-255, N >= 65536 still
+            ghi     r8
+            smi     4                   ; 1024 = 0x0400 -- R8.hi>=4
+                                        ; means R8>=1024 exactly at
+                                        ; this byte-aligned boundary,
+                                        ; no need to also check R8.lo
+            lbdf    lfh_try_k           ; R8 >= 1024: not plain-byte
+
+            ; plain-byte path: N < 1024, print R8 directly via
+            ; f_uintout (no RF reload needed -- nothing since entry
+            ; has touched RF's own value, only str/inc/branches)
+            mov     rd, r8
+            call    f_uintout
+            ldi     0
+            str     rf
+            rtn
+
+lfh_try_k:
+            ; reload N fresh into RD:R8
+            mov     rf, ls_human_n
+            lda     rf
+            phi     rd
+            lda     rf
+            plo     rd
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; RD:R8 = N
+
+            call    ls_pairshr10        ; RD:R8 = whole_K = N >> 10
+
+            ; is whole_K < 1000? Same full-register-zero discipline
+            ; as the plain-byte check above -- any nonzero RD (either
+            ; byte) means whole_K >= 65536 > 1000, skip straight to M.
+            ghi     rd
+            lbnz    lfh_try_m
+            glo     rd
+            lbnz    lfh_try_m
+
+            ; RD == 0: compare R8 (16-bit) against 1000 (0x03E8) via
+            ; the staged SM/SMB idiom already used throughout this
+            ; file (e.g. ls_sort_outer/ls_trycol_loop) -- stage the
+            ; SUBTRAHEND via str r2 first, load the MINUEND right
+            ; before sm/smb (D = D - M(R(X)), the corrected polarity
+            ; this project learned the hard way earlier this session)
+            ldi     3
+            phi     r9
+            ldi     $E8
+            plo     r9                  ; R9 = 1000
+            glo     r9
+            str     r2
+            glo     r8
+            sm
+            ghi     r9
+            str     r2
+            ghi     r8
+            smb
+            lbdf    lfh_try_m           ; DF=1: R8 >= 1000, use M
+                                        ; instead
+
+            ; whole_K < 1000: use K
+            mov     rb, ls_human_whole
+            ghi     r8
+            str     rb
+            inc     rb
+            glo     r8
+            str     rb                  ; ls_human_whole = whole_K
+                                        ; (fits entirely in R8 -- RD
+                                        ; confirmed 0 above)
+            mov     rb, ls_human_suffix
+            ldi     'K'
+            str     rb
+
+            ; remainder_K = N's low word & 0x03FF (exact -- stored as
+            ; a full 4-byte value, high word always 0, since K's own
+            ; scale, 1024, comfortably fits remainder in the low word
+            ; alone)
+            mov     rb, ls_human_remainder
+            ldi     0
+            str     rb
+            inc     rb
+            str     rb
+            inc     rb                  ; remainder.hi word = 0
+            mov     rf, ls_human_n
+            inc     rf
+            inc     rf                  ; RF -> N's low word, high byte
+            ldn     rf
+            ani     3
+            str     rb
+            inc     rb
+            inc     rf
+            ldn     rf
+            str     rb                  ; remainder.lo word = N's low
+                                        ; word & 0x3FF
+
+            mov     rb, ls_human_scale
+            ldi     0
+            str     rb
+            inc     rb
+            str     rb
+            inc     rb
+            ldi     4
+            str     rb
+            inc     rb
+            ldi     0
+            str     rb                  ; ls_human_scale = 1024
+
+            call    lfh_round_and_print
+            lbnf    lfh_done            ; DF=0: already printed
+            lbr     lfh_try_m           ; DF=1: rounded up to 1000K --
+                                        ; retry at the next unit
+
+lfh_try_m:
+            ; whole_M = N >> 20, computed as (N's high word alone) >> 4
+            ; -- exact for any 32-bit N, not an approximation: N's low
+            ; word (max 65535) can never accumulate a full unit at
+            ; this shift depth (verified algebraically during design,
+            ; and by the 150,000+-case simulation)
+            mov     rf, ls_human_n
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = N's high word
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd                  ; RD = whole_M
+
+            ldi     3
+            phi     r9
+            ldi     $E8
+            plo     r9                  ; R9 = 1000
+            glo     r9
+            str     r2
+            glo     rd
+            sm
+            ghi     r9
+            str     r2
+            ghi     rd
+            smb
+            lbdf    lfh_use_g           ; DF=1: whole_M >= 1000, force G
+
+            ; whole_M < 1000: use M
+            mov     rb, ls_human_whole
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+            mov     rb, ls_human_suffix
+            ldi     'M'
+            str     rb
+
+            ; remainder_M = ((N's high word's low nibble) : N's low
+            ; word), exact (no reduction). N's bits 19-16 (the 4 bits
+            ; remainder_M needs beyond its own low word) live in the
+            ; LOW NIBBLE of N's high word's LOW BYTE -- same masking
+            ; this project's own design history already had to fix
+            ; once for the earlier reduced-precision version (a first
+            ; draft masked the wrong byte/nibble entirely -- kept
+            ; correct here since it's independent of the rounding fix).
+            mov     rb, ls_human_remainder
+            ldi     0
+            str     rb
+            inc     rb                  ; remainder.hi word's own high
+                                        ; byte = 0 (only 4 bits ever
+                                        ; needed, comfortably within
+                                        ; the low byte)
+            mov     rf, ls_human_n
+            lda     rf                  ; D = N's high word, high byte
+                                        ; (discarded -- not part of the
+                                        ; 20-bit remainder)
+            ldn     rf                  ; D = N's high word, low byte
+            ani     $0F
+            str     rb
+            inc     rb                  ; remainder.hi word's low byte
+                                        ; = the masked nibble
+            inc     rf
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb                  ; remainder.lo word = N's low
+                                        ; word (unchanged, all 16 bits
+                                        ; are part of the 20-bit
+                                        ; remainder)
+
+            mov     rb, ls_human_scale
+            ldi     0
+            str     rb
+            inc     rb
+            ldi     $10
+            str     rb
+            inc     rb
+            ldi     0
+            str     rb
+            inc     rb
+            str     rb                  ; ls_human_scale = 0x00100000
+                                        ; = 1048576
+
+            call    lfh_round_and_print
+            lbnf    lfh_done            ; DF=0: already printed
+            lbr     lfh_use_g           ; DF=1: rounded up to 1000M --
+                                        ; retry (forced) at G
+
+lfh_use_g:
+            ; whole_G = N >> 30 = (N's high word alone) >> 14 -- exact
+            ; for the same reason whole_M's >>4-of-the-high-word-alone
+            ; shortcut is exact (verified algebraically + simulated).
+            ; Always < 10 for any real 32-bit N (max ~4294967295 >> 30
+            ; = 3), so this always takes the decimal-digit path below
+            ; in practice -- the ">= 10, no decimal" fallback exists
+            ; only for completeness/correctness, matching this
+            ; project's own standing practice of keeping a technically-
+            ; unreachable-but-still-correct code path rather than
+            ; assuming the precondition.
+            mov     rf, ls_human_n
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = N's high word
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd
+            shr16   rd                  ; RD = whole_G (>>14 total)
+
+            mov     rb, ls_human_whole
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+            mov     rb, ls_human_suffix
+            ldi     'G'
+            str     rb
+
+            ; remainder_G = N & 0x3FFFFFFF (mask off N's own top 2
+            ; bits), exact (no reduction). Since masking N's own byte0
+            ; to its low 6 bits already zeroes bits 31-30 IN PLACE, the
+            ; full 4-byte remainder is simply (N.byte0 & 0x3F, N.byte1,
+            ; N.byte2, N.byte3) -- NO extra leading zero byte, unlike
+            ; K's/M's own remainder (which genuinely need one, since
+            ; their remainders are much smaller than 32 bits and don't
+            ; fill the representation on their own). A first draft of
+            ; this got that distinction wrong, inserting a spurious
+            ; leading zero byte here too -- shifting every real byte
+            ; one position to the right and silently dropping N's own
+            ; LSB (byte3) entirely. Caught by hand-verifying the byte
+            ; mapping in Python against 20,000 random 32-bit values
+            ; before trusting this fix.
+            mov     rb, ls_human_remainder
+            mov     rf, ls_human_n
+            lda     rf
+            ani     $3F
+            str     rb
+            inc     rb                  ; remainder.byte0 = N.byte0 &
+                                        ; 0x3F
+            lda     rf
+            str     rb
+            inc     rb                  ; remainder.byte1 = N.byte1
+                                        ; (unmasked)
+            lda     rf
+            str     rb
+            inc     rb                  ; remainder.byte2 = N.byte2
+                                        ; (unmasked)
+            ldn     rf
+            str     rb                  ; remainder.byte3 = N.byte3
+                                        ; (unmasked)
+
+            mov     rb, ls_human_scale
+            ldi     $40
+            str     rb
+            inc     rb
+            ldi     0
+            str     rb
+            inc     rb
+            str     rb
+            inc     rb
+            str     rb                  ; ls_human_scale = 0x40000000
+                                        ; = 1073741824
+
+            call    lfh_round_and_print ; G is the last unit -- no
+                                        ; further unit to bump to
+                                        ; (DF=1 is mathematically
+                                        ; unreachable here, see
+                                        ; lfh_use_g's own header
+                                        ; comment; if it somehow
+                                        ; occurred, the buffer would be
+                                        ; left unprinted -- an accepted
+                                        ; theoretical gap, matching
+                                        ; this project's existing
+                                        ; "unreachable but not
+                                        ; specially guarded" precedent)
+lfh_done:
+            rtn
+
+;------------------------------------------------------------------
+; ls_add32/ls_sub32/ls_cmp32_ge/ls_dbl32: exact 32-bit register-pair
+; arithmetic primitives (RD=high word, R8=low word convention
+; throughout this file), used by the rounding computation below.
+; Deliberately real 32-bit arithmetic, not a reduced-precision
+; shortcut -- see ls_fmt_human's own header for why (a reduced
+; approach was tried first and shipped, then found wrong on hardware
+; against real values).
+;------------------------------------------------------------------
+
+; ls_add32: RD:R8 += R9:RA (R9=addend high word, RA=addend low word,
+; both left unchanged)
+; Modifies: RD, R8 (and D, DF)
+ls_add32:
+            add16   r8, ra              ; R8 += RA (16-bit reg-reg
+                                        ; add, DF = carry-out)
+            glo     r9
+            str     r2
+            glo     rd
+            adc
+            plo     rd
+            ghi     r9
+            str     r2
+            ghi     rd
+            adc
+            phi     rd
+            rtn
+
+; ls_sub32: RD:R8 -= R9:RA (R9=subtrahend high word, RA=subtrahend low
+; word, both left unchanged)
+; Modifies: RD, R8 (and D, DF)
+ls_sub32:
+            sub16   r8, ra              ; R8 -= RA (16-bit reg-reg
+                                        ; subtract -- the SUB16 macro
+                                        ; itself stages the subtrahend
+                                        ; RA first internally, matching
+                                        ; the corrected SM/SMB polarity
+                                        ; this project learned the hard
+                                        ; way; DF = borrow-out)
+            glo     r9
+            str     r2
+            glo     rd
+            smb
+            plo     rd
+            ghi     r9
+            str     r2
+            ghi     rd
+            smb
+            phi     rd
+            rtn
+
+; ls_cmp32_ge: is RD:R8 >= R9:RA ? Non-destructive -- RD/R8/R9/RA all
+; left unchanged. A first draft of this only compared 2 of the 4
+; relevant bytes (never referencing R9 at all), caught by this
+; design's own mechanical simulation before ever reaching real
+; assembly -- fixed to the full 4-byte chain below.
+; Returns: DF = 1 if RD:R8 >= R9:RA, else DF = 0
+; Modifies: nothing persistent (D clobbered, as always)
+ls_cmp32_ge:
+            glo     ra
+            str     r2
+            glo     r8
+            sm                          ; low word, low byte
+            ghi     ra
+            str     r2
+            ghi     r8
+            smb                         ; low word, high byte
+            glo     r9
+            str     r2
+            glo     rd
+            smb                         ; high word, low byte
+            ghi     r9
+            str     r2
+            ghi     rd
+            smb                         ; high word, high byte --
+                                        ; final DF is the real result
+            rtn
+
+; ls_dbl32: RD:R8 *= 2 (32-bit pair left-shift-by-1 -- SHL16 r8 shifts
+; the low word, leaving the bit that fell off in DF; SHLC16 rd then
+; shifts the high word USING that DF as its own carry-in, together one
+; true 32-bit left-shift-by-one of the pair)
+; Modifies: RD, R8 (and D, DF)
+ls_dbl32:
+            shl16   r8
+            shlc16  rd
+            rtn
+
+;------------------------------------------------------------------
+; ls_human_decdigit: compute ROUND(10*remainder/scale) EXACTLY, via 10
+; repeated add+compare+subtract iterations (each exact -- no precision
+; loss, unlike the reduced-precision approach this replaced), followed
+; by a final round-to-nearest check against the loop's own leftover.
+; Args:    none (reads ls_human_remainder/ls_human_scale)
+; Returns: D = the rounded decimal digit, 0-10 (10 means "rounded up
+;          to a full unit -- caller must apply the carry")
+; Modifies: everything (R7-RD)
+;------------------------------------------------------------------
+ls_human_decdigit:
+            ldi     0
+            phi     rd
+            plo     rd
+            ldi     0
+            phi     r8
+            plo     r8                  ; RD:R8 = acc = 0
+
+            mov     rb, lhd_dec
+            ldi     0
+            str     rb                  ; dec = 0
+
+            ldi     10
+            plo     r7                  ; R7.0 = iterations remaining
+
+lhd_loop:
+            glo     r7
+            lbz     lhd_round
+
+            mov     rf, ls_human_remainder
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; R9:RA = remainder (reloaded
+                                        ; fresh, every iteration --
+                                        ; never trusted to survive a
+                                        ; call)
+
+            call    ls_add32            ; RD:R8 += remainder
+
+            mov     rf, ls_human_scale
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; R9:RA = scale (reloaded
+                                        ; fresh)
+
+            call    ls_cmp32_ge         ; DF=1 if acc >= scale
+            lbnf    lhd_next
+
+            mov     rf, ls_human_scale
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; R9:RA = scale (reloaded
+                                        ; again -- ls_cmp32_ge doesn't
+                                        ; modify it, but this project's
+                                        ; own standing discipline is to
+                                        ; reload rather than trust a
+                                        ; register across any call)
+
+            call    ls_sub32            ; acc -= scale
+
+            mov     rb, lhd_dec
+            ldn     rb
+            adi     1
+            str     rb                  ; dec += 1
+
+lhd_next:
+            glo     r7
+            smi     1
+            plo     r7
+            lbr     lhd_loop
+
+lhd_round:
+            ; RD:R8 = acc (leftover after 10 iterations). Round: is
+            ; 2*acc >= scale?
+            call    ls_dbl32            ; RD:R8 = acc*2
+
+            mov     rf, ls_human_scale
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra
+
+            call    ls_cmp32_ge         ; DF=1 if 2*acc >= scale
+            lbnf    lhd_done
+
+            mov     rb, lhd_dec
+            ldn     rb
+            adi     1
+            str     rb                  ; round up: dec += 1
+
+lhd_done:
+            mov     rf, lhd_dec
+            ldn     rf                  ; D = dec (0-10)
+            rtn
+
+;------------------------------------------------------------------
+; ls_human_whole_round_check: is 2*remainder >= scale ? (the rounding
+; decision for a 10-999 whole part, which needs no decimal digit --
+; just a yes/no "round up by 1"). Reads ls_human_remainder/
+; ls_human_scale.
+; Returns: DF = 1 if round-up needed
+; Modifies: everything (R7-RD)
+;------------------------------------------------------------------
+ls_human_whole_round_check:
+            mov     rf, ls_human_remainder
+            lda     rf
+            phi     rd
+            lda     rf
+            plo     rd
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; RD:R8 = remainder
+
+            call    ls_dbl32            ; RD:R8 = remainder*2
+
+            mov     rf, ls_human_scale
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; R9:RA = scale
+
+            call    ls_cmp32_ge         ; DF=1 if 2*remainder>=scale
+            rtn
+
+;------------------------------------------------------------------
+; lfh_round_and_print: given ls_human_whole/remainder/scale/suffix all
+; set for the CURRENT candidate unit (whole already confirmed <1000
+; via floor, by the caller), decide decimal-vs-plain display, round
+; EXACTLY, print, OR signal "this unit doesn't work after rounding,
+; try the next one" if a 10-999 whole rounds up to exactly 1000.
+; Args:    none (reads ls_human_whole/remainder/scale/suffix)
+; Returns: DF=0 -- already printed; caller should just return too.
+;          DF=1 -- whole rounded up to 1000; caller should jump to
+;          the next unit's own try-label and recompute everything
+;          fresh there (ls_human_whole/remainder/scale are stale for
+;          any further use).
+; Modifies: everything
+;------------------------------------------------------------------
+lfh_round_and_print:
+            mov     rf, ls_human_whole
+            ldn     rf
+            lbnz    lfh_rp_plain        ; whole.hi nonzero: definitely
+                                        ; >= 256, no decimal
+            inc     rf
+            ldn     rf
+            smi     10
+            lbdf    lfh_rp_plain        ; whole.lo >= 10: no decimal
+
+            ; --- decimal case: whole is 0-9 ---
+            call    ls_human_decdigit   ; D = dec (0-10)
+            plo     r8                  ; R8.0 = dec (stashed; R8 is
+                                        ; free here)
+
+            glo     r8
+            smi     10
+            lbnz    lfh_rp_dec_no_carry ; dec != 10: no carry
+
+            ; dec == 10: carry into whole (whole was 0-9, so +1 gives
+            ; 1-10 -- never wraps the byte)
+            mov     rf, ls_human_whole
+            inc     rf
+            ldn     rf
+            adi     1
+            str     rf
+            ldi     0
+            plo     r8                  ; dec = 0
+
+lfh_rp_dec_no_carry:
+            ; re-check whole < 10 AFTER any carry -- NOT just "dec==10
+            ; implies no decimal" (a real bug caught during design
+            ; verification: e.g. whole=1,dec=10 carries to whole=2,
+            ; dec=0, which must STILL print "2.0<suffix>", not
+            ; "2<suffix>" -- only an ORIGINAL whole of exactly 9
+            ; crosses all the way to a bare "10<suffix>")
+            mov     rf, ls_human_whole
+            inc     rf
+            ldn     rf
+            smi     10
+            lbdf    lfh_rp_plain_go     ; whole is now >= 10 (only
+                                        ; reachable via the 9->10
+                                        ; carry): print plain, no
+                                        ; decimal -- shares the same
+                                        ; tail the 10-999 case uses
+
+            ; print "whole.dec<suffix>"
+            mov     rf, ls_human_whole
+            inc     rf
+            ldn     rf
+            plo     rd
+            ldi     0
+            phi     rd                  ; RD = whole (0-9)
+
+            mov     rf, ls_human_dest
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = dest buffer address
+            mov     rf, rb              ; RF = write cursor
+
+            glo     rd
+            adi     '0'
+            str     rf
+            inc     rf                  ; buffer[0] = whole digit
+
+            ldi     '.'
+            str     rf
+            inc     rf                  ; buffer[1] = '.'
+
+            glo     r8                  ; D = dec (0-9 -- the ==10
+                                        ; carry case was already
+                                        ; handled and routed away
+                                        ; above)
+            adi     '0'
+            str     rf
+            inc     rf                  ; buffer[2] = decimal digit
+
+            mov     rb, ls_human_suffix
+            ldn     rb
+            str     rf
+            inc     rf                  ; buffer[3] = suffix
+
+            ldi     0
+            str     rf                  ; buffer[4] = null
+            clc                         ; DF=0: printed
+            rtn
+
+lfh_rp_plain:
+            ; --- plain case: whole is 10-999 (floored) -- round to
+            ; nearest whole number, possibly bumping to the next unit
+            call    ls_human_whole_round_check
+            lbnf    lfh_rp_plain_go
+
+            ; round up: whole += 1 (proper 16-bit increment, handles
+            ; any lo-to-hi carry for free -- e.g. 255 -> 256)
+            mov     rf, ls_human_whole
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = whole
+            add16   rd, 1               ; immediate-form add16,
+                                        ; gotcha #18-safe
+            mov     rf, ls_human_whole
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; ls_human_whole = rounded
+
+lfh_rp_plain_go:
+            ; is whole now exactly 1000? if so, signal a bump instead
+            ; of printing. Reached both from the 10-999 path above
+            ; (the real check) and from the decimal-carry path (whole
+            ; is provably at most 10 there, so this always falls
+            ; through to printing in that case -- no special-casing
+            ; needed between the two callers)
+            mov     rf, ls_human_whole
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = whole (final)
+
+            ldi     3
+            phi     r9
+            ldi     $E8
+            plo     r9                  ; R9 = 1000
+            glo     r9
+            str     r2
+            glo     rd
+            sm
+            ghi     r9
+            str     r2
+            ghi     rd
+            smb
+            lbnz    lfh_rp_print_plain  ; whole != 1000: print
+                                        ; normally
+
+            stc                         ; DF=1: signal bump
+            rtn
+
+lfh_rp_print_plain:
+            ; print "whole<suffix>" (no decimal) via f_uintout
+            mov     rf, ls_human_dest
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            mov     rf, r9              ; RF = dest buffer
+            call    f_uintout           ; writes decimal digits,
+                                        ; advances RF, no null term
+            mov     rb, ls_human_suffix
+            ldn     rb
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf
+            clc                         ; DF=0: printed
+            rtn
+
 ; ---- scratch / state ----
 ls_longmode:    db      0
 ls_fmode:       db      0           ; -F: append "/" to directory entries
@@ -2368,10 +3240,39 @@ ls_colmax:      db      0           ; running max namelen for the
 ls_colrow:      dw      0           ; row index within that column scan
 
 ls_curentry:    dw      0
-ls_sizebuf:     ds      6           ; decimal size scratch ("65535"+null)
+ls_sizebuf:     ds      6           ; human-readable size scratch
+                                    ; (2026-07-26: was plain-decimal
+                                    ; "65535"+null; max content is now
+                                    ; "999K"/"9.9K"/"1023" -- 4 chars +
+                                    ; null -- still fits within 6)
 ls_spaces5:     db      "     ",0   ; 5 spaces -- right-justify padding
                                     ; source for the -l size column
 ls_digitbuf:    ds      3
+
+; ---- ls_fmt_human's own scratch (2026-07-26) ----
+ls_human_dest:  dw      0           ; caller's destination buffer,
+                                    ; stashed at entry
+ls_human_n:     dw      0, 0        ; the 32-bit byte count being
+                                    ; formatted (hi word, lo word --
+                                    ; reloaded fresh from here at each
+                                    ; unit-selection attempt, never
+                                    ; trusted to survive in a register
+                                    ; across ls_pairshr10/the K-vs-M-
+                                    ; vs-G branching)
+ls_human_whole: dw      0           ; the chosen unit's whole part
+                                    ; (<1000, or <10 for G)
+ls_human_suffix: db     0           ; 'K'/'M'/'G'
+ls_human_remainder: dw  0, 0        ; the chosen unit's EXACT remainder
+                                    ; (2026-07-26: replaces the old
+                                    ; reduced-precision version -- see
+                                    ; ls_fmt_human's own header for why)
+ls_human_scale: dw      0, 0        ; the chosen unit's scale (1024 /
+                                    ; 1048576 / 1073741824)
+lhd_dec:        db      0           ; ls_human_decdigit's own dec
+                                    ; counter (0-10), kept in memory --
+                                    ; needs to survive across
+                                    ; ls_add32/ls_cmp32_ge/ls_sub32
+                                    ; calls inside its own loop
 
 ls_wr_day:      db      0
 ls_wr_month:    db      0

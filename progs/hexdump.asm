@@ -11,9 +11,12 @@
 ; positions are blank-padded so the '|' column still lines up, but the
 ; ASCII field itself is never padded.
 ;
-; File offsets on this system top out at 16 bits (see kernel/file.asm's
-; own FCB_FPOS/FCB_FSIZE comment), so the offset's high 4 hex digits
-; are always "0000" -- printed anyway, to match hexdump -C's layout.
+; File offsets printed here top out at 16 bits -- this program's own
+; offset tracking, not a kernel limitation anymore (kernel/file.asm's
+; FCB_FPOS/FCB_FSIZE support the full 32 bits as of 2026-07-26), so
+; the offset's high 4 hex digits are always "0000"; printed anyway, to
+; match hexdump -C's layout. Widening this program to track a real
+; 32-bit offset is a separate, not-yet-done follow-on.
 ;
 ; The hex conversion (hex_nibble/hex_byte below) is hand-rolled rather
 ; than using the BIOS's own f_hexout2 -- that routine has never been

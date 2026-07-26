@@ -148,23 +148,26 @@ FCB_IOBUF_LEN:  equ     512
 ;               caller already has the FCB pointer they passed in).
 ; K_FILE_CLOSE: Args: RD = FCB pointer (the same one passed to
 ;               K_FILE_OPEN). Returns: DF = 0/1.
-; K_FILE_SEEK (2026-07-20, register ABI changed 2026-07-21): Args:
-;               RD = FCB pointer, RC.0 = whence (0 = SEEK_SET, absolute
-;               from start; 1 = SEEK_CUR, relative to current position;
+; K_FILE_SEEK (2026-07-20, register ABI changed 2026-07-21, full
+;               32-bit range enabled 2026-07-26): Args: RD = FCB
+;               pointer, RC.0 = whence (0 = SEEK_SET, absolute from
+;               start; 1 = SEEK_CUR, relative to current position;
 ;               2 = SEEK_END, relative to end of file), RA:R9 = 32-bit
-;               signed offset (RA = high word, R9 = low word -- R9, not
-;               RD, since RD now carries the FCB pointer). Only offsets
-;               that are a valid sign-extension of a 16-bit value are
-;               supported (RA == $0000 with R9's bit 15 clear, or RA ==
-;               $FFFF with R9's bit 15 set) -- anything wider is an
-;               error, and file positions/sizes beyond 16 bits aren't
-;               yet supported either way. The 32-bit register ABI is
-;               reserved now so a future expansion to real 32-bit
-;               seeking needs no calling-convention change. Returns:
-;               DF = 0 on success (RD = the resulting absolute
-;               position, low word), DF = 1 on error (bad whence,
-;               offset out of the supported range, or the resulting
-;               position would fall outside [0, filesize]); on any
+;               signed offset (RA = high word, R9 = low word -- R9,
+;               not RD, since RD now carries the FCB pointer). The
+;               full signed 32-bit range is accepted; file positions
+;               and sizes are likewise supported up to the full 32
+;               bits FCB_FSIZE/FCB_FPOS hold (the underlying cluster-
+;               hop computation is only exercised up to a documented
+;               ~32MB in practice -- see kernel/file.asm's own
+;               fopen_check_append/fsk_general comments -- but is
+;               correct for any position that fits in 32 bits).
+;               Returns: DF = 0 on success (RD = the resulting
+;               absolute position, low word only -- a caller needing
+;               the high word has no way to retrieve it from this call
+;               today), DF = 1 on error (bad whence, offset would
+;               place the position outside [0, filesize], or an I/O
+;               error occurred walking the cluster chain); on any
 ;               error the file position is left unchanged.
 ; K_FILE_READ/K_FILE_WRITE: Args: RD = FCB pointer, RF = data buffer,
 ;               RC = byte count. Returns: RC = bytes actually
@@ -510,6 +513,26 @@ SHELL_DATA_OFF: equ     DRIVE_COUNT + DRIVE_COUNT*BPBBLK_LEN
 K_BATCH_START:      equ     $0170       ; -> batch_start
 K_BATCH_READLINE:   equ     $0173       ; -> batch_readline
 
+; K_BATCH_GOTO: reposition the active batch script to just after a
+; labeled line ("2026-07-25, IF/GOTO batch scripting). Always rewinds
+; to the start of the file and scans forward -- simpler than tracking
+; direction, and batch scripts are small enough that a full rescan is
+; cheap. GOTO to an undefined label ends the batch, matching real
+; MS-DOS -- this falls out for free, since the failed scan already
+; reaches real EOF, which K_BATCH_READLINE's own EOF path already
+; closes as an existing side effect (see its own doc above).
+; Args:    RF = pointer to a null-terminated label name, no leading
+;          ':' (e.g. "end" for a line reading ":end") -- a copy is
+;          taken immediately, so the caller's own buffer (typically
+;          argv[1], living in LINE_BUF) is safe to reuse/overwrite
+;          right after this call returns
+; Returns: DF = 0 on success (the label was found; the next
+;          K_BATCH_READLINE call returns the line right after it),
+;          DF = 1 if no batch is active or the label wasn't found (in
+;          the latter case the batch is already closed, same as
+;          K_BATCH_READLINE's own EOF behavior)
+K_BATCH_GOTO:       equ     $017F       ; -> batch_goto
+
 ; K_GLOB_RESERVE: reserve GLOB_BUF_LEN bytes of himem for the shell's
 ; own glob-expansion buffer (2026-07-21) -- see kernel/glob.asm's own
 ; module header for the full design (why this needs to be a dynamic
@@ -546,6 +569,58 @@ K_FILE_SETATTR:     equ     $0179       ; -> file_setattr
 ; progs/shell.asm's own glob-expansion pass budgets its writes against
 ; this so it never overruns the reserved region.
 GLOB_BUF_LEN:       equ     768
+
+; K_BATCH_ARGS_RESERVE/K_BATCH_ARGS_GETARG: %0-%9 batch-argument
+; substitution (2026-07-25) -- see kernel/batch.asm's own module
+; comments and progs/shell.asm's $/% expansion pass for the full
+; design. Mirrors K_GLOB_RESERVE's own shape closely: reserve dynamic
+; himem via the same _himem_reserve/_himem_release mechanism
+; (kernel/redir.asm), hand back a base address, let the CALLER
+; (progs/shell.asm, which already has the data) populate it directly --
+; rather than passing argv data as call arguments for the kernel to
+; pack.
+;
+; K_BATCH_ARGS_RESERVE: called once by progs/shell.asm's own is_batch:
+; path, right after K_BATCH_START succeeds. NOT idempotent like
+; K_GLOB_RESERVE -- starting a new batch while one is already active is
+; already rejected (nested batch) before this could ever be called
+; twice without a release in between, so no idempotency check is
+; needed.
+; Args:    none
+; Returns: DF = 0 on success, RD = this reservation's base address
+;          (BATCH_ARGS_RESERVE_LEN bytes usable from RD onward -- see
+;          the BATCH_ARGS_*_OFF constants below for its internal
+;          layout). DF = 1 if there isn't enough RAM headroom -- the
+;          caller should let the batch proceed anyway, just without
+;          %N support for that run (graceful degradation, not an
+;          aborted batch).
+K_BATCH_ARGS_RESERVE: equ   $0182       ; -> kernel_batch_args_reserve
+;
+; K_BATCH_ARGS_GETARG: look up one positional argument by index.
+; Bounds-checks against the reservation's own stored count before ever
+; touching the pointer table, so it can never return a pointer into an
+; unpopulated slot.
+; Args:    D = index (0-9)
+; Returns: DF = 0 in every case where a batch-args reservation is
+;          currently active: RF = pointer to a null-terminated string
+;          -- either the real argument (index < the count actually
+;          passed) or a fixed, always-valid empty string (index >= the
+;          count, but the reservation IS active -- matches real DOS,
+;          where %N beyond what was passed expands to nothing, not
+;          literal text). DF = 1 only when NO reservation is active at
+;          all (no batch running, or its reservation failed) -- the
+;          caller should leave %<digit> as literal text in that case.
+K_BATCH_ARGS_GETARG: equ    $0185       ; -> kernel_batch_args_getarg
+
+; BATCH_ARGS_*: layout of K_BATCH_ARGS_RESERVE's own reservation,
+; restated from kernel.inc for progs/shell.asm's own use -- it
+; populates the block directly (see is_batch:'s own code), addressing
+; into it via these same offsets. This copy is for kernel/batch.asm
+; itself, which #includes kernel.inc, not this file.
+BATCH_ARGS_TEXT_OFF: equ    0
+BATCH_ARGS_ARGV_OFF: equ    128
+BATCH_ARGS_ARGC_OFF: equ    148
+BATCH_ARGS_RESERVE_LEN: equ 149
 
 ; Raw FAT16 VBR/BPB and MBR partition-table field offsets, restated
 ; from kernel.inc for the same reason as BPBBLK_*/BPB_DATA_PTR above --

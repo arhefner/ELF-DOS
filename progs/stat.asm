@@ -23,6 +23,11 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
+            extrn   fmt_size32          ; lib/fmt32.asm -- 32-bit
+                                        ; comma-grouped decimal
+                                        ; formatting, shared with
+                                        ; progs/dir.asm
+
             org     PROG_BASE
 
             db      'E','D','F'         ; ELF-DOS program magic
@@ -68,23 +73,28 @@ start:
             call    K_INMSG
             db      "Type:    File",13,10,0
 
-            ; ---- Size: (files only) ----
+            ; ---- Size: (files only) -- full 32-bit, comma-grouped
+            ; (2026-07-26, >64K support, matching progs/dir.asm's own
+            ; widened size column, both now sharing lib/fmt32.asm's
+            ; fmt_size32 rather than each duplicating the conversion)
             call    K_INMSG
             db      "Size:    ",0
             mov     rf, stat_result
             add16   rf, DIRENT_SIZE
-            add16   rf, 2               ; skip to the low word (bytes 2,3)
-            lda     rf                  ; D = size byte 2 (low word MSB)
-            phi     rd
-            ldn     rf                  ; D = size byte 3 (low word LSB)
-            plo     rd                  ; RD = size (0-65535)
-            mov     rf, num_buf
-            call    f_uintout           ; writes decimal ASCII into *rf,
-                                        ; advances rf, does NOT
-                                        ; null-terminate itself
-            ldi     0
-            str     rf                  ; null-terminate
-            mov     rf, num_buf
+            lda     rf
+            phi     rd                  ; RD.hi = size byte 0 (MSB)
+            lda     rf
+            plo     rd                  ; RD.lo = size byte 1
+            lda     rf
+            phi     r8                  ; R8.hi = size byte 2
+            ldn     rf
+            plo     r8                  ; R8.lo = size byte 3 (LSB)
+                                        ; => RD:R8 = 32-bit size
+            mov     rf, size_buf14
+            call    fmt_size32          ; builds the comma-grouped
+                                        ; digit string into size_buf14
+                                        ; and null-terminates it
+            mov     rf, size_buf14
             call    K_MSG
             call    K_INMSG
             db      " bytes",13,10,0
@@ -290,6 +300,11 @@ p2d_print:
 
 stat_result: ds     DIRENT_LEN          ; 139-byte result buffer for K_STAT
 num_buf:     ds      6                  ; decimal scratch (max "65535"+null)
+                                        ; -- still used for Cluster: and
+                                        ; the write-year digits, both
+                                        ; genuinely 16-bit values
+size_buf14:  ds      14                 ; comma-grouped size scratch
+                                        ; (max "4,294,967,295"+null)
 digit_buf:   ds      3                  ; scratch for print2digit ("99"+null)
 
 wr_day:      db      0

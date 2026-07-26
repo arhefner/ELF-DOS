@@ -189,6 +189,23 @@ RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
 ; not kernel_api.inc.
 GLOB_BUF_LEN:       equ     768
 
+; BATCH_ARGS_*: layout of the dynamic himem reservation K_BATCH_ARGS_RESERVE
+; makes for %0-%9 batch-argument substitution (kernel/batch.asm) -- same
+; "not a fixed PROG_BASE-relative address" reasoning as GLOB_BUF_LEN
+; above (the reservation's real address is mem_top+1 at the moment it's
+; made). Restated in kernel_api.inc for progs/shell.asm's own use (it
+; populates the block directly, addressing into it via these same
+; offsets); this copy is for kernel/batch.asm itself. A single
+; contiguous block: a 128-byte packed-text region (matching LINE_BUF's
+; own cap, since all args for one invocation line can't exceed it
+; anyway), a 10-entry pointer table (%0-%9), and a 1-byte count.
+BATCH_ARGS_TEXT_OFF: equ    0     ; 128-byte packed argv text
+BATCH_ARGS_ARGV_OFF: equ    128   ; 10 * 2-byte pointers into the text
+                                  ; region above
+BATCH_ARGS_ARGC_OFF: equ    148   ; 1 byte: how many of the 10 slots
+                                  ; are actually populated (0-10)
+BATCH_ARGS_RESERVE_LEN: equ 149   ; total reservation size
+
 ; STACK_RESERVE_LEN: permanent margin at the very top of RAM, reserved
 ; for the hardware stack (R2), subtracted from mem_top ONCE at boot
 ; (kernel_init, kernel/kernel.asm) and never touched again. The stack

@@ -53,6 +53,9 @@
             extrn   file_setattr
             extrn   batch_start
             extrn   batch_readline
+            extrn   batch_goto
+            extrn   kernel_batch_args_reserve
+            extrn   kernel_batch_args_getarg
             extrn   dir_open
             extrn   dir_read
             extrn   path_resolve
@@ -255,7 +258,19 @@ k_file_setattr: lbr     file_setattr        ; $0179
 ; (progs/errorlevel.asm), rather than baking the fixed relay address
 ; directly into its own compiled binary.
 k_get_errorlevel: lbr   kernel_get_errorlevel ; $017C
-                ; next free jump-table address: $017F
+
+; K_BATCH_GOTO: reposition the active batch script to just after a
+; labeled line (2026-07-25, IF/GOTO batch scripting) -- see
+; kernel_api.inc's own doc comment and kernel/batch.asm's batch_goto
+; for the full design.
+k_batch_goto:   lbr     batch_goto          ; $017F
+
+; K_BATCH_ARGS_RESERVE/K_BATCH_ARGS_GETARG: %0-%9 batch-argument
+; substitution (2026-07-25) -- see kernel_api.inc's own doc comments
+; and kernel/batch.asm's own module header for the full design.
+k_batch_args_reserve: lbr kernel_batch_args_reserve  ; $0182
+k_batch_args_getarg:  lbr kernel_batch_args_getarg   ; $0185
+                ; next free jump-table address: $0188
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

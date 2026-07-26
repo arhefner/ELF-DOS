@@ -38,6 +38,12 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
+; lib/env.asm's env_getenv, for $FOO/${FOO} expansion (shell_expand_line,
+; below) -- linked in via a new multi-file Makefile rule for bin/shell,
+; matching the existing bin/ls/bin/more/bin/edlin pattern for the same
+; library.
+            extrn   env_getenv
+
             org     PROG_BASE
 
             db      'E','D','F'         ; ELF-DOS program magic
@@ -102,6 +108,19 @@ start_check_echo_off:
             lbnz    start_have_line     ; persistent echo-off mode:
                                         ; skip the echo
 
+            ; expand %ERRORLEVEL%/%0-%9/$FOO/${FOO} BEFORE the echo
+            ; below, so batch echo shows the SAME text the command
+            ; actually runs with (matches real DOS -- confirmed via
+            ; AskUserQuestion rather than assumed). Every OTHER path
+            ; that reaches start_have_line (interactive, '@'-prefixed
+            ; batch, echo-off batch) gets expansion from the
+            ; unconditional call at start_have_line's own top instead
+            ; -- this is the one path where the echo would otherwise
+            ; run before that call ever gets a chance.
+            call    shell_expand_line
+            lbdf    start              ; overflow: message already
+                                        ; printed, abandon this line
+
             call    print_prompt
 
             mov     rf, LINE_BUF
@@ -127,12 +146,37 @@ start_interactive:
                                         ; blank line
 
 start_have_line:
+            ; expand %ERRORLEVEL%/%0-%9/$FOO/${FOO}. Unconditional --
+            ; covers interactive lines, '@'-prefixed batch lines (which
+            ; skip the echo and jump straight here), and echo-off batch
+            ; lines. The one remaining path (an ordinary batch line
+            ; WITH echo firing) already called this once, above, before
+            ; its own echo -- shell_expand_line's own Step 1 trigger
+            ; scan makes a second call here a cheap no-op in that case
+            ; (nothing left to expand), not a correctness problem.
+            call    shell_expand_line
+            lbdf    start              ; overflow: message already
+                                        ; printed, abandon this line
+
             ; skip leading whitespace
             mov     rf, LINE_BUF
             call    f_ltrim             ; RF = first non-space char
 
             ; empty line? just re-prompt -- no kernel round-trip needed
             ldn     rf
+            lbz     start
+
+            ; --- label line (":name"), matching real DOS's own batch
+            ; label syntax. Only ever meaningful as a GOTO target
+            ; (see K_BATCH_GOTO/check_special below) -- reached via
+            ; ordinary top-to-bottom flow, a label is silently skipped
+            ; entirely, never echoed, never treated as a command,
+            ; exactly like REM or a blank line. Checked before REM
+            ; (order between the two doesn't matter, they're mutually
+            ; exclusive first-character checks) and before the pipe
+            ; scanner/tokenizer for the same reason REM is.
+            ldn     rf
+            xri     ':'
             lbz     start
 
             ; --- REM: a line comment, matching real DOS's REM. Checked
@@ -260,6 +304,708 @@ bad_drive:
             call    K_INMSG
             db      "Invalid drive.",13,10,0
             lbr     start
+
+;------------------------------------------------------------------
+; shell_is_ident_start / shell_is_ident_continue: environment-variable
+; name character classification for $FOO/${FOO} (shell_expand_line,
+; below). Split into two small, narrow-clobber ("D only") subroutines
+; rather than one combined check, since the name's first character and
+; its later characters use different rules (a name can't START with a
+; digit, matching bash -- deliberately avoids any ambiguity with %1's
+; different sigil). "ani $DF" folds a lowercase letter to uppercase
+; for the range check; confirmed safe here the same way the drive-
+; letter check and the (now-retired) inline %ERRORLEVEL% match already
+; established: a digit folds to a value that still falls outside
+; 'A'-'Z' (0x30-0x39 -> 0x10-0x19), and '_' (0x5F) already has bit 5
+; clear, so folding leaves it unchanged and still outside 'A'-'Z' --
+; neither is ever misclassified as a letter by this fold.
+;------------------------------------------------------------------
+; Args:    R7 = pointer to the character to check (not advanced)
+; Returns: DF = 0 if it's A-Z/a-z/'_', DF = 1 otherwise
+; Modifies: D only
+;------------------------------------------------------------------
+shell_is_ident_start:
+            ldn     r7
+            ani     $DF
+            smi     'A'
+            lbnf    sis_check_us
+            smi     26
+            lbdf    sis_check_us
+            clc
+            rtn
+sis_check_us:
+            ldn     r7
+            xri     '_'
+            lbnz    sis_no
+            clc
+            rtn
+sis_no:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; Args:    R7 = pointer to the character to check (not advanced)
+; Returns: DF = 0 if it's A-Z/a-z/0-9/'_', DF = 1 otherwise
+; Modifies: D only
+;------------------------------------------------------------------
+shell_is_ident_continue:
+            ldn     r7
+            ani     $DF
+            smi     'A'
+            lbnf    sic_check_digit
+            smi     26
+            lbdf    sic_check_digit
+            clc
+            rtn
+sic_check_digit:
+            ldn     r7
+            smi     '0'
+            lbnf    sic_check_us
+            smi     10
+            lbdf    sic_check_us
+            clc
+            rtn
+sic_check_us:
+            ldn     r7
+            xri     '_'
+            lbnz    sic_no
+            clc
+            rtn
+sic_no:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; shell_expand_line: %ERRORLEVEL%/%0-%9/$FOO/${FOO} substitution.
+; Runs BEFORE the ordinary tokenizer (not_drive_cmd, below), producing
+; a fully-expanded line back in LINE_BUF for it to process exactly as
+; today -- quote-stripping/escape-collapsing are NOT done here, this
+; pass only replaces %/$ tokens verbatim, leaving quote characters and
+; backslash-escapes untouched for the real tokenizer to handle
+; afterward.
+;
+; Step 1 (trigger scan): determine the line's total length (via
+; shell_strlen) and whether ANY eligible (unescaped, not inside
+; '...') % or $ exists anywhere in it, tracking quote/escape state
+; with the same 3-state (none/squote/dquote) shape the real tokenizer
+; already uses in its own R8.0, just for gating here rather than
+; stripping. If nothing eligible is found: returns immediately, DF=0,
+; LINE_BUF untouched -- the common case pays only this one cheap scan.
+;
+; Step 2 (relocate, only if Step 1 found something): move the line's
+; current content to the end of LINE_BUF's own 128 bytes, RESERVING
+; THE VERY LAST BYTE (offset 127) as an explicit NUL sentinel --
+; content occupies [127-length .. 126], one byte less budget than the
+; naive "128 total" in exchange for every scan in Step 3 being able to
+; rely on hitting a real NUL when it runs out of real content, exactly
+; like the ordinary tokenizer's own established idiom, instead of
+; needing a separate bounds-tracked countdown. Copies from the highest
+; address down to the lowest -- REQUIRED for correctness once the line
+; is over half of 127 bytes (source/destination ranges overlap, and a
+; forward copy would corrupt not-yet-copied source bytes); independently
+; Python-verified byte-for-byte across every length 0..126 before
+; trusting this, including confirming a forward copy really does
+; self-corrupt for the overlapping case.
+;
+; Step 3 (expand): read cursor (RF) starts at the relocated content,
+; write cursor (RD) at LINE_BUF+0. Copies bytes through; on an
+; eligible %/$, dispatches to %ERRORLEVEL% (direct RUN_ERRORLEVEL
+; read, no call)/%<digit> (K_BATCH_ARGS_GETARG)/${FOO} or $FOO
+; (env_getenv), copying the replacement instead of the original token.
+; Checked after EVERY byte written, not just per token (a long
+; replacement value could otherwise walk RD past RF's CURRENT
+; position -- and past LINE_BUF's own physical end -- mid-copy, before
+; a boundary-only check ever ran): if RD ever reaches or passes RF,
+; the expanded line doesn't fit -- prints an error and returns DF=1,
+; aborting the line entirely. Independently Python-simulated (as
+; literal translated instructions, not reimplemented intent) across
+; many cases including the exact byte-level boundary and multi-
+; substitution accumulation before trusting this.
+;
+; No recursive re-expansion: a copied replacement's own bytes are
+; never re-scanned for further %/$ -- the outer scan resumes right
+; after the substitution token consumed from RF. Matches bash/DOS's
+; own non-recursive default.
+;
+; Args:    none (operates on LINE_BUF as a whole)
+; Returns: DF = 0 (LINE_BUF now holds the fully-expanded, still NUL-
+;          terminated line -- possibly byte-identical to its input, if
+;          nothing needed expanding), DF = 1 (overflow -- message
+;          already printed, caller should abort the line)
+; Modifies: everything (R7, R8, R9, RA, RB, RC, RD, RF, and D) --
+;          deliberately NOT documented as safe to carry across a call
+;          the way not_drive_cmd's own tokenizer is, since this makes
+;          real calls (K_BATCH_ARGS_GETARG, env_getenv, f_uintout)
+;          with broad or unconfirmed clobber footprints. Callers must
+;          not assume anything survives across this call.
+;------------------------------------------------------------------
+shell_expand_line:
+            mov     rf, LINE_BUF
+            call    shell_strlen        ; RC = length, RF unchanged
+            mov     rd, shell_expand_len
+            ghi     rc
+            str     rd
+            inc     rd
+            glo     rc
+            str     rd                  ; shell_expand_len = length
+
+            ; --- Step 1: trigger scan ---
+            mov     rf, LINE_BUF
+            ldi     0
+            plo     r8                  ; R8.0 = quote state (0=none,
+                                        ; 1=squote, 2=dquote)
+            phi     r8                  ; R8.1 = pending-escape flag
+sel_scan_loop:
+            ldn     rf
+            lbz     sel_scan_notfound   ; end of line: no trigger found
+
+            ghi     r8
+            lbz     sel_scan_check      ; not escaped: real dispatch
+            ldi     0
+            phi     r8                  ; escaped char: clear the
+                                        ; flag, not eligible
+            lbr     sel_scan_next
+
+sel_scan_check:
+            glo     r8
+            xri     1
+            lbnz    sel_scan_notsq
+            ; single-quote mode: only a closing ' matters
+            ldn     rf
+            xri     '''
+            lbnz    sel_scan_next       ; ordinary char in squote:
+                                        ; never a trigger
+            ldi     0
+            plo     r8                  ; close squote
+            lbr     sel_scan_next
+
+sel_scan_notsq:
+            ; quote state is 0 (none) or 2 (dquote)
+            ldn     rf
+            xri     '"'
+            lbnz    sel_scan_check_sqopen
+            glo     r8
+            xri     2
+            plo     r8                  ; toggle none<->dquote
+            lbr     sel_scan_next
+
+sel_scan_check_sqopen:
+            glo     r8
+            lbnz    sel_scan_check_bs   ; already in dquote: a "'" is
+                                        ; just ordinary here
+            ldn     rf
+            xri     '''
+            lbnz    sel_scan_check_bs
+            ldi     1
+            plo     r8                  ; open squote
+            lbr     sel_scan_next
+
+sel_scan_check_bs:
+            ldn     rf
+            xri     '\'
+            lbnz    sel_scan_ordinary
+            ldi     $FF
+            phi     r8                  ; set pending-escape
+            lbr     sel_scan_next
+
+sel_scan_ordinary:
+            ldn     rf
+            xri     '$'
+            lbz     sel_scan_found
+            ldn     rf
+            xri     '%'
+            lbz     sel_scan_found
+
+sel_scan_next:
+            inc     rf
+            lbr     sel_scan_loop
+
+sel_scan_found:
+            lbr     sel_expand_go       ; trigger found: proceed to
+                                        ; Step 2/3 below
+
+sel_scan_notfound:
+            clc                         ; DF=0: nothing to expand,
+                                        ; LINE_BUF already correct
+            rtn
+
+sel_expand_go:
+            ; --- Step 2: relocate LINE_BUF[0..length-1] to
+            ; LINE_BUF[127-length..126], reserving byte 127 as an
+            ; explicit NUL sentinel (see this routine's own header) ---
+            mov     rf, shell_expand_len
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = length
+
+            mov     rf, LINE_BUF
+            add16   rf, rc
+            dec     rf                  ; RF = LINE_BUF + length - 1
+                                        ; (last source byte)
+            mov     rd, LINE_BUF
+            add16   rd, 126             ; RD = last dest byte
+                                        ; (LINE_BUF+126)
+
+sel_reloc_loop:
+            glo     rc
+            lbnz    sel_reloc_have_more
+            ghi     rc
+            lbz     sel_reloc_done
+sel_reloc_have_more:
+            ldn     rf
+            str     rd
+            dec     rf
+            dec     rd
+            sub16   rc, 1
+            lbr     sel_reloc_loop
+
+sel_reloc_done:
+            mov     rf, LINE_BUF
+            add16   rf, 127
+            ldi     0
+            str     rf                  ; the NUL sentinel
+
+            ; --- Step 3: expand ---
+            mov     rf, shell_expand_len
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = length (reloaded --
+                                        ; Step 2's own RC was
+                                        ; decremented to 0)
+
+            mov     rf, LINE_BUF
+            add16   rf, 127
+            sub16   rf, rc              ; RF = LINE_BUF + 127 - length
+                                        ; (the relocated content's
+                                        ; start)
+
+            mov     rd, LINE_BUF        ; RD = write cursor
+
+            ldi     0
+            plo     r8                  ; quote state = none (fresh
+                                        ; for this pass, independent
+                                        ; of Step 1's own, already-
+                                        ; exhausted, state)
+            phi     r8                  ; pending-escape = false
+
+sex_loop:
+            ldn     rf
+            lbz     sex_done            ; sentinel NUL: done
+
+            ghi     r8
+            lbz     sex_check_sq
+            ldi     0
+            phi     r8
+            lbr     sex_copy_one        ; escaped char: copy through
+                                        ; unchanged
+
+sex_check_sq:
+            glo     r8
+            xri     1
+            lbnz    sex_check_dq_open
+            ldn     rf
+            xri     '''
+            lbnz    sex_copy_one
+            ldi     0
+            plo     r8                  ; close squote
+            lbr     sex_copy_one        ; the quote char itself is
+                                        ; still copied through -- the
+                                        ; real tokenizer strips it
+                                        ; later, not this pass
+
+sex_check_dq_open:
+            ldn     rf
+            xri     '"'
+            lbnz    sex_check_sqopen
+            glo     r8
+            xri     2
+            plo     r8                  ; toggle none<->dquote
+            lbr     sex_copy_one
+
+sex_check_sqopen:
+            glo     r8
+            lbnz    sex_check_bs
+            ldn     rf
+            xri     '''
+            lbnz    sex_check_bs
+            ldi     1
+            plo     r8                  ; open squote
+            lbr     sex_copy_one
+
+sex_check_bs:
+            ldn     rf
+            xri     '\'
+            lbnz    sex_check_pct
+            ldi     $FF
+            phi     r8                  ; set pending-escape
+            lbr     sex_copy_one        ; the backslash itself is
+                                        ; copied through -- the real
+                                        ; tokenizer's own \X->X
+                                        ; collapsing happens later
+
+sex_check_pct:
+            ldn     rf
+            xri     '%'
+            lbz     sex_percent
+            ldn     rf
+            xri     '$'
+            lbz     sex_dollar
+            lbr     sex_copy_one        ; ordinary character
+
+sex_copy_one:
+            mov     r7, rd
+            sub16   r7, rf
+            lbdf    sex_overflow        ; RD >= RF
+            ldn     rf
+            str     rd
+            inc     rd
+            inc     rf
+            lbr     sex_loop
+
+;--- %ERRORLEVEL% / %<digit> dispatch --------------------------------
+sex_percent:
+            mov     r7, rf
+            inc     r7                  ; R7 = scan cursor, one past
+                                        ; the leading '%'
+            mov     ra, tok_errlvl_pat  ; reused unchanged from the
+                                        ; now-retired inline version
+sex_errlvl_cmp:
+            ldn     ra
+            lbz     sex_errlvl_checktail
+            str     r2
+            ldn     r7
+            ani     $DF
+            xor
+            lbnz    sex_try_digit       ; mismatch (including hitting
+                                        ; the sentinel before the
+                                        ; letters are exhausted): try
+                                        ; %<digit> instead
+            inc     r7
+            inc     ra
+            lbr     sex_errlvl_cmp
+
+sex_errlvl_checktail:
+            ldn     r7
+            xri     '%'
+            lbnz    sex_try_digit
+
+            inc     r7
+            mov     ra, r7              ; RA = new read position (past
+                                        ; the whole matched text)
+
+            mov     rb, RUN_ERRORLEVEL
+            ldn     rb
+            plo     r9
+            ldi     0
+            phi     r9                  ; R9 = RUN_ERRORLEVEL's value
+
+            push    rf                  ; OLD read position (needed
+                                        ; for the overflow check below,
+                                        ; and f_uintout is about to
+                                        ; clobber RF as its own
+                                        ; argument)
+            push    ra                  ; NEW read position
+            push    rd                  ; write cursor -- MUST be
+                                        ; pushed before RD gets
+                                        ; overwritten below, since
+                                        ; f_uintout's own calling
+                                        ; convention takes the VALUE in
+                                        ; RD (matching the original,
+                                        ; already-proven inline
+                                        ; %ERRORLEVEL% code this
+                                        ; replaced), not R9 -- REAL BUG
+                                        ; found on hardware 2026-07-25:
+                                        ; the first draft left RD
+                                        ; holding the write cursor and
+                                        ; never actually loaded the
+                                        ; value into it, so f_uintout
+                                        ; silently converted the write
+                                        ; CURSOR's own address to
+                                        ; decimal instead of the real
+                                        ; errorlevel value
+            push    r8                  ; quote state
+
+            mov     rd, r9              ; RD = the errorlevel value
+            mov     rf, tok_errlvl_buf
+            call    f_uintout           ; writes 1-3 decimal digits at
+                                        ; *rf, does NOT null-terminate
+            ldi     0
+            str     rf
+
+            pop     r8
+            pop     rd
+            pop     ra
+            pop     rf                  ; RF = OLD read position
+
+            mov     rb, tok_errlvl_buf
+sex_errlvl_copy:
+            ldn     rb
+            lbz     sex_errlvl_copydone
+            mov     r7, rd
+            sub16   r7, rf
+            lbdf    sex_overflow
+            ldn     rb
+            str     rd
+            inc     rd
+            inc     rb
+            lbr     sex_errlvl_copy
+
+sex_errlvl_copydone:
+            mov     rf, ra
+            lbr     sex_loop
+
+sex_try_digit:
+            mov     r7, rf
+            inc     r7
+            ldn     r7
+            smi     '0'
+            lbnf    sex_percent_literal
+            smi     10
+            lbdf    sex_percent_literal ; D = (char-'0')-10; DF=1
+                                        ; means char-'0' >= 10
+
+            ldn     r7
+            smi     '0'
+            plo     r9                  ; R9.0 = digit value (0-9)
+            ldi     0
+            phi     r9
+
+            inc     r7
+            mov     ra, r7              ; RA = new read position
+
+            push    rf                  ; OLD read position
+            push    ra
+            push    rd
+            push    r8
+
+            glo     r9
+            call    K_BATCH_ARGS_GETARG ; DF=0/RF=value ptr (real or
+                                        ; empty), or DF=1 (no batch
+                                        ; active at all)
+            lbdf    sex_digit_noreplace
+
+            mov     rb, sex_val_ptr
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb
+
+            pop     r8
+            pop     rd
+            pop     ra
+            pop     rf                  ; RF = OLD read position
+
+            mov     rb, sex_val_ptr
+            lda     rb
+            phi     r9
+            ldn     rb
+            plo     r9
+            mov     rb, r9              ; RB = the value pointer
+                                        ; (possibly an empty string)
+sex_digit_copy:
+            ldn     rb
+            lbz     sex_digit_copydone
+            mov     r7, rd
+            sub16   r7, rf
+            lbdf    sex_overflow
+            ldn     rb
+            str     rd
+            inc     rd
+            inc     rb
+            lbr     sex_digit_copy
+
+sex_digit_copydone:
+            mov     rf, ra
+            lbr     sex_loop
+
+sex_digit_noreplace:
+            pop     r8
+            pop     rd
+            pop     ra
+            pop     rf                  ; RF = OLD read position,
+                                        ; restored -- still pointing
+                                        ; at the original '%'
+            lbr     sex_copy_one        ; copy just the '%' -- the
+                                        ; digit is picked up naturally
+                                        ; on the next sex_loop
+                                        ; iteration
+
+sex_percent_literal:
+            lbr     sex_copy_one
+
+;--- ${FOO} / $FOO / env_getenv dispatch -----------------------------
+sex_dollar:
+            mov     r7, rf
+            inc     r7                  ; R7 -> the char right after
+                                        ; '$'
+            ldn     r7
+            xri     '{'
+            lbnz    sex_try_bare_dollar
+
+            inc     r7
+            mov     r9, r7              ; R9 = name start (right
+                                        ; after '{')
+sex_brace_scan:
+            ldn     r7
+            lbz     sex_try_bare_dollar ; hit the sentinel before '}':
+                                        ; unterminated -- falls through
+                                        ; to the bare-dollar attempt,
+                                        ; which also fails (the char
+                                        ; right after '$' is '{', not
+                                        ; a valid name-start), ending
+                                        ; up literal '$' as intended
+            xri     '}'
+            lbz     sex_brace_found
+            inc     r7
+            lbr     sex_brace_scan
+
+sex_brace_found:
+            ; R7 -> the closing '}', R9 -> name start. New read
+            ; position is R7+1 (past the '}').
+            mov     ra, r7
+            inc     ra
+            mov     rb, sex_new_read_pos
+            ghi     ra
+            str     rb
+            inc     rb
+            glo     ra
+            str     rb
+            lbr     sex_env_lookup
+
+sex_try_bare_dollar:
+            mov     r7, rf
+            inc     r7
+            call    shell_is_ident_start
+            lbdf    sex_dollar_literal  ; not a valid start: literal
+                                        ; '$'
+
+            mov     r9, r7              ; R9 = name start
+sex_bare_scan:
+            ldn     r7
+            lbz     sex_bare_scan_done  ; hit sentinel: name ends here
+            call    shell_is_ident_continue
+            lbdf    sex_bare_scan_done  ; non-identifier char: name
+                                        ; ends here
+            inc     r7
+            lbr     sex_bare_scan
+
+sex_bare_scan_done:
+            ; R7 -> one past the name (exclusive), R9 -> name start.
+            ; New read position is just R7 (no delimiter to skip).
+            mov     rb, sex_new_read_pos
+            ghi     r7
+            str     rb
+            inc     rb
+            glo     r7
+            str     rb
+            lbr     sex_env_lookup
+
+sex_dollar_literal:
+            lbr     sex_copy_one
+
+; shared tail for both ${FOO} and bare $FOO -- Args: R9 = name start,
+; R7 = name end (exclusive), sex_new_read_pos (memory) = the read
+; position once this substitution is applied (already set by the
+; caller above).
+sex_env_lookup:
+            mov     rb, sex_envname_buf
+sex_env_namecopy:
+            glo     r9
+            str     r2
+            glo     r7
+            sm
+            lbnz    sex_env_namecopy_go
+            ghi     r9
+            str     r2
+            ghi     r7
+            sm
+            lbz     sex_env_namecopy_done
+sex_env_namecopy_go:
+            ldn     r9
+            str     rb
+            inc     rb
+            inc     r9
+            lbr     sex_env_namecopy
+sex_env_namecopy_done:
+            ldi     0
+            str     rb                  ; NUL-terminate the name
+
+            push    rf                  ; OLD read position
+            push    rd                  ; write cursor
+            push    r8                  ; quote state -- sex_new_read_pos
+                                        ; is already in memory, safe
+                                        ; across any call with no
+                                        ; push/pop needed
+
+            mov     rf, sex_envname_buf
+            call    env_getenv          ; RF = value ptr, or 0 if unset
+
+            mov     rb, sex_val_ptr
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb
+
+            pop     r8
+            pop     rd
+            pop     rf                  ; RF = OLD read position
+
+            mov     rb, sex_val_ptr
+            lda     rb
+            phi     r9
+            ldn     rb
+            plo     r9
+
+            glo     r9
+            lbnz    sex_env_haveval
+            ghi     r9
+            lbnz    sex_env_haveval
+            lbr     sex_env_done        ; unset: nothing to copy
+
+sex_env_haveval:
+            mov     rb, r9
+sex_env_copy:
+            ldn     rb
+            lbz     sex_env_done
+            mov     r7, rd
+            sub16   r7, rf
+            lbdf    sex_overflow
+            ldn     rb
+            str     rd
+            inc     rd
+            inc     rb
+            lbr     sex_env_copy
+
+sex_env_done:
+            mov     rf, sex_new_read_pos
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            mov     rf, r9              ; RF = the new read position
+            lbr     sex_loop
+
+sex_overflow:
+            call    K_INMSG
+            db      "Line too long after substitution.",13,10,0
+            stc
+            rtn
+
+sex_done:
+            ldi     0
+            str     rd                  ; NUL-terminate the fully
+                                        ; expanded line
+            clc
+            rtn
+
+shell_expand_len:      dw      0
+sex_new_read_pos:      dw      0
+sex_val_ptr:            dw      0
+sex_envname_buf:        ds      40
 
 not_drive_cmd:
             ; RF = start of the trimmed line (program name onward).
@@ -536,7 +1282,7 @@ tok_check_sq_open:
 tok_check_bs:
             ldn     rf
             xri     '\'
-            lbnz    tok_ordinary
+            lbnz    tok_ordinary_plain
 
             inc     rf                  ; skip the backslash
             ldn     rf
@@ -567,166 +1313,19 @@ tok_in_squote:
             ; special (closes the quote, itself not copied).
             ldn     rf
             xri     '''
-            lbnz    tok_ordinary
+            lbnz    tok_ordinary_plain
             ldi     0
             plo     r8                  ; close single-quote mode
             inc     rf                  ; consume the quote char itself
             lbr     tok_char
 
-tok_ordinary:
-            ; %ERRORLEVEL% substitution (added 2026-07-25, ERRORLEVEL
-            ; prelude to batch IF/GOTO) -- reached from BOTH the
-            ; unquoted/double-quoted path (tok_check_bs's own "not a
-            ; backslash" fallthrough) and the single-quoted path
-            ; (tok_in_squote's own "not the closing quote" fallthrough)
-            ; -- R8.0 (this tokenizer's own live quote-state register,
-            ; see not_drive_cmd's header comment) is the single source
-            ; of truth for which case this is, reused here rather than
-            ; duplicating any quote-tracking logic of its own. Single-
-            ; quote mode ($01) skips this entirely and falls straight
-            ; to the original plain copy, matching the existing "100%
-            ; literal, bash-style" rule for '...' (tok_in_squote's own
-            ; header) -- 'echo '%ERRORLEVEL%'' must print the literal
-            ; text. Unquoted (0) and double-quoted ($FF) both get
-            ; substituted, matching how double-quoted content already
-            ; allows backslash-escape processing rather than being
-            ; fully literal like single-quoted content is.
-            glo     r8
-            xri     $01
-            lbz     tok_ordinary_plain
-
-            ; check for the literal "%ERRORLEVEL%" (12 bytes), case-
-            ; insensitive over the 10 middle LETTERS only -- the
-            ; leading/trailing '%' are checked EXACTLY, never folded.
-            ; REAL BUG CAUGHT BY THE PYTHON SIMULATION before this ever
-            ; reached hardware: "ani $DF" clears bit 5, which folds a
-            ; lowercase LETTER to uppercase -- but '%' is $25 (0010
-            ; 0101), which already HAS bit 5 set, so folding it
-            ; produces $05, not '%' itself. A uniform fold-then-compare
-            ; over all 12 bytes (the first draft) silently broke the
-            ; match exactly at the leading/trailing '%' positions. This
-            ; codebase's existing drive-letter fold precedent is safe
-            ; specifically because it's only ever applied to an
-            ; already-confirmed letter -- never generalized to
-            ; arbitrary bytes the way this first draft did.
-            ldn     rf
-            xri     '%'
-            lbnz    tok_ordinary_plain  ; not even a '%': can't match
-
-            mov     r7, rf
-            inc     r7                  ; R7 = scan cursor, one past
-                                        ; the confirmed leading '%' --
-                                        ; RF itself must stay untouched
-                                        ; unless this turns out to be a
-                                        ; real match
-            mov     ra, tok_errlvl_pat  ; RA = pattern cursor ("ERRORLEVEL"
-                                        ; only -- no percent signs, see
-                                        ; the data declaration below)
-tok_errlvl_cmp:
-            ldn     ra
-            lbz     tok_errlvl_checktail ; letters exhausted: check for
-                                        ; the trailing '%'
-            str     r2                  ; M(R2) = pattern letter
-                                        ; (already uppercase)
-            ldn     r7
-            ani     $DF                 ; fold to uppercase (same idiom
-                                        ; the shell's own drive-letter
-                                        ; check already uses) -- safe
-                                        ; HERE specifically, since every
-                                        ; byte compared in this loop is
-                                        ; a real letter, never '%'
-            xor
-            lbnz    tok_ordinary_plain  ; mismatch (including hitting a
-                                        ; real NUL before the letters
-                                        ; are exhausted -- a folded 0
-                                        ; never equals a real letter):
-                                        ; not our pattern -- R7/RA are
-                                        ; scratch, dead from here, RF is
-                                        ; untouched, so falling through
-                                        ; correctly copies just *RF
-            inc     r7
-            inc     ra
-            lbr     tok_errlvl_cmp
-
-tok_errlvl_checktail:
-            ldn     r7
-            xri     '%'
-            lbnz    tok_ordinary_plain  ; the letters matched but
-                                        ; there's no trailing '%' right
-                                        ; after -- not our pattern
-
-tok_errlvl_match:
-            ; full match -- R7 -> the trailing '%' itself. Consume it
-            ; too (R7 -> one past the whole matched text), then that IS
-            ; the correct advanced read-cursor value -- no separate
-            ; length constant needed, the scan itself already found
-            ; exactly where the match ends.
-            inc     r7
-            mov     rf, r7              ; RF = real read cursor,
-                                        ; advanced past the whole match
-
-            ; protect everything that must survive the f_uintout call
-            ; below -- its own clobber footprint isn't confirmed in
-            ; this codebase (gotcha #8/#10), and not_drive_cmd's own
-            ; header comment documents RF/RD/RB/R9.0/R8.0 as live
-            ; across the WHOLE tokenizing loop. push/pop (the software
-            ; stack) is this project's own established pattern for
-            ; exactly this situation across a call with an unconfirmed
-            ; footprint (e.g. kernel/redir.asm's dispatchers protecting
-            ; RF/RC/RA the same way around file_write).
-            push    rf                  ; the real (already-advanced)
-                                        ; read cursor
-            push    rd                  ; the real write cursor
-            push    rb                  ; argv-table slot pointer
-            push    r9                  ; argc (whole register pushed
-                                        ; for simplicity -- its high
-                                        ; byte is unused elsewhere in
-                                        ; this tokenizer)
-            push    r8                  ; quote state + redirect flag
-
-            mov     rf, RUN_ERRORLEVEL
-            ldn     rf
-            plo     rd
-            ldi     0
-            phi     rd                  ; RD = RUN_ERRORLEVEL's current
-                                        ; value (zero-extended byte)
-
-            mov     rf, tok_errlvl_buf
-            call    f_uintout           ; writes 1-3 decimal digit
-                                        ; bytes at *rf, does NOT null-
-                                        ; terminate (gotcha #5)
-            ldi     0
-            str     rf                  ; null-terminate right after
-                                        ; the digits -- RF still holds
-                                        ; f_uintout's own returned
-                                        ; pointer here, consumed
-                                        ; immediately, before any of
-                                        ; the pushed registers below
-                                        ; are restored
-
-            pop     r8
-            pop     r9
-            pop     rb
-            pop     rd                  ; RD = real write cursor,
-                                        ; restored
-            pop     rf                  ; RF = real read cursor,
-                                        ; restored -- LIFO, reversing
-                                        ; the push order above
-
-            ; copy tok_errlvl_buf's digits into *RD -- RA (confirmed
-            ; dead/unused elsewhere in this tokenizer) as the digit-
-            ; buffer source pointer, so RF (the just-restored real read
-            ; cursor) is never disturbed
-            mov     ra, tok_errlvl_buf
-tok_errlvl_copy:
-            ldn     ra
-            lbz     tok_ordinary_next   ; digits exhausted (the NUL
-                                        ; just written above)
-            str     rd
-            inc     rd
-            inc     ra
-            lbr     tok_errlvl_copy
-
+; NOTE: %ERRORLEVEL% substitution used to live here, woven directly
+; into this tokenizer's own character scan. Retired 2026-07-25 (%1-%9/
+; $FOO/${FOO} substitution pass) -- moved into shell_expand_line, a
+; separate pass that now runs BEFORE this tokenizer, so %ERRORLEVEL%/
+; %0-%9/$FOO/${FOO} all share one mechanism instead of leaving this one
+; as a special case. tok_errlvl_pat/tok_errlvl_buf (below) are reused
+; by that new code, unchanged.
 tok_ordinary_plain:
             ldn     rf
             str     rd
@@ -791,6 +1390,347 @@ tok_done:
             phi     ra
             ldn     rf
             plo     ra
+
+;------------------------------------------------------------------
+; check_special: IF/GOTO dispatch, reached once per resolved argv[]
+; (looping back here again if IF's own condition is true -- see
+; below). Neither IF nor GOTO is an ordinary program: IF conditionally
+; re-dispatches an ALREADY-TOKENIZED, shifted view of its own argv[]
+; (rather than a program launching another program, which nothing in
+; this codebase can do -- see this file's own header on why the shell
+; hands off through the kernel instead); GOTO repositions the active
+; batch script via K_BATCH_GOTO and never "runs" anything itself.
+;------------------------------------------------------------------
+check_special:
+            mov     rf, ra
+            mov     rd, if_pat_if
+            call    shell_match_word
+            lbnf    if_start
+
+            mov     rf, ra
+            mov     rd, if_pat_goto
+            call    shell_match_word
+            lbnf    goto_start
+
+            lbr     scan_slash          ; neither -- ordinary command,
+                                        ; resolve argv[0] normally
+
+;------------------------------------------------------------------
+; GOTO <label>
+;------------------------------------------------------------------
+goto_start:
+            mov     rf, RUN_ARGC
+            inc     rf
+            ldn     rf
+            smi     2
+            lbnf    goto_usage          ; argc < 2: missing label
+
+            ldi     1
+            call    argv_at             ; RF = argv[1] (the label)
+            call    K_BATCH_GOTO
+            lbdf    goto_notfound
+            lbr     start
+
+goto_notfound:
+            call    K_INMSG
+            db      "Label not found.",13,10,0
+            lbr     start
+
+goto_usage:
+            call    K_INMSG
+            db      "Usage: GOTO <label>",13,10,0
+            lbr     start
+
+;------------------------------------------------------------------
+; IF [NOT] EXIST <path> <command>
+; IF [NOT] <str1>==<str2> <command>
+;------------------------------------------------------------------
+if_start:
+            mov     rf, if_argc
+            mov     rd, RUN_ARGC
+            inc     rd
+            ldn     rd
+            str     rf                  ; if_argc = argc (low byte --
+                                        ; argc is always < ARGV_MAX_ARGS,
+                                        ; comfortably fits)
+
+            mov     rf, if_idx
+            ldi     1
+            str     rf                  ; start parsing at argv[1]
+
+            mov     rf, if_negate
+            ldi     0
+            str     rf
+
+            call    if_check_bounds     ; need argv[1] to exist at all
+            lbdf    if_usage
+
+            mov     rf, if_idx
+            ldn     rf
+            call    argv_at             ; RF = argv[if_idx]
+            mov     rd, if_pat_not
+            call    shell_match_word
+            lbdf    if_check_exist      ; not NOT -- try EXIST next
+                                        ; (RF still = argv[if_idx],
+                                        ; shell_match_word's own
+                                        ; contract: unchanged on DF=1)
+
+            mov     rf, if_negate
+            ldi     1
+            str     rf
+            mov     rf, if_idx
+            ldn     rf
+            adi     1
+            str     rf                  ; if_idx++ (consumed NOT)
+
+            call    if_check_bounds     ; need the EXIST/str token too
+            lbdf    if_usage
+
+            mov     rf, if_idx
+            ldn     rf
+            call    argv_at             ; RF = argv[if_idx] (refreshed
+                                        ; -- NOT's own consumption moved
+                                        ; if_idx, the old RF is stale)
+
+if_check_exist:
+            mov     rd, if_pat_exist
+            call    shell_match_word
+            lbdf    if_streq            ; not EXIST -- str1==str2 form
+                                        ; (RF still = argv[if_idx])
+
+            ; --- EXIST form ---
+            mov     rf, if_idx
+            ldn     rf
+            adi     1
+            str     rf                  ; if_idx++ (consumed "EXIST")
+
+            call    if_check_bounds     ; need the path argument
+            lbdf    if_usage
+
+            mov     rf, if_idx
+            ldn     rf
+            call    argv_at             ; RF = argv[if_idx] (the path)
+            mov     rd, stat_result
+            call    K_STAT              ; DF=0 found, DF=1 not found --
+                                        ; reuses the SAME scratch buffer
+                                        ; check_exists uses later this
+                                        ; same cycle, not live yet here
+
+            ; REAL BUG (found 2026-07-25, reviewing a hardware report):
+            ; the "if_idx++ (consumed the path)" adi used to sit HERE,
+            ; between K_STAT and the DF check below -- but ADI sets DF
+            ; from its OWN carry, silently overwriting K_STAT's real
+            ; result before it was ever read. For any realistic if_idx
+            ; (always tiny, nowhere near 255) that add never carries,
+            ; so DF always came out 0 regardless of what K_STAT
+            ; actually returned -- capture DF into D immediately, THEN
+            ; do the increment.
+            ldi     1
+            lbnf    if_exist_have       ; DF=0 (found): keep D=1
+            ldi     0                   ; DF=1 (not found): D=0
+if_exist_have:
+            str     r2
+
+            mov     rf, if_idx
+            ldn     rf
+            adi     1
+            str     rf                  ; if_idx++ (consumed the path)
+                                        ; -- moved to AFTER the DF
+                                        ; capture above, see this
+                                        ; block's own comment
+
+            mov     rf, if_negate
+            ldn     rf
+            xor                         ; D = found XOR negate
+            lbr     if_have_condition
+
+;------------------------------------------------------------------
+; str1==str2 form -- RF still points at the token (if_check_exist's
+; own preceding shell_match_word left it unchanged on its DF=1 return)
+;------------------------------------------------------------------
+if_streq:
+            mov     r7, rf              ; R7 = scan cursor, hunting for
+                                        ; the first "=="
+if_eq_loop:
+            ldn     r7
+            lbz     if_usage            ; reached NUL, no "==" anywhere
+                                        ; -- malformed IF
+            xri     '='
+            lbnz    if_eq_next
+            mov     r8, r7              ; candidate first '='
+            inc     r7
+            ldn     r7
+            xri     '='
+            lbz     if_eq_found
+            lbr     if_eq_loop          ; not a real "==" -- r7 is
+                                        ; already one past the lone
+                                        ; '=', continue scanning from
+                                        ; there, nothing skipped
+if_eq_next:
+            inc     r7
+            lbr     if_eq_loop
+
+if_eq_found:
+            inc     r7                  ; r7 = right-side start (past
+                                        ; both '=' characters)
+            mov     r9, rf              ; r9 = left-side cursor
+            sub16   r8, r9              ; r8 = left_len (register-
+                                        ; register sub16 -- safe per
+                                        ; gotcha #18, M(R2) isn't used
+                                        ; concurrently here)
+if_eq_cmp:
+            glo     r8
+            lbz     if_eq_rightonly     ; left exhausted
+            ldn     r9                  ; left char (guaranteed real,
+                                        ; non-NUL token byte)
+            str     r2
+            ldn     r7                  ; right char
+            lbz     if_eq_false         ; right hit NUL early: not equal
+            xor
+            lbnz    if_eq_false
+            inc     r9
+            inc     r7
+            dec     r8
+            lbr     if_eq_cmp
+
+if_eq_rightonly:
+            ldn     r7
+            lbz     if_eq_true          ; right ALSO exhausted: equal
+            lbr     if_eq_false
+
+if_eq_true:
+            ldi     1
+            lbr     if_eq_have
+if_eq_false:
+            ldi     0
+if_eq_have:
+            str     r2
+
+            mov     rf, if_idx
+            ldn     rf
+            adi     1
+            str     rf                  ; if_idx++ (consumed the
+                                        ; str1==str2 token)
+
+            mov     rf, if_negate
+            ldn     rf
+            xor                         ; D = equal XOR negate
+            lbr     if_have_condition
+
+;------------------------------------------------------------------
+; if_have_condition: D = 0/nonzero from either branch above
+;------------------------------------------------------------------
+if_have_condition:
+            lbz     if_condition_false
+
+            ; --- condition TRUE: shift argv[if_idx..] down to
+            ; argv[0..], update RUN_ARGC, reload RA, re-enter
+            ; check_special (this is what makes "IF EXIST x GOTO y"
+            ; work -- IF's own true branch lands right back on GOTO's
+            ; own check, and for free supports a chained "IF ... IF
+            ; ... command" too, the same loop either way)
+            mov     rf, if_idx
+            ldn     rf
+            str     r2
+            mov     rf, if_argc
+            ldn     rf
+            sm                          ; D = if_argc - if_idx = new argc
+            plo     r9
+            mov     rf, RUN_ARGC
+            inc     rf
+            glo     r9
+            str     rf                  ; RUN_ARGC (low byte) = new argc
+
+            mov     rf, if_idx
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            shl16   r8                  ; r8 = if_idx * 2 (byte offset)
+            mov     r7, RUN_ARGV_TABLE
+            add16   r7, r8              ; r7 = &argv_table[if_idx] (src)
+            mov     r8, RUN_ARGV_TABLE  ; r8 = &argv_table[0] (dst)
+
+            glo     r9                  ; D = new argc (still fresh --
+                                        ; nothing has touched r9 since)
+            shl                         ; D = new_argc * 2 (copy_bytes
+                                        ; -- always < 2*ARGV_MAX_ARGS,
+                                        ; comfortably fits in a byte)
+            plo     rc
+
+if_shift_loop:
+            glo     rc
+            lbz     if_shift_done
+            lda     r7
+            str     r8
+            inc     r8
+            dec     rc
+            lbr     if_shift_loop
+if_shift_done:
+
+            mov     rf, RUN_ARGV_TABLE
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra
+
+            lbr     check_special
+
+if_condition_false:
+            lbr     start
+
+if_usage:
+            call    K_INMSG
+            db      "Usage: IF [NOT] EXIST <path> <command>",13,10,0
+            call    K_INMSG
+            db      "       IF [NOT] <str1>==<str2> <command>",13,10,0
+            lbr     start
+
+;------------------------------------------------------------------
+; if_check_bounds: is if_idx a valid argv index (if_idx < if_argc)?
+; Args:    none (reads if_idx/if_argc)
+; Returns: DF = 0 if valid, DF = 1 if not (if_idx >= if_argc)
+; Modifies: (none but D)
+;------------------------------------------------------------------
+if_check_bounds:
+            mov     rf, if_idx
+            ldn     rf
+            str     r2
+            mov     rf, if_argc
+            ldn     rf
+            sm                          ; D = if_argc - if_idx
+            lbnf    if_bounds_bad       ; DF=0 (borrow): if_argc < if_idx
+            lbz     if_bounds_bad       ; D==0: if_argc == if_idx (one
+                                        ; past the end)
+            clc
+            rtn
+if_bounds_bad:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; argv_at: RF = argv[D]'s own pointer value (D = index, 0-based).
+; Caller is responsible for confirming index < argc first (see
+; if_check_bounds) -- this routine trusts its argument and does not
+; bounds-check itself.
+; Args:    D = index
+; Returns: RF = argv[index]
+; Modifies: R8 (and D)
+;------------------------------------------------------------------
+argv_at:
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = index (zero-extended)
+            shl16   r8                  ; R8 = index * 2
+            mov     rf, RUN_ARGV_TABLE
+            add16   rf, r8              ; RF = &argv_table[index]
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = argv[index] (the real
+                                        ; token pointer)
+            mov     rf, r8
+            rtn
 
 ;------------------------------------------------------------------
 ; Resolve RA (the null-terminated program name) into RUN_PATH, and --
@@ -914,9 +1854,129 @@ is_batch:
             call    K_BATCH_START
             lbdf    batch_nested
 
-            lbr     start               ; batch now active -- the next
-                                        ; trip through "start" pulls
-                                        ; its first line via
+            ; %0-%9 batch-argument population (2026-07-25). Reserve
+            ; the dynamic himem block and, on success, copy up to the
+            ; first 10 RUN_ARGV_TABLE entries' own STRING CONTENT into
+            ; it -- RUN_ARGV_TABLE[i] itself is a pointer into
+            ; LINE_BUF, which the very next shell reload overwrites,
+            ; so BATCH_ARGV[i] must never be a copy of that pointer,
+            ; only a NEW pointer into the reserved block's own text
+            ; region. RUN_ARGV_TABLE/RUN_ARGC are still exactly as
+            ; tok_done left them here (confirmed by trace: neither
+            ; K_BATCH_START nor K_BATCH_ARGS_RESERVE touches them).
+            call    K_BATCH_ARGS_RESERVE   ; DF=0/RD=base, DF=1=failed
+            lbdf    start                  ; couldn't reserve: batch
+                                        ; still runs anyway, just
+                                        ; without %N support for this
+                                        ; run -- K_BATCH_ARGS_GETARG
+                                        ; will correctly report "not
+                                        ; active" (graceful
+                                        ; degradation, not an aborted
+                                        ; batch)
+
+            ; RD = base, kept in this register for the whole loop
+            ; below (confirmed the loop body never touches RD)
+            mov     rc, rd              ; RC = text-region write
+                                        ; cursor, starts at
+                                        ; base+BATCH_ARGS_TEXT_OFF
+                                        ; (== base, offset is 0)
+
+            mov     rf, RUN_ARGC
+            inc     rf
+            ldn     rf                  ; D = argc's low byte (high
+                                        ; byte is always 0 -- capped
+                                        ; well under 256 by
+                                        ; ARGV_MAX_ARGS=16)
+            plo     r9                  ; R9.0 = argc (tentatively)
+            ldi     0
+            phi     r9
+            glo     r9
+            smi     11
+            lbnf    ibp_count_final     ; argc <= 10 (borrow): keep it
+            ldi     10
+            plo     r9                  ; argc > 10: cap at 10
+ibp_count_final:
+
+            ldi     0
+            plo     r7                  ; R7.0 = loop index i
+
+ibp_loop:
+            glo     r7
+            str     r2
+            glo     r9
+            sm                          ; D = count - i (SM computes
+                                        ; D - M(R2), not M(R2) - D --
+                                        ; see kernel_batch_args_getarg's
+                                        ; own comment for the full
+                                        ; story) -- equality check, so
+                                        ; the sign doesn't actually
+                                        ; matter here, only that it's
+                                        ; zero iff i == count
+            lbz     ibp_write_argc      ; i == count: done copying
+
+            ; RA = RUN_ARGV_TABLE[i] (dereference)
+            mov     rf, RUN_ARGV_TABLE
+            glo     r7
+            plo     ra
+            ldi     0
+            phi     ra
+            shl16   ra                  ; RA = i * 2
+            add16   rf, ra
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; RA = RUN_ARGV_TABLE[i]
+
+            ; argv-table slot address = base + ARGV_OFF + i*2,
+            ; recomputed fresh each iteration -- no separate
+            ; persistent cursor needed
+            mov     rf, rd
+            add16   rf, BATCH_ARGS_ARGV_OFF
+            glo     r7
+            plo     r8
+            ldi     0
+            phi     r8
+            shl16   r8
+            add16   rf, r8              ; RF = &BATCH_ARGV[i]
+
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf                  ; BATCH_ARGV[i] = RC (this
+                                        ; arg's NEW pointer, into the
+                                        ; text region -- never
+                                        ; RUN_ARGV_TABLE[i]'s own
+                                        ; LINE_BUF pointer)
+
+ibp_copy_str:
+            ldn     ra
+            lbz     ibp_copy_done
+            str     rc
+            inc     rc
+            inc     ra
+            lbr     ibp_copy_str
+
+ibp_copy_done:
+            ldi     0
+            str     rc
+            inc     rc                  ; NUL-terminate this arg,
+                                        ; advance the text cursor past
+                                        ; it for the next one
+
+            inc     r7
+            lbr     ibp_loop
+
+ibp_write_argc:
+            mov     rf, rd
+            add16   rf, BATCH_ARGS_ARGC_OFF
+            glo     r9
+            str     rf
+
+            lbr     start               ; batch now active, %N args
+                                        ; populated -- the next trip
+                                        ; through "start" pulls the
+                                        ; first line via
                                         ; K_BATCH_READLINE
 
 batch_nested:
@@ -1053,6 +2113,14 @@ ge_prescan_done:
             ldi     0
             str     rf
 
+            ; ge_truncated (2026-07-26): set by ge_append_tmp if the
+            ; ARGV_MAX_ARGS=16 cap is ever actually hit -- see its own
+            ; header comment and ge_expand_done's own check below for
+            ; why this needs reporting rather than staying silent.
+            mov     rf, ge_truncated
+            ldi     0
+            str     rf
+
             ; --- ge_argv_tmp[0] = argv[0] (never glob-expanded) ---
             mov     rf, RUN_ARGV_TABLE
             lda     rf
@@ -1112,8 +2180,29 @@ ge_expand_next:
             lbr     ge_expand_loop
 
 ge_expand_done:
+            ; ge_truncated check (2026-07-26): if ge_append_tmp ever
+            ; had to drop an entry for hitting ARGV_MAX_ARGS=16, abort
+            ; the whole line here -- BEFORE publishing anything -- with
+            ; a clear, specific message, rather than silently running
+            ; whatever command resulted from losing one or more
+            ; trailing arguments (which, for something like "COPY
+            ; <many matches> <destination>", means losing the
+            ; DESTINATION itself, per the real hardware bug this fix
+            ; exists for -- see ge_append_tmp's own header comment for
+            ; the full story). Matches ge_oom's own "abort the whole
+            ; line, no half-expanded command" shape exactly.
+            mov     rf, ge_truncated
+            ldn     rf
+            lbnz    ge_truncated_err
+
             call    ge_publish
             lbr     ge_return
+
+ge_truncated_err:
+            call    K_INMSG
+            db      "Too many matches (max 16 arguments including the command and destination) -- command not run.",13,10,0
+            lbr     start               ; abort the whole line -- no
+                                        ; half-expanded command
 
 ge_oom:
             call    K_INMSG
@@ -1456,9 +2545,21 @@ gem_fail:
 
 ;------------------------------------------------------------------
 ; ge_append_tmp: append RD as the next entry in ge_argv_tmp, bumping
-; ge_new_argc -- silently no-ops if ge_new_argc is already at
-; ARGV_MAX_ARGS (same "extra tokens silently dropped" precedent the
-; main tokenizer's own tok_check_end already established).
+; ge_new_argc -- no-ops if ge_new_argc is already at ARGV_MAX_ARGS
+; (same "extra tokens silently dropped" precedent the main tokenizer's
+; own tok_check_end already established for a plain, non-glob command
+; line) -- but ALSO sets ge_truncated (2026-07-26), which
+; ge_expand_done checks and reports as a real error, rather than
+; letting a dropped ARGUMENT (as opposed to a dropped CHARACTER, the
+; tokenizer's own case) silently disappear. A real hardware bug found
+; this the hard way: "COPY C:/cfg/*.* ." against a directory with 15+
+; matching files silently dropped the trailing "." destination
+; argument once expansion reached the cap, and COPY then reported a
+; deeply misleading "Destination must be an existing directory" using
+; one of the SOURCE files it had wrongly ended up treating as the
+; destination -- confirmed via a temporary diagnostic in COPY's own
+; check_dst_is_dir, which showed the "destination" it was checking was
+; literally the last matched source filename, not ".".
 ; Args:    RD = pointer to append
 ; Modifies: RF, RB, R8 (and D)
 ;------------------------------------------------------------------
@@ -1466,7 +2567,17 @@ ge_append_tmp:
             mov     rf, ge_new_argc
             ldn     rf
             smi     ARGV_MAX_ARGS
-            lbdf    gat_done            ; already at capacity
+            lbnf    gat_not_full        ; not yet at capacity: proceed
+                                        ; normally
+
+            mov     rf, ge_truncated
+            ldi     1
+            str     rf
+            lbr     gat_done            ; already at capacity: drop
+                                        ; this entry, same as before,
+                                        ; but now flagged
+
+gat_not_full:
 
             mov     rf, ge_new_argc
             ldn     rf
@@ -1632,6 +2743,9 @@ ge_needs_glob:       db      0
 ge_glob_base:        dw      0
 ge_glob_used:        dw      0
 ge_budget_exhausted: db      0
+ge_truncated:        db      0    ; set by ge_append_tmp if the
+                                    ; ARGV_MAX_ARGS cap was ever hit --
+                                    ; see its own header comment
 ge_match_count:      db      0
 ge_token:            dw      0
 ge_last_slash:       dw      0
@@ -2017,6 +3131,69 @@ wbn_done:
             rtn
 
 ;------------------------------------------------------------------
+; shell_match_word: does *RF case-insensitively match the whole word
+; RD points to? Used by IF/GOTO's own dispatch (check_special, below)
+; for "IF"/"NOT"/"EXIST"/"GOTO" -- factored out rather than repeating
+; the REM check's own inline shape (start_have_line, above) several
+; more times, matching this project's own standing lesson that
+; duplicated fiddly per-character logic is where bugs live.
+; Args:    RF = string to check, RD = pointer to a NUL-terminated
+;          pattern -- MUST be all-uppercase-letters (this routine
+;          blind-folds the live input via "ani $DF" and compares
+;          against RD as-is; that fold is only safe when the pattern
+;          itself contains no non-letter characters, matching the
+;          exact reasoning tok_ordinary's own %ERRORLEVEL% comment
+;          already documents for why "%" specifically can't be folded
+;          this way -- every pattern this routine is actually called
+;          with ("IF"/"NOT"/"EXIST"/"GOTO") is plain letters, so this
+;          holds)
+; Returns: DF = 0 on a whole-word match (RD's pattern, followed by a
+;          space or end-of-string, not a prefix of a longer word) --
+;          RF is advanced past the matched word, and past one
+;          following space if present, ready to parse the next token
+;          (matching f_ltrim's own "point past whitespace" contract).
+;          DF = 1 on no match -- RF unchanged.
+; Modifies: R7 (and D)
+;------------------------------------------------------------------
+shell_match_word:
+            mov     r7, rf              ; R7 = trial scan cursor -- RF
+                                        ; itself stays untouched unless
+                                        ; the whole match succeeds
+smw_loop:
+            ldn     rd
+            lbz     smw_checkend        ; pattern exhausted
+            str     r2
+            ldn     r7
+            ani     $DF
+            xor
+            lbnz    smw_nomatch
+            inc     rd
+            inc     r7
+            lbr     smw_loop
+
+smw_checkend:
+            ldn     r7
+            lbz     smw_match_noskip    ; NUL right after: whole-word
+                                        ; match, nothing to skip
+            xri     ' '
+            lbnz    smw_nomatch         ; some other char follows --
+                                        ; e.g. "IFX" when matching
+                                        ; "IF": not a whole-word match
+            inc     r7                  ; it WAS a space -- consume it
+            mov     rf, r7
+            clc
+            rtn
+
+smw_match_noskip:
+            mov     rf, r7
+            clc
+            rtn
+
+smw_nomatch:
+            stc
+            rtn
+
+;------------------------------------------------------------------
 ; check_exists: confirm RUN_PATH names an existing FILE (not a
 ; directory) via K_STAT.
 ; Args:    none (reads RUN_PATH)
@@ -2333,31 +3510,43 @@ pp_dirent:  ds      DIRENT_LEN
 ; input arriving faster than it's read, which doesn't apply to output
 ; we control the timing of ourselves.
 ;
-; HISTORY_LOAD_BUDGET is deliberately kept under 256 bytes so the
-; "bytes actually loaded this session" bookkeeping (hist_loaded_len)
-; and the tail-scan's own remaining-byte countdown can both stay
-; single-byte arithmetic throughout hist_split -- trading a little
-; recall depth (still enough for "a handful of recent commands") for
-; meaningfully simpler, lower-risk code. The FILE itself is never
-; capped -- only the tail loaded into RAM for any one session is.
+; HISTORY_LOAD_BUDGET: how many bytes of history.dat's own tail get
+; loaded into RAM for one session's worth of Up/Down recall. Raised
+; 255->512 (2026-07-25, user's own request, after the compaction
+; feature above made it worth pairing with a matching HISTORY_MAX_LINES
+; raise) -- previously kept under 256 specifically so hist_loaded_len
+; and hist_split's own remaining-byte countdown could stay single-byte
+; arithmetic; both were widened to real 16-bit words to support this
+; (independently Python-simulated across the full 16-bit range,
+; including the 255/256/257 boundary the old code would have broken
+; on, before trusting the assembly -- see hist_split's own comments).
+; The FILE itself is never capped -- only the tail loaded into RAM for
+; any one session is; hist_compact (below) is what bounds the file.
 ;
-; HISTORY_MAX_LINES raised 16->25 (2026-07-25, user's own "compromise"
-; call after weighing the tradeoff): hist_lines[] is the only cost
-; (ordinary shell RAM, HISTORY_MAX_LINES*2 bytes -- 50 vs 32, no kernel-
-; margin impact at all) and hist_split's own shift-on-full logic is
-; already fully parametric (no hardcoded 16 anywhere in the actual
-; logic, confirmed by grep before changing this). HISTORY_LOAD_BUDGET
-; deliberately left at 255, NOT raised to match -- at a true ~10-char
-; command average, 255 bytes realistically holds something in the
-; low-to-mid 20s of lines, not a guaranteed 25 every time, but raising
-; the budget past 255 would cross the single-byte-arithmetic boundary
-; above and require widening hist_loaded_len/hist_split's countdown to
-; a real word -- a genuine (if modest) change to code that's already
-; had two real hardware-found bugs in its history, not worth the added
-; risk just to guarantee the last few slots of headroom.
+; HISTORY_MAX_LINES raised 25->50 in the same pass, to match: at a
+; true ~10-char command average, 512 bytes realistically holds
+; something in the low-to-mid 40s-50s of lines, comfortably supporting
+; a cap of 50 (255 bytes only reached the low-to-mid 20s against its
+; old cap of 25, so the old pairing was already a bit undersized).
+; hist_lines[]'s only cost is ordinary shell RAM (HISTORY_MAX_LINES*2
+; bytes -- 100 vs 50, no kernel-margin impact) and hist_split's own
+; shift-on-full logic is already fully parametric (no hardcoded
+; MAX_LINES value anywhere in the actual logic).
 ;------------------------------------------------------------------
-HISTORY_LOAD_BUDGET: equ 255
-HISTORY_MAX_LINES:   equ 25
+HISTORY_LOAD_BUDGET: equ 512
+HISTORY_MAX_LINES:   equ 50
+
+; HISTORY_COMPACT_THRESHOLD: once history.dat's real on-disk size (via
+; K_STAT) reaches this many bytes, hist_compact rewrites it down to
+; just the tail hist_load would read anyway -- recall never looks
+; further back than HISTORY_LOAD_BUDGET bytes from the end, so keeping
+; more than that provides zero recall value, only unbounded growth
+; (and, past ~32KB, silently breaks recall entirely -- see
+; K_FILE_SEEK's own documented range limit in hist_load's comment).
+; Deliberately well above HISTORY_LOAD_BUDGET (same ~4x margin as
+; before the 2026-07-25 budget raise) so compaction doesn't run on
+; nearly every append.
+HISTORY_COMPACT_THRESHOLD: equ 2048
 
 ;------------------------------------------------------------------
 ; read_line_with_history: see the section header above.
@@ -2765,7 +3954,11 @@ hist_load:
 
             mov     rf, hist_loaded_len
             ldi     0
-            str     rf                  ; safe default if any early
+            str     rf
+            inc     rf
+            str     rf                  ; safe default (both bytes --
+                                        ; a word since the 2026-07-25
+                                        ; budget widening) if any early
                                         ; exit below skips the real read
                                         ; (hist_split then just scans 0
                                         ; bytes)
@@ -2896,9 +4089,14 @@ hl_have_start:
             call    K_FILE_READ         ; RC = bytes actually read
 
             mov     rf, hist_loaded_len
+            ghi     rc
+            str     rf
+            inc     rf
             glo     rc
-            str     rf                  ; single byte -- always < 256
-                                        ; since we requested < 256
+            str     rf                  ; word (2026-07-25 widening) --
+                                        ; RC = bytes actually read,
+                                        ; always <= HISTORY_LOAD_BUDGET
+                                        ; by construction
 
 hl_close:
             mov     rd, hist_fcb
@@ -2934,12 +4132,24 @@ hist_split:
             plo     r9                  ; R9.0 = hist_count so far
 
             mov     rf, hist_loaded_len
+            lda     rf
+            phi     rc
             ldn     rf
-            plo     rc                  ; RC.0 = remaining bytes
+            plo     rc                  ; RC = remaining bytes (word,
+                                        ; 2026-07-25 widening)
 
 hsplit_loop:
             glo     rc
-            lbz     hsplit_end          ; no bytes left: done
+            lbnz    hsplit_have_bytes   ; low byte nonzero: definitely
+                                        ; more than 0 left, regardless
+                                        ; of the high byte
+            ghi     rc
+            lbz     hsplit_end          ; both bytes 0: truly done
+                                        ; (falls through to
+                                        ; hsplit_have_bytes otherwise --
+                                        ; high nonzero, low zero, e.g.
+                                        ; RC=256, still bytes left)
+hsplit_have_bytes:
 
             ldn     r7                  ; D = *scan_ptr
             xri     10                  ; is it LF?
@@ -3074,9 +4284,11 @@ hsplit_next_line:
 
 hsplit_advance:
             inc     r7
-            glo     rc
-            smi     1
-            plo     rc
+            sub16   rc, 1               ; word decrement (2026-07-25
+                                        ; widening) -- must borrow
+                                        ; across the byte boundary
+                                        ; correctly, unlike the old
+                                        ; single-byte smi
             lbr     hsplit_loop
 
 hsplit_end:
@@ -3152,7 +4364,177 @@ ha_path_done:
             mov     rd, hist_fcb
             call    K_FILE_CLOSE
 
+            call    hist_compact        ; bound history.dat's growth --
+                                        ; a no-op unless it's grown
+                                        ; past HISTORY_COMPACT_THRESHOLD
+
 ha_done:
+            rtn
+
+;------------------------------------------------------------------
+; hist_compact: if history.dat has grown past
+; HISTORY_COMPACT_THRESHOLD bytes, rewrite it down to just the tail
+; hist_load would ever read anyway (recall never looks further back
+; than HISTORY_LOAD_BUDGET bytes from the end, so keeping more than
+; that provides zero value) via a crash-safe temp-file-then-rename
+; swap, matching lib/env.asm's own setenv/unsetenv pattern. Called
+; from hist_append right after a successful append+close.
+; Args:    none (reads hist_path, already built by the caller)
+; Returns: nothing. Any failure along the way (can't stat, can't
+;          create the temp file, delete/rename failure) is given up
+;          on silently, leaving the real history.dat exactly as it
+;          was (oversized but intact) -- compaction is a housekeeping
+;          nicety, never allowed to risk losing real history data.
+;------------------------------------------------------------------
+hist_compact:
+            mov     rf, hist_path
+            mov     rd, stat_result     ; reuse the shared scratch
+                                        ; buffer -- not live here,
+                                        ; check_exists hasn't run yet
+                                        ; this command cycle
+            call    K_STAT
+            lbdf    hc_done             ; can't stat (shouldn't
+                                        ; happen, we just closed it):
+                                        ; skip
+
+            mov     rf, stat_result
+            add16   rf, DIRENT_SIZE
+            lda     rf                  ; byte 0 (MSB of the 4-byte
+                                        ; big-endian size)
+            lbnz    hc_go               ; nonzero: file is >= 16MB,
+                                        ; way over any real threshold
+            lda     rf                  ; byte 1
+            lbnz    hc_go               ; nonzero: >= 64KB, also way
+                                        ; over
+            lda     rf                  ; byte 2 (high byte of the
+                                        ; low 16 bits)
+            phi     rd
+            ldn     rf                  ; byte 3 (low byte)
+            plo     rd                  ; RD = size (low 16 bits) --
+                                        ; the top 2 bytes are 0, so
+                                        ; this IS the real size
+            sub16   rd, HISTORY_COMPACT_THRESHOLD
+            lbnf    hc_done             ; DF=0 (borrow): under
+                                        ; threshold, nothing to do
+
+hc_go:
+            call    hist_load           ; ALWAYS does a fresh
+                                        ; tail-read+split when called
+                                        ; directly -- the "only once
+                                        ; per session" guard lives in
+                                        ; hist_recall_up, checked
+                                        ; BEFORE it decides to call
+                                        ; hist_load, not inside
+                                        ; hist_load itself -- so this
+                                        ; picks up the line just
+                                        ; appended, whether or not
+                                        ; recall already ran earlier
+                                        ; in this same command cycle.
+                                        ; hist_lines[]/hist_count now
+                                        ; hold exactly the tail worth
+                                        ; keeping.
+
+            ; build hist_tmp_path = "<same drive:>/bin/history.tmp"
+            ; -- copy hist_path's own already-built drive+colon
+            ; prefix rather than a second K_GETSHELLDRIVE call
+            mov     rf, hist_path
+            lda     rf                  ; D = drive letter, RF now ->
+                                        ; the ':' byte
+            plo     r8                  ; stash (R8 survives the mov
+                                        ; below; gotcha #4)
+            mov     rb, hist_tmp_path
+            glo     r8
+            str     rb
+            inc     rb
+            ldn     rf                  ; D = ':' (RF unmoved by ldn)
+            str     rb
+            inc     rb
+            mov     rd, hist_tmp_suffix
+hc_path_loop:
+            lda     rd
+            str     rb
+            lbz     hc_path_done
+            inc     rb
+            lbr     hc_path_loop
+hc_path_done:
+
+            mov     rd, hist_tmp_fcb
+            mov     ra, hist_tmp_iobuf
+            mov     rf, hist_tmp_path
+            ldi     1                   ; mode 1: create-or-overwrite
+            call    K_FILE_OPEN
+            lbdf    hc_done             ; can't create temp: give up,
+                                        ; real history.dat left as-is
+
+            mov     rf, hc_i
+            ldi     0
+            str     rf
+
+hc_write_loop:
+            mov     rf, hc_i
+            ldn     rf
+            str     r2
+            mov     rf, hist_count
+            ldn     rf
+            sm                          ; D = hc_i - hist_count
+            lbz     hc_write_done       ; hc_i reached hist_count
+
+            mov     rf, hc_i
+            ldn     rf
+            plo     rd
+            ldi     0
+            phi     rd
+            shl16   rd                  ; RD = hc_i * 2
+
+            mov     rf, hist_lines
+            add16   rf, rd              ; RF = &hist_lines[hc_i]
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = hist_lines[hc_i] (RD's
+                                        ; old offset value is already
+                                        ; consumed by the add16 above)
+
+            mov     rf, rd
+            call    shell_strlen        ; RC = length, RF unchanged
+            mov     rd, hist_tmp_fcb
+            call    K_FILE_WRITE
+
+            mov     rf, hist_nl_byte
+            ldi     1
+            plo     rc
+            ldi     0
+            phi     rc
+            mov     rd, hist_tmp_fcb
+            call    K_FILE_WRITE        ; trailing LF
+
+            mov     rf, hc_i
+            ldn     rf
+            adi     1
+            str     rf                  ; hc_i++ (safe -- nothing
+                                        ; checks DF right after)
+            lbr     hc_write_loop
+
+hc_write_done:
+            mov     rd, hist_tmp_fcb
+            call    K_FILE_CLOSE
+
+            ; swap: delete the old file, rename the temp into place.
+            ; A crash between these two leaves at worst no
+            ; history.dat for one boot -- same caveat lib/env.asm's
+            ; own setenv/unsetenv already accept.
+            mov     rf, hist_path
+            call    K_FILE_DELETE
+            lbdf    hc_done             ; delete failed: give up,
+                                        ; leaving BOTH files present
+                                        ; (oversized original intact,
+                                        ; harmless orphan .tmp)
+
+            mov     rf, hist_tmp_path
+            mov     rd, hist_name_bare
+            call    K_FILE_RENAME
+
+hc_done:
             rtn
 
 tok_errlvl_pat:     db      "ERRORLEVEL",0  ; letters only -- the
@@ -3161,6 +4543,20 @@ tok_errlvl_pat:     db      "ERRORLEVEL",0  ; letters only -- the
                                             ; not folded (see
                                             ; tok_ordinary's own header)
 tok_errlvl_buf:     ds      4           ; up to 3 decimal digits + NUL
+
+; check_special (IF/GOTO dispatch) scratch data
+if_idx:             db      0           ; current argv[] index being
+                                        ; consumed while parsing IF's
+                                        ; own condition
+if_negate:          db      0           ; 0/1 -- IF NOT seen?
+if_argc:            db      0           ; a copy of RUN_ARGC's own low
+                                        ; byte, snapshotted once at
+                                        ; if_start so it survives
+                                        ; if_idx's own advancement
+if_pat_if:          db      "IF",0
+if_pat_not:         db      "NOT",0
+if_pat_exist:       db      "EXIST",0
+if_pat_goto:        db      "GOTO",0
 
 hist_fcb:           ds      FCB_LEN
 hist_iobuf:         ds      FCB_IOBUF_LEN
@@ -3171,7 +4567,7 @@ hist_buf:           ds      HISTORY_LOAD_BUDGET
 hist_lines:         ds      HISTORY_MAX_LINES * 2
 hist_count:         db      0
 hist_loaded:        db      0
-hist_loaded_len:     db      0
+hist_loaded_len:     dw      0
 hist_recalling:     db      0
 hist_index:         db      0
 hist_saved_line:    ds      128
@@ -3179,5 +4575,12 @@ hist_filesize:      dw      0
 hist_start_offset:  dw      0
 hist_cur_len:       db      0
 hist_erase_count:   db      0
+
+hist_tmp_fcb:       ds      FCB_LEN
+hist_tmp_iobuf:     ds      FCB_IOBUF_LEN
+hist_tmp_path:      ds      24
+hist_tmp_suffix:    db      "/bin/history.tmp",0
+hist_name_bare:     db      "history.dat",0
+hc_i:               db      0
 
             end     start

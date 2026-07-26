@@ -52,9 +52,18 @@
 ; FCB's own IOBUF holds a real, current sector; cleared on open, on
 ; any cluster/sector wrap, and on seek.
 ;
-; file_read/file_write support file sizes and positions up to 64K
-; (only the low 16 bits of FCB_FSIZE/FCB_FPOS are used) -- this
-; hardware's RAM makes anything larger moot in practice.
+; file_read/file_write/file_seek/file_open's own append-mode
+; positioning all support file sizes and positions up to the full 32
+; bits FCB_FSIZE/FCB_FPOS hold (2026-07-26 -- previously only the low
+; 16 bits were used). Motivated by porting Elf/OS software with data
+; files larger than 64K; this hardware's own RAM never needs to hold
+; such a file all at once, since access is always chunked through a
+; single 512-byte sector buffer regardless of the file's total size.
+; The cluster-hop arithmetic used to reach a given position is only
+; exercised up to a documented ~32MB in practice (see
+; fopen_check_append's/file_seek's own comments), a deliberate,
+; reasonable scope limit rather than full 32-bit correctness for a
+; case this hardware will never encounter.
 ;
 ; file_write only extends/overwrites already-existing files (their
 ; directory entry, and first cluster if non-empty, must already
@@ -84,6 +93,8 @@
             extrn   dir_clust
             extrn   dir_sect
             extrn   dir_eptr
+            extrn   dir_eleft
+            extrn   dir_lfn_ok
             extrn   dir_buf
             extrn   path_resolve
             extrn   _cluster_to_lba
@@ -123,6 +134,19 @@
             extrn   fc_new_attr
             extrn   fc_new_cluster
             extrn   fc_new_size
+            extrn   fc_base8
+            extrn   fc_namepart_len
+            extrn   fc_suffix_n
+            extrn   fc_suffix_tens
+            extrn   fc_suffix_ones
+            extrn   fc_collision
+            extrn   fc_saved_sect
+            extrn   fc_saved_eptr
+            extrn   fc_saved_eleft
+            extrn   fc_saved_lba
+            extrn   fc_saved_lfnok
+            extrn   csc_sector_count
+            extrn   _check_shortname_collision
             extrn   _gen_short_name
             extrn   _classify_char
             extrn   _lfn_fill_segment
@@ -176,8 +200,14 @@
 ; source, unlike `extrn`/`public` which apply file-wide regardless of
 ; position.
 #define     fa_boff             _shared_scratch
-#define     fa_cluster_idx      _shared_scratch+2
-#define     fa_sector_in_clust  _shared_scratch+3
+#define     fa_cluster_idx      _shared_scratch+2 ; widened 1->2 bytes
+                                        ; 2026-07-26 (>64K support) --
+                                        ; still fits well within this
+                                        ; block's existing 9-byte size
+                                        ; (fa_boff(2)+fa_cluster_idx(2)+
+                                        ; fa_sector_in_clust(1)=5, vs.
+                                        ; ren_*'s own 9-byte need)
+#define     fa_sector_in_clust  _shared_scratch+4
 #define     fdel_next_clust     _shared_scratch
 #define     fdel_chksum         _shared_scratch+2
 #define     dcr_parent          _shared_scratch
@@ -538,115 +568,216 @@ fopen_check_append:
             ldn     rf
             plo     rb                  ; RB = fcb slot base
 
+            ; --- load the full 32-bit FSIZE (2026-07-26, >64K support
+            ; -- was low-word-only). RD:R8 = FSIZE (RD=high, R8=low). ---
             mov     rf, rb
             add16   rf, FCB_FSIZE
-            add16   rf, 2
             lda     rf
             phi     rd
+            lda     rf
+            plo     rd
+            lda     rf
+            phi     r8
             ldn     rf
-            plo     rd                  ; RD = FSIZE (low word)
+            plo     r8
 
+            glo     r8
+            lbnz    fopen_append_have_size
+            ghi     r8
+            lbnz    fopen_append_have_size
             glo     rd
             lbnz    fopen_append_have_size
             ghi     rd
-            lbz     fopen_no_append     ; FSIZE == 0: nothing to do
+            lbz     fopen_no_append     ; FSIZE == 0 (all 4 bytes): nothing to do
 fopen_append_have_size:
-            sub16   rd, 1               ; RD = last_byte_index
+            ; last_byte_index = FSIZE - 1, full 32-bit (FSIZE > 0
+            ; confirmed above, so this can't underflow past 0)
+            sub16   r8, 1
+            lbdf    fa_lbi_no_borrow
+            sub16   rd, 1
+fa_lbi_no_borrow:
+            ; RD:R8 = last_byte_index
 
-            ; sector_index (0-127) = last_byte_index >> 9
-            ;                       = (last_byte_index.hi) >> 1
-            ghi     rd
-            shr
-            plo     rc                  ; RC.0 = sector_index
-
-            ; boff (0-511) = last_byte_index & 511
-            glo     rd
-            plo     r8
-            ghi     rd
-            ani     1
-            phi     r8                  ; R8 = boff
+            ; boff (0-511) = last_byte_index & 511 -- direct byte ops,
+            ; no shift needed
             mov     rf, fa_boff
             ghi     r8
+            ani     1
             str     rf
             inc     rf
             glo     r8
-            str     rf                  ; fa_boff = boff (stashed --
-                                        ; R8 is needed as scratch again
-                                        ; below, before fat_get's own
-                                        ; clobber makes this moot anyway)
+            str     rf                  ; fa_boff = last_byte_index & 511
 
-            ; cluster_index (0-127) = sector_index >> spc_shift
+            ; sector_index = last_byte_index >> 9, done as >>8 (a pure
+            ; byte reassignment, no shift instructions needed) then >>1
+            ; (a SHRC chain from the MSB down to the LSB) -- verified
+            ; against a Python simulation across 3000+ random 32-bit
+            ; values plus edge cases before ever writing this. >>8:
+            ; new R9=(0,old RD.hi), new R7=(old RD.lo,old R8.hi) --
+            ; old R8.lo is the byte that falls off the bottom (already
+            ; captured by fa_boff above, not needed again).
             ;
-            ; BUG FIX: this loop used to carry the partially-shifted
-            ; value through D across iterations ("glo rc" once before
-            ; the loop, then just "shr" each time) -- but the loop's
-            ; OWN condition check ("glo r9", reading the shift
-            ; counter) clobbers D on every iteration, including the
-            ; first, before "shr" ever runs. So "shr" always ended up
-            ; shifting the DECREMENTING COUNTER's own value, not
-            ; sector_index, and since that counter always reaches 0
-            ; through the very same shifts+decrements, the loop
-            ; always produced cluster_index=0 regardless of the true
-            ; sector_index -- for every spc value, not just spc=1
-            ; (confirmed via a hardware diagnostic trace: sclust and
-            ; the computed target cluster came out identical, i.e.
-            ; zero hops, on a file whose size clearly needed
-            ; several). Fixed by keeping the shifting value in a real
-            ; register instead of D, reloading it into D fresh
-            ; immediately before each "shr" and storing the result
-            ; straight back, so the loop-condition check's own D
-            ; clobber in between iterations can't touch it.
-            ; RC.0 (sector_index) is still needed below, for
-            ; sector_in_clust -- so R8 (free here; the earlier boff
-            ; computation that used it has already been stashed to
-            ; fa_boff in memory) is the shift accumulator instead,
-            ; leaving RC untouched.
-            mov     rf, bpb_spc_shift
-            ldn     rf
-            plo     r9                  ; R9.0 = spc_shift (loop count)
-            glo     rc                  ; D = sector_index
-            plo     r8                  ; R8.0 = shift accumulator
-fa_cidx_shr:
-            glo     r9
-            lbz     fa_cidx_done
-            glo     r8                  ; D = accumulator (reloaded
-                                        ; fresh, not carried through
-                                        ; the loop-condition check)
-            shr
-            plo     r8                  ; R8.0 = shifted value
-            dec     r9
-            lbr     fa_cidx_shr
-fa_cidx_done:
-            glo     r8                  ; D = cluster_index
-            ; BUG FIX: "mov rf, fa_cluster_idx" itself clobbers D (its
-            ; own final LDI leaves D = fa_cluster_idx's low address
-            ; byte), so the shifted cluster_index just computed in D
-            ; would not survive to "str rf" below unless stashed
-            ; first -- same class of bug as _file_create's checksum
-            ; fix. R9 is free here (its job as the shift-loop counter
-            ; is done, having reached 0).
-            plo     r9                  ; stash cluster_index
-            mov     rf, fa_cluster_idx
-            glo     r9                  ; D = cluster_index (reloaded)
-            str     rf                  ; fa_cluster_idx = cluster_index
+            ; REAL BUG, caught during a second, more careful manual
+            ; re-trace after the first draft had already assembled and
+            ; passed every sweep clean (a reminder that a clean build
+            ; and clean sweeps only rule out the bug *classes* those
+            ; sweeps check for, not a plain logic error like this one):
+            ; the first draft read "glo r8" here (R8's LOW byte, P0 --
+            ; the byte that's supposed to be DROPPED by this >>8 shift,
+            ; not carried forward) instead of "ghi r8" (R8's HIGH byte,
+            ; P1 -- the byte this step actually needs). Caught by
+            ; re-deriving R8's own byte layout from its load sequence
+            ; above (lda/phi=P1 into R8.hi, ldn/plo=P0 into R8.lo) and
+            ; comparing against the already-correct Python model, which
+            ; had used P1 for this step from the start -- the assembly
+            ; just didn't match its own verified model on the first
+            ; pass. Re-verified afterward with a mechanical 1802-
+            ; instruction-level simulator (not just a re-read) across
+            ; 2000+ random 32-bit values for this step alone, plus the
+            ; full boff/sector_index/cluster_index/sector_in_clust
+            ; pipeline together.
+            ghi     r8                  ; D = old R8.hi (P1)
+            plo     r7                  ; R7.lo = P1 (temp, will be
+                                        ; overwritten by R7.hi next --
+                                        ; order matters: read before
+                                        ; the phi below touches R7)
+            glo     rd                  ; D = old RD.lo (P2)
+            phi     r7                  ; R7.hi = P2  => R7 = (P2,P1)
+            ghi     rd                  ; D = old RD.hi (P3)
+            plo     r9                  ; R9.lo = P3
+            ldi     0
+            phi     r9                  ; R9 = (0,P3)  => R9:R7 = last_byte_index >> 8
 
-            ; sector_in_clust = sector_index & (spc-1)
+            ghi     r9
+            shr
+            phi     r9
+            glo     r9
+            shrc
+            plo     r9
+            ghi     r7
+            shrc
+            phi     r7
+            glo     r7
+            shrc
+            plo     r7                  ; R9:R7 = sector_index (>>9).
+                                        ; R9 (sector_index's own high
+                                        ; word) is discarded from here
+                                        ; on -- deliberate, documented
+                                        ; scope limit (see below).
+
+            ; REAL BUG, FOUND AND FIXED (2026-07-27): sector_in_clust
+            ; must be computed HERE, using sector_index (R7) BEFORE the
+            ; cluster_index shift loop just below destroys it. The
+            ; original code computed sector_in_clust AFTER that loop,
+            ; reading R7 on the assumption it still held sector_index --
+            ; but the shift loop overwrites R7 with cluster_index
+            ; instead, so sector_in_clust was actually being computed
+            ; from the WRONG value (cluster_index masked by spc-1, not
+            ; sector_index masked by spc-1). This was invisible on
+            ; every card tested before this session: spc=1 on every
+            ; prior test card means bpb_spc_shift=0, so the shift loop
+            ; below runs ZERO iterations and never touches R7 -- purely
+            ; by luck, not by correctness. First exposed hardware-side
+            ; on a 512MB card with a real, legitimate spc=128 (FAT16's
+            ; own ~65525-cluster ceiling actually forces a cluster size
+            ; this large for a volume this size -- confirmed by reading
+            ; boot/krnboot.asm's own BPB-parsing code, which reads the
+            ; textbook-correct boot-sector byte offset). A diagnostic
+            ; showed a 60000-byte file's own append-mode repositioning
+            ; computing FCB_CSECT=0 instead of the correct 117,
+            ; explaining a silently-truncated FAT chain (subsequent
+            ; writes landing in the wrong sector-within-cluster,
+            ; eventually overwriting/aliasing instead of genuinely
+            ; extending the file). sector_in_clust = sector_index &
+            ; (spc-1) -- low byte of R7 only, since spc-1 is always a
+            ; small single-byte mask.
             mov     rf, bpb_spc
             ldn     rf
             smi     1
             str     r2                  ; [R2] = spc-1 (mask)
-            glo     rc                  ; D = sector_index (still in RC)
+            glo     r7                  ; D = sector_index's low byte
+                                        ; (R7 still holds sector_index
+                                        ; here -- the shift loop that
+                                        ; would destroy it hasn't run
+                                        ; yet)
             and
-            ; BUG FIX: same as above -- stash the AND result (RC's
-            ; old sector_index value isn't needed again) before the
-            ; "mov rf, fa_sector_in_clust" that would otherwise
-            ; clobber D first.
-            plo     rc
+            ; BUG FIX (preserved from the original): "mov rf,
+            ; fa_sector_in_clust" itself clobbers D, so the AND result
+            ; must be stashed first.
+            plo     r9                  ; stash (R9's own earlier value
+                                        ; -- sector_index's discarded
+                                        ; high word -- is free to reuse
+                                        ; here; its loop-counter job for
+                                        ; cluster_index hasn't started
+                                        ; yet either)
             mov     rf, fa_sector_in_clust
-            glo     rc                  ; D = result (reloaded)
+            glo     r9                  ; D = result (reloaded)
             str     rf                  ; fa_sector_in_clust = result
 
-            ; --- walk fat_get fa_cluster_idx times from FCB_SCLUST ---
+            ; cluster_index = sector_index >> spc_shift -- operates on
+            ; R7 (sector_index's low 16 bits) only, supporting files up
+            ; to 32MB even at the smallest possible cluster size
+            ; (spc=1), far beyond anything realistic on this hardware;
+            ; a genuinely 32-bit-wide sector_index was judged not worth
+            ; the extra complexity for a case this project will never
+            ; actually hit. Same "reload fresh right before use, don't
+            ; trust D across the loop condition's own clobber" shape
+            ; the original single-byte version already had to learn
+            ; the hard way (see the preserved history below), now
+            ; widened to a 16-bit SHR/SHRC chain.
+            ;
+            ; BUG FIX (original, single-byte version): this loop used
+            ; to carry the partially-shifted value through D across
+            ; iterations ("glo rc" once before the loop, then just
+            ; "shr" each time) -- but the loop's OWN condition check
+            ; ("glo r9", reading the shift counter) clobbers D on every
+            ; iteration, including the first, before "shr" ever runs.
+            ; So "shr" always ended up shifting the DECREMENTING
+            ; COUNTER's own value, not sector_index, and since that
+            ; counter always reaches 0 through the very same
+            ; shifts+decrements, the loop always produced
+            ; cluster_index=0 regardless of the true sector_index --
+            ; for every spc value, not just spc=1 (confirmed via a
+            ; hardware diagnostic trace). Fixed by keeping the
+            ; shifting value in a real register, reloading it into D
+            ; fresh immediately before each "shr", storing straight
+            ; back -- the same discipline this widened version follows.
+            mov     rf, bpb_spc_shift
+            ldn     rf
+            plo     r9                  ; R9.0 = spc_shift (loop count
+                                        ; -- R9's own earlier value,
+                                        ; sector_index's discarded high
+                                        ; word, is no longer needed)
+fa_cidx_shr:
+            glo     r9
+            lbz     fa_cidx_done
+            ghi     r7                  ; D = accumulator high byte
+                                        ; (reloaded fresh, not carried
+                                        ; through the loop-condition
+                                        ; check's own D clobber)
+            shr
+            phi     r7
+            glo     r7                  ; D = accumulator low byte
+            shrc
+            plo     r7                  ; R7 = shifted value (16-bit)
+            dec     r9
+            lbr     fa_cidx_shr
+fa_cidx_done:
+            ; R7 = cluster_index (16-bit) -- write to fa_cluster_idx
+            ; (now 2 bytes, was 1 -- see its own #define comment).
+            ; sector_in_clust was already computed and stored above,
+            ; before this loop had a chance to overwrite R7 -- see the
+            ; 2026-07-27 bug-fix comment near this proc's own start.
+            mov     rf, fa_cluster_idx
+            ghi     r7
+            str     rf
+            inc     rf
+            glo     r7
+            str     rf                  ; fa_cluster_idx = cluster_index
+
+            ; --- walk fat_get fa_cluster_idx times from FCB_SCLUST --
+            ; RC now holds a 16-bit hop count (was 8-bit), matching
+            ; fa_cluster_idx's own widened size ---
             mov     rf, rb
             add16   rf, FCB_SCLUST
             lda     rf
@@ -655,11 +786,16 @@ fa_cidx_done:
             plo     rd                  ; RD = FCB_SCLUST
 
             mov     rf, fa_cluster_idx
+            lda     rf
+            phi     rc
             ldn     rf
-            plo     rc                  ; RC.0 = hops remaining
+            plo     rc                  ; RC = hops remaining (16-bit)
 fa_walk_loop:
             glo     rc
+            lbnz    fa_walk_go
+            ghi     rc
             lbz     fa_walk_done
+fa_walk_go:
             push    r9
             push    ra
             push    rb
@@ -730,21 +866,24 @@ fa_no_sector_wrap:
             glo     r8
             str     rf                  ; FCB_BOFF = new_boff
 
+            ; FCB_FPOS = FCB_FSIZE, straight 4-byte copy (2026-07-26,
+            ; >64K support -- both fields share the same MSB-first
+            ; layout, so no reversal needed)
             mov     rf, rb
-            add16   rf, FCB_FSIZE
-            add16   rf, 2
+            add16   rf, FCB_FSIZE       ; RF = source (FSIZE)
+            mov     r8, rb
+            add16   r8, FCB_FPOS        ; R8 = dest (FPOS)
             lda     rf
-            phi     r8
+            str     r8
+            inc     r8
+            lda     rf
+            str     r8
+            inc     r8
+            lda     rf
+            str     r8
+            inc     r8
             ldn     rf
-            plo     r8                  ; R8 = FSIZE (low word)
-            mov     rf, rb
-            add16   rf, FCB_FPOS
-            add16   rf, 2
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_FPOS (low word) = FSIZE
+            str     r8                  ; FCB_FPOS (full 32-bit) = FSIZE
 
 fopen_no_append:
             clc                         ; DF = 0, success -- D is
@@ -1258,6 +1397,288 @@ gsn_build_ext_done:
             endp
 
 ; ----------------------------------------------------------------
+; _check_shortname_collision: does fc_shortname (the just-generated
+; 8.3 fallback short name) already exist as some OTHER entry's raw
+; short name in the CURRENT directory?
+;
+; Needed because _gen_short_name's fallback is a plain truncation with
+; no numeric-tail uniqueness handling of its own (see its own header
+; comment) -- two different long names can truncate to the identical
+; first-8-characters, a genuine FAT16 spec violation. fsck.fat
+; correctly (and destructively) "fixes" this by auto-renaming one of
+; the two entries, which can orphan its LFN -- found via a real
+; hardware fsck report, 2026-07-25 ("Duplicate directory entry",
+; test_args1.bat/test_args2.bat both truncating to "TEST_ARG"). This
+; routine is the detection half; _file_create's own retry loop (below)
+; does the actual ~N mutation.
+;
+; Runs its own full dir_open()+raw scan of the SAME directory
+; _file_create's caller already scanned to reach the terminator --
+; disturbing dir.asm's live scan state (dir_sect/dir_eptr/dir_eleft/
+; dir_cur_lba/dir_buf/dir_lfn_ok), which _file_create's own later code
+; (fc_use_current/fc_next_sector) depends on describing the
+; terminator's own position. Saved before the scan and restored
+; (dir_buf via a fresh f_ideread, not a literal copy -- the scan
+; overwrites it with whatever sector it last examined) immediately
+; after -- same "save real state, do risky work, restore before the
+; caller's own tail runs" shape as dir_remove's own empty-check scan
+; around _delete_located_entry (see that proc for the precedent this
+; mirrors).
+;
+; Compares RAW 11-byte DE_NAME fields directly (skipping LFN
+; continuation entries and volume labels) -- deliberately NOT
+; dir_read's LFN-preferred display name, which would be exactly the
+; wrong thing to compare here: a short-name collision is about the
+; SHORT name, which dir_read only ever exposes for entries that don't
+; have a valid LFN of their own.
+;
+; Args:    none (reads fc_shortname, dir_clust)
+; Returns: DF = 0, no collision (fc_shortname is free to use)
+;          DF = 1, collision (some other entry already has this exact
+;          11-byte short name) -- also returned (conservatively) if
+;          the dir_buf restore step itself hits an I/O error, so a
+;          caller never proceeds with dir_buf not really describing
+;          the terminator
+; Modifies: R7, R8, R9, RA, RB, RD, RF
+; ----------------------------------------------------------------
+            proc    _check_shortname_collision
+
+            ; --- save dir.asm's live scan state ---
+            mov     rf, dir_sect
+            ldn     rf
+            plo     r9
+            mov     rf, fc_saved_sect
+            glo     r9
+            str     rf
+
+            mov     rf, dir_eptr
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, fc_saved_eptr
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, dir_eleft
+            ldn     rf
+            plo     r9
+            mov     rf, fc_saved_eleft
+            glo     r9
+            str     rf
+
+            mov     rf, dir_cur_lba
+            mov     rb, fc_saved_lba
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+
+            mov     rf, dir_lfn_ok
+            ldn     rf
+            plo     r9
+            mov     rf, fc_saved_lfnok
+            glo     r9
+            str     rf
+
+            mov     rf, csc_sector_count
+            ldi     0
+            str     rf
+
+            ; --- fresh scan of the same directory, from the start ---
+            mov     rf, dir_clust
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = dir_clust (unchanged --
+                                        ; still the same directory)
+            call    dir_open
+
+csc_loop:
+            mov     rf, dir_eleft
+            ldn     rf
+            lbnz    csc_check_entry
+
+            call    _dir_next_sector
+            lbdf    csc_no_collision    ; end of directory: no match
+
+            mov     ra, dir_buf
+            mov     rf, dir_eleft
+            ldi     DIR_ENT_PER_SEC
+            str     rf
+
+            ; hard cap (64 sectors -- far more than any realistic
+            ; root/subdirectory needs) so this scan can never truly
+            ; hang regardless of any future bug elsewhere in this
+            ; routine. A cap hit is treated as "no collision" (the
+            ; safe fallback -- identical to this feature's pre-fix
+            ; behavior, and it also stops _file_create's own retry
+            ; loop from compounding a slow scan across up to 9 tries).
+            push    ra
+            mov     rf, csc_sector_count
+            ldn     rf
+            adi     1
+            str     rf
+            plo     r9                  ; stash new count -- POP's own
+                                        ; macro expansion (IRX/LDXA/
+                                        ; PLO/LDX/PHI) clobbers D via
+                                        ; its own final LDX, gotcha #4
+            pop     ra
+            glo     r9                  ; D = new sector count (reloaded)
+            smi     64
+            lbdf    csc_capped
+
+csc_check_entry:
+            ldn     ra
+            lbz     csc_no_collision    ; '$00' terminator: done
+
+            xri     $E5
+            lbz     csc_advance         ; deleted: skip
+
+            mov     rf, ra
+            add16   rf, DE_ATTR
+            ldn     rf                  ; D = attribute byte
+            plo     r9                  ; stash it
+            xri     ATTR_LFN
+            lbz     csc_advance         ; LFN continuation: skip
+
+            glo     r9
+            ani     ATTR_VOLID
+            lbnz    csc_advance         ; volume label: skip
+
+            ; --- compare 11 raw bytes: ra[0..10] vs fc_shortname[0..10] ---
+            mov     rf, ra
+            mov     rb, fc_shortname
+            ldi     11
+            plo     r8                  ; R8.0 = bytes remaining
+csc_cmp:
+            glo     r8
+            lbz     csc_collision_found ; all 11 matched
+
+            lda     rf
+            str     r2
+            lda     rb
+            sm                          ; equality check only -- SM's
+                                        ; subtraction direction doesn't
+                                        ; matter here, only zero/nonzero
+            lbnz    csc_advance         ; mismatch: not this entry
+
+            dec     r8
+            lbr     csc_cmp
+
+csc_advance:
+            add16   ra, DIR_ENT_SIZE
+            mov     rf, dir_eleft
+            ldn     rf
+            smi     1
+            str     rf
+            lbr     csc_loop
+
+csc_collision_found:
+            mov     rf, fc_collision
+            ldi     1
+            str     rf
+            lbr     csc_restore
+
+csc_capped:
+            ; hard iteration cap reached (see the note above csc_loop)
+            ; -- fall straight into the same path csc_no_collision uses
+
+csc_no_collision:
+            mov     rf, fc_collision
+            ldi     0
+            str     rf
+
+csc_restore:
+            ; --- restore dir.asm's live scan state ---
+            mov     rf, fc_saved_sect
+            ldn     rf
+            plo     r9
+            mov     rf, dir_sect
+            glo     r9
+            str     rf
+
+            mov     rf, fc_saved_eptr
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, dir_eptr
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, fc_saved_eleft
+            ldn     rf
+            plo     r9
+            mov     rf, dir_eleft
+            glo     r9
+            str     rf
+
+            mov     rf, fc_saved_lba
+            mov     rb, dir_cur_lba
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+
+            mov     rf, fc_saved_lfnok
+            ldn     rf
+            plo     r9
+            mov     rf, dir_lfn_ok
+            glo     r9
+            str     rf
+
+            ; restore dir_buf's real content (the terminator's own
+            ; sector) via a fresh read -- a literal byte copy isn't
+            ; available since the scan above overwrote it with
+            ; whatever sector it last examined
+            mov     rf, fc_saved_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+            mov     rf, dir_buf
+            call    f_ideread
+            lbdf    csc_ioerr
+
+            mov     rf, fc_collision
+            ldn     rf
+            lbz     csc_ret_no
+            stc
+            rtn
+csc_ret_no:
+            clc
+            rtn
+
+csc_ioerr:
+            ; treat a restore failure as "collision" -- safe: the
+            ; caller either retries with a mutated name (harmless) or
+            ; ultimately fails cleanly, but never proceeds with a
+            ; dir_buf that doesn't really describe the terminator
+            stc
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; _file_create: create a new, empty directory entry for fo_name
 ; within the CURRENT directory search state, generating LFN entries
 ; if the name isn't already a clean uppercase 8.3 name.
@@ -1279,18 +1700,32 @@ gsn_build_ext_done:
 ; ELF-DOS's own use (only conceivably from an external tool, in
 ; which case the slot is simply never reclaimed).
 ;
-; The generated short name is also not checked against existing
-; entries for uniqueness (no numeric-tail collision handling like
-; real DOS's "NAME~1.EXT"). This is safe here specifically because
-; this system never looks up a file by its raw short name -- every
-; lookup (file_open, CD, path_resolve) compares against dir_read's
-; LFN-preferred name, and dir_read never cross-associates an LFN set
-; with the wrong short entry (each short entry's checksum is only
-; ever compared against the LFN group immediately preceding it on
-; disk), so two different names coincidentally generating the same
-; short name doesn't create any lookup ambiguity in ELF-DOS itself
-; -- only a (currently moot) compatibility wrinkle for hypothetical
-; strict-8.3 external tools.
+; RETRACTED (2026-07-25): this used to say the generated short name
+; was never checked against existing entries for uniqueness, on the
+; theory that a coincidental collision was "only a compatibility
+; wrinkle for hypothetical strict-8.3 external tools" since ELF-DOS
+; itself only ever looks up files by their LFN-preferred name. That
+; theory undersold the real cost: fsck.fat is not hypothetical, and it
+; correctly treats a duplicate 11-byte short name within one directory
+; as a genuine FAT16 spec violation -- found via a real hardware fsck
+; report ("Duplicate directory entry", two files whose names both
+; truncated to "TEST_ARG") -- and "fixes" it by auto-renaming one of
+; the two entries, which can orphan its LFN, a real, destructive data
+; hazard. _gen_short_name's own fallback truncation still has no
+; uniqueness logic of its own (see its header) -- that part is still
+; true -- but _file_create now checks the result for a collision
+; (_check_shortname_collision, above _file_create in this file) and,
+; if the needs_lfn fallback path was taken, mutates it with a
+; DOS-style numeric ~N tail (base name truncated to 6 chars for N=1-9,
+; "~", 1 digit; truncated to 5 chars for N=10-99, "~", 2 digits --
+; DOS's own escalation once ~1..~9 are all taken) and rechecks, up to
+; 99 attempts before giving up (DF=1, matching the existing "directory
+; full" failure) -- 100 total names sharing one truncated prefix (bare
+; + ~1..~99) judged plenty for this project's realistic use, no
+; hash-based fallback beyond that. A CLEAN (non-LFN) 8.3 name never
+; reaches this check: an exact duplicate name would already have been
+; caught by file_open's own existing-file scan before _file_create is
+; ever called.
 ;
 ; If the N entries needed (LFN + short) don't fit in the remaining
 ; space of the terminator's own sector, this moves to the START of
@@ -1336,6 +1771,243 @@ gsn_build_ext_done:
             inc     rf
             glo     rd
             str     rf
+
+            ; --- if the generated short name needed truncation/LFN,
+            ; check it for a collision against every other entry in
+            ; this directory and mutate with a numeric ~N tail until
+            ; unique (or give up after ~9). A CLEAN (non-LFN) 8.3 name
+            ; can't collide here: an exact duplicate name would already
+            ; have been caught by file_open's own existing-file scan
+            ; before _file_create is ever reached (see this proc's own
+            ; header). ---
+            mov     rf, fc_needs_lfn
+            ldn     rf
+            lbz     fc_shortname_ready
+
+            ; capture the ORIGINAL (unmutated) 8-byte name part once,
+            ; and count its real (non-space-padding) characters (0-8)
+            ; -- _gen_short_name always writes real chars first, then
+            ; pads the remainder with spaces, so the first space (or
+            ; reaching 8) marks the real length
+            mov     rf, fc_shortname
+            mov     rb, fc_base8
+            ldi     8
+            plo     rc
+fc_capture_base8:
+            glo     rc
+            lbz     fc_capture_base8_done
+            lda     rf
+            str     rb
+            inc     rb
+            dec     rc
+            lbr     fc_capture_base8
+fc_capture_base8_done:
+
+            mov     rf, fc_base8
+            ldi     0
+            plo     r9                  ; R9.0 = scan position (0-8)
+fc_scan_namepart:
+            glo     r9
+            smi     8
+            lbdf    fc_scan_namepart_done ; reached 8: fully packed
+            ldn     rf
+            xri     ' '
+            lbz     fc_scan_namepart_done ; found the first space
+            inc     rf
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     fc_scan_namepart
+fc_scan_namepart_done:
+            mov     rf, fc_namepart_len
+            glo     r9
+            str     rf
+
+            mov     rf, fc_suffix_n
+            ldi     0
+            str     rf
+
+fc_collision_retry:
+            call    _check_shortname_collision
+            lbnf    fc_shortname_ready  ; DF=0: no collision, use as-is
+
+            mov     rf, fc_suffix_n
+            ldn     rf
+            adi     1
+            str     rf                  ; fc_suffix_n += 1 (D still
+                                        ; holds the new value)
+            smi     100
+            lbdf    fc_full             ; already tried ~1..~99: give
+                                        ; up (100 total names sharing
+                                        ; one truncated prefix -- bare
+                                        ; + ~1..~99 -- is plenty; no
+                                        ; hash-based fallback beyond
+                                        ; this, matching the user's
+                                        ; own call, 2026-07-26)
+
+            ; --- split fc_suffix_n (1-99) into tens/ones ASCII digits
+            ; via repeated subtraction, bounded to at most 9
+            ; iterations (tens is always 0-9 for a value <= 99) ---
+            mov     rf, fc_suffix_n
+            ldn     rf
+            plo     r8                  ; R8.0 = remaining
+            ldi     0
+            plo     rc                  ; RC.0 = tens digit (0-9)
+fc_tens_loop:
+            glo     r8
+            smi     10
+            lbnf    fc_tens_done        ; remaining < 10: stop (D is
+                                        ; garbage here, not used)
+            plo     r8                  ; remaining -= 10 (D was valid:
+                                        ; DF=1 means no borrow occurred)
+            glo     rc
+            adi     1
+            plo     rc
+            lbr     fc_tens_loop
+fc_tens_done:
+            mov     rf, fc_suffix_tens
+            glo     rc
+            str     rf
+            mov     rf, fc_suffix_ones
+            glo     r8
+            str     rf
+
+            ; --- overwrite fc_shortname's name part with:
+            ; (first base_len real chars of fc_base8) + '~' + suffix
+            ; digit(s) + space-pad to offset 8 -- base_len =
+            ; min(namepart_len, 6) for a single-digit suffix (1-9),
+            ; min(namepart_len, 5) for a two-digit suffix (10-99,
+            ; DOS's own escalation once ~1..~9 are all taken) ---
+            mov     rf, fc_suffix_tens
+            ldn     rf
+            lbnz    fc_as_2digit_len
+
+fc_as_1digit_len:
+            mov     rf, fc_namepart_len
+            ldn     rf
+            smi     6
+            lbdf    fc_as_len6
+            mov     rf, fc_namepart_len
+            ldn     rf
+            lbr     fc_as_have_len
+fc_as_len6:
+            ldi     6
+            lbr     fc_as_have_len
+
+fc_as_2digit_len:
+            mov     rf, fc_namepart_len
+            ldn     rf
+            smi     5
+            lbdf    fc_as_len5
+            mov     rf, fc_namepart_len
+            ldn     rf
+            lbr     fc_as_have_len
+fc_as_len5:
+            ldi     5
+
+fc_as_have_len:
+            plo     r9                  ; R9.0 = base_len (0-6)
+
+            mov     rf, fc_base8
+            mov     rb, fc_shortname
+            glo     r9
+            plo     rc                  ; RC.0 = copy countdown
+fc_as_copy:
+            glo     rc
+            lbz     fc_as_copy_done
+            lda     rf
+            str     rb
+            inc     rb
+            dec     rc
+            lbr     fc_as_copy
+fc_as_copy_done:
+
+            ldi     '~'
+            str     rb
+            inc     rb
+
+            mov     rf, fc_suffix_tens
+            ldn     rf
+            lbz     fc_as_ones_only
+
+            adi     '0'
+            str     rb
+            inc     rb
+            mov     rf, fc_suffix_ones
+            ldn     rf
+            adi     '0'
+            str     rb
+            inc     rb
+            lbr     fc_as_digits_written
+
+fc_as_ones_only:
+            mov     rf, fc_suffix_ones
+            ldn     rf
+            adi     '0'
+            str     rb
+            inc     rb
+
+fc_as_digits_written:
+            ; pad_count = 6 - base_len (single-digit suffix) or
+            ; 5 - base_len (two-digit suffix)
+            mov     rf, fc_suffix_tens
+            ldn     rf
+            lbnz    fc_as_pad2
+
+            glo     r9
+            str     r2
+            ldi     6
+            sm                          ; D = 6 - base_len
+            lbr     fc_as_have_pad
+
+fc_as_pad2:
+            glo     r9
+            str     r2
+            ldi     5
+            sm                          ; D = 5 - base_len
+
+fc_as_have_pad:
+            plo     rc                  ; RC.0 = pad_count
+fc_as_pad:
+            glo     rc
+            lbz     fc_as_pad_done
+            ldi     ' '
+            str     rb
+            inc     rb
+            dec     rc
+            lbr     fc_as_pad
+fc_as_pad_done:
+
+            lbr     fc_collision_retry
+
+fc_shortname_ready:
+            ; REAL BUG, found 2026-07-25 (a real "mr test_args2.bat"
+            ; hardware hang, root-caused via static re-trace rather
+            ; than by guessing): this code originally trusted RD to
+            ; still hold "namelen" here, unchanged since _gen_short_
+            ; name's return far above -- true before the collision-
+            ; avoidance block was inserted, but no longer. Whenever
+            ; fc_needs_lfn is set (the common case: any lowercase or
+            ; >8-char name), the block above now calls
+            ; _check_shortname_collision at least once -- and its own
+            ; documented "Modifies" list includes RD. So this was
+            ; reading GARBAGE for namelen on every LFN-needing create,
+            ; not just a colliding one -- feeding a wrong (potentially
+            ; huge) value straight into the LFN-entry-count loop below,
+            ; which could write far past its intended bounds. Explains
+            ; why test_args1.bat's create (no pre-existing collision,
+            ; but STILL went through _check_shortname_collision once)
+            ; happened to work -- whatever garbage RD held that time
+            ; was small/benign -- while test_args2.bat's (same code
+            ; path, different on-disk state feeding different garbage)
+            ; hung. Fixed by reloading RD fresh from fc_namelen (memory-
+            ; resident, correctly preserved throughout) instead of
+            ; trusting the register survived.
+            mov     rf, fc_namelen
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = namelen (reloaded fresh)
 
             ; --- lfn_count = needs_lfn ? ceil(namelen/13) : 0 ---
             mov     rf, fc_needs_lfn
@@ -3946,10 +4618,16 @@ fsa_clearmask:  db      0
             endp
 
             proc    file_read
-            ; NOTE: this layer supports file sizes/positions up to 64K
-            ; (only the low 16 bits of FCB_FSIZE/FCB_FPOS are used).
-            ; FAT16 itself allows larger files, but this hardware's RAM
-            ; makes a 64K read moot in practice.
+            ; File sizes/positions up to the full 32 bits FCB_FSIZE/
+            ; FCB_FPOS actually hold are supported (2026-07-26) -- the
+            ; EOF/file_remaining check below does a genuine 32-bit
+            ; subtract, though the result is saturated to a 16-bit
+            ; "huge" sentinel for the chunk-clamp math further down,
+            ; since a single K_FILE_READ call's own byte count and a
+            ; sector's own size are both inherently <=65535 anyway; a
+            ; file_remaining bigger than that can never be the
+            ; constraining factor, only whether it's genuinely zero
+            ; (true EOF) needs the real 32-bit compare.
             ;
             ; Register usage (stable across the whole loop, protected
             ; with push/pop around _cluster_to_lba and fat_get, which
@@ -3992,40 +4670,95 @@ fread_loop:
             ghi     rc
             lbz     fread_done
 fread_check_eof:
-            ; ---- file_remaining = FSIZE - FPOS (low word only) ----
+            ; ---- file_remaining = FSIZE - FPOS, full 32-bit subtract-
+            ; with-borrow (2026-07-26, >64K support) -- R9:R8 = FSIZE
+            ; (R9=high word, R8=low word), R7:RD = FPOS (same shape),
+            ; chained as 4 individual byte SM/SMB steps (LSB first),
+            ; the same shape file_write's own FSIZE/FPOS compare
+            ; already uses, just extended from 2 bytes to 4. Result
+            ; ends up in R9:R8, matching this proc's own documented
+            ; "R7/R8/R9/RD are scratch, recomputed fresh each
+            ; iteration" contract -- none of the 4 need to survive
+            ; past this block except as already planned below.
             mov     rf, rb
             add16   rf, FCB_FSIZE
-            add16   rf, 2
             lda     rf
-            phi     rd
+            phi     r9                  ; R9 = FSIZE high word
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     r8                  ; R8 = FSIZE low word
             ldn     rf
-            plo     rd                  ; RD = FSIZE (low word)
+            plo     r8
 
             mov     rf, rb
             add16   rf, FCB_FPOS
-            add16   rf, 2
             lda     rf
-            phi     r8
+            phi     r7                  ; R7 = FPOS high word
+            lda     rf
+            plo     r7
+            lda     rf
+            phi     rd                  ; RD = FPOS low word
             ldn     rf
-            plo     r8                  ; R8 = FPOS (low word)
+            plo     rd
+
+            glo     rd                  ; D = FPOS byte 0 (LSB)
+            str     r2
+            glo     r8                  ; D = FSIZE byte 0 (LSB)
+            sm                          ; D = FSIZE.b0 - FPOS.b0, DF=1 if no borrow
+            plo     r8
+
+            ghi     rd                  ; D = FPOS byte 1
+            str     r2
+            ghi     r8                  ; D = FSIZE byte 1
+            smb
+            phi     r8                  ; R8 = remaining's low word, done
+
+            glo     r7                  ; D = FPOS byte 2
+            str     r2
+            glo     r9                  ; D = FSIZE byte 2
+            smb
+            plo     r9
+
+            ghi     r7                  ; D = FPOS byte 3 (MSB)
+            str     r2
+            ghi     r9                  ; D = FSIZE byte 3 (MSB)
+            smb                         ; DF=1 if no overall borrow
+            phi     r9                  ; R9:R8 = file_remaining (full 32-bit)
+            lbnf    fread_done          ; DF=0: FPOS>FSIZE (shouldn't happen) -- stop
 
             glo     r8
-            str     r2
-            glo     rd
-            sm                          ; D = FSIZE.lo - FPOS.lo, DF=1 if no borrow
-            plo     rd
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb                         ; D = FSIZE.hi - FPOS.hi - borrow
-            phi     rd                  ; RD = file_remaining
-            lbnf    fread_done          ; DF=0: FPOS>FSIZE (shouldn't happen) -- stop
-            glo     rd
             lbnz    fread_have_remaining
-            ghi     rd
-            lbz     fread_done          ; file_remaining == 0: EOF
+            ghi     r8
+            lbnz    fread_have_remaining
+            glo     r9
+            lbnz    fread_have_remaining
+            ghi     r9
+            lbz     fread_done          ; all 4 bytes zero: true EOF
+
 fread_have_remaining:
-            ; RD = file_remaining (>= 1)
+            ; R9:R8 = file_remaining (32-bit, >= 1). The chunk-clamp
+            ; below only ever compares against values <=512 (one
+            ; sector) or <=65535 (one K_FILE_READ call's own request),
+            ; so a file_remaining bigger than 16 bits can never be the
+            ; limiting factor -- saturate to RD=$FFFF ("huge") in that
+            ; case, matching what the unchanged clamp code below still
+            ; expects in RD; otherwise RD = the real (small) value.
+            ghi     r9
+            lbnz    fread_saturate
+            glo     r9
+            lbnz    fread_saturate
+            ghi     r8
+            phi     rd
+            glo     r8
+            plo     rd
+            lbr     fread_remaining_done
+fread_saturate:
+            ldi     $FF
+            phi     rd
+            plo     rd
+fread_remaining_done:
+            ; RD = file_remaining (saturated for the clamp below)
 
             ; ---- ensure this FCB's own IOBUF holds the sector for
             ; (FCB_CCLUST,FCB_CSECT) ----
@@ -4194,23 +4927,47 @@ fread_copy_done:
             glo     r8
             str     rf                  ; FCB_BOFF updated
 
-            ; FCB_FPOS += chunk (low word)
+            ; FCB_FPOS += chunk, full 32-bit (2026-07-26, >64K support)
+            ; -- chunk (R7) is always <=512 (one sector's worth), so it
+            ; only ever needs adding into the low word; ADD16's own
+            ; final DF is that 16-bit add's carry-out, propagated into
+            ; the high word (R9) via the standard adci-0/adci-0 chain
+            ; (first into R9's own low byte, then that byte's own
+            ; carry-out into R9's high byte) -- matches the idiom
+            ; already used elsewhere in this codebase (e.g. dir.asm).
             mov     rf, rb
             add16   rf, FCB_FPOS
-            add16   rf, 2
             lda     rf
-            phi     r8
+            phi     r9                  ; R9 = FPOS high word
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     r8                  ; R8 = FPOS low word
             ldn     rf
             plo     r8
-            add16   r8, r7
+
+            add16   r8, r7              ; R8 += chunk; DF = carry-out
+
+            glo     r9
+            adci    0
+            plo     r9
+            ghi     r9
+            adci    0
+            phi     r9                  ; R9:R8 = FPOS + chunk
+
             mov     rf, rb
             add16   rf, FCB_FPOS
-            add16   rf, 2
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            inc     rf
             ghi     r8
             str     rf
             inc     rf
             glo     r8
-            str     rf                  ; FCB_FPOS (low word) updated
+            str     rf                  ; FCB_FPOS (full 32-bit) updated
 
             ; RC -= chunk
             glo     r7
@@ -4708,61 +5465,109 @@ fwrite_copy_done:
             glo     r8
             str     rf                  ; FCB_BOFF updated
 
-            ; FCB_FPOS += chunk (low word)
+            ; FCB_FPOS += chunk, full 32-bit (2026-07-26, >64K support).
+            ; R7 (chunk) MUST survive this entire block untouched --
+            ; fwrite_no_grow's own "RC -= chunk" below still needs it,
+            ; on BOTH the grew and no-grow paths -- so R9:R8 hold the
+            ; new FPOS value only transiently (never simultaneously
+            ; with FSIZE); the grow-check just below reads both fields
+            ; back from memory via a backward byte-walk instead of
+            ; holding two full 32-bit values in registers at once.
             mov     rf, rb
             add16   rf, FCB_FPOS
-            add16   rf, 2
             lda     rf
-            phi     r8
+            phi     r9                  ; R9 = FPOS high word
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     r8                  ; R8 = FPOS low word
             ldn     rf
             plo     r8
-            add16   r8, r7
+
+            add16   r8, r7              ; R8 += chunk; DF = carry-out
+                                        ; (ADD16 only READS r7, chunk
+                                        ; itself is untouched)
+
+            glo     r9
+            adci    0
+            plo     r9
+            ghi     r9
+            adci    0
+            phi     r9                  ; R9:R8 = new FPOS
+
             mov     rf, rb
             add16   rf, FCB_FPOS
-            add16   rf, 2
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            inc     rf
             ghi     r8
             str     rf
             inc     rf
             glo     r8
-            str     rf                  ; FCB_FPOS (low word) updated
+            str     rf                  ; FCB_FPOS (full 32-bit) updated
 
             ; if FCB_FPOS now reaches or exceeds FCB_FSIZE, the file
             ; grew -- update FCB_FSIZE and flag the directory entry
-            ; for a size-field rewrite at close
-            mov     rf, rb
-            add16   rf, FCB_FPOS
-            add16   rf, 2
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = FPOS (low word, just updated)
+            ; for a size-field rewrite at close. Both fields are
+            ; stored MSB-first, so an LSB-first SM/SMB borrow chain
+            ; walks BACKWARD from each field's last byte (offset+3)
+            ; to its first (offset+0) -- R8/R9 here are POINTERS, not
+            ; the 32-bit values themselves (their earlier FPOS-value
+            ; use above is long done by this point).
+            mov     r8, rb
+            add16   r8, FCB_FPOS
+            add16   r8, 3               ; R8 -> FPOS's LSB
+            mov     r9, rb
+            add16   r9, FCB_FSIZE
+            add16   r9, 3               ; R9 -> FSIZE's LSB
 
-            mov     rf, rb
-            add16   rf, FCB_FSIZE
-            add16   rf, 2
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = FSIZE (low word)
+            ldn     r9                  ; D = FSIZE byte 3 (LSB)
+            str     r2
+            ldn     r8                  ; D = FPOS byte 3 (LSB)
+            sm                          ; D = FPOS.b3 - FSIZE.b3, DF=1 if no borrow
+            dec     r8
+            dec     r9
 
-            glo     r8
+            ldn     r9
             str     r2
-            glo     rd
-            sm                          ; D = FPOS.lo - FSIZE.lo, DF=1 if no borrow
-            ghi     r8
+            ldn     r8
+            smb
+            dec     r8
+            dec     r9
+
+            ldn     r9
             str     r2
-            ghi     rd
-            smb                         ; D = FPOS.hi - FSIZE.hi - borrow
+            ldn     r8
+            smb
+            dec     r8
+            dec     r9
+
+            ldn     r9                  ; D = FSIZE byte 0 (MSB)
+            str     r2
+            ldn     r8                  ; D = FPOS byte 0 (MSB)
+            smb                         ; DF=1 if no overall borrow (FPOS>=FSIZE)
             lbnf    fwrite_no_grow      ; DF=0: FPOS < FSIZE, no growth
 
+            ; FCB_FSIZE = FCB_FPOS, straight 4-byte copy (both fields
+            ; share the same MSB-first layout, so no reversal needed)
             mov     rf, rb
-            add16   rf, FCB_FSIZE
-            add16   rf, 2
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; FCB_FSIZE (low word) updated
+            add16   rf, FCB_FPOS        ; RF = source (FPOS)
+            mov     r8, rb
+            add16   r8, FCB_FSIZE       ; R8 = dest (FSIZE)
+            lda     rf
+            str     r8
+            inc     r8
+            lda     rf
+            str     r8
+            inc     r8
+            lda     rf
+            str     r8
+            inc     r8
+            ldn     rf
+            str     r8                  ; FCB_FSIZE (full 32-bit) updated
 
             mov     rf, rb
             ldn     rf
@@ -5022,18 +5827,13 @@ fwrite_calc_written:
 ;          RA:R9 = 32-bit signed offset (RA = high word, R9 = low
 ;                 word -- moved off RD, which now carries the FCB
 ;                 pointer instead, matching file_read/file_write/
-;                 file_close's own convention). This implementation
-;                 only accepts offsets
-;                 that are a valid sign-extension of a 16-bit value
-;                 (RA == $0000 with R9's bit 15 clear, or RA == $FFFF
-;                 with R9's bit 15 set); anything wider is an error.
-;                 File positions/sizes beyond 16 bits are likewise
-;                 not yet supported (FCB_FSIZE/FCB_FPOS's own high
-;                 words are assumed zero, matching this file's own
-;                 existing append-mode positioning in
-;                 fopen_check_append) -- the 32-bit register ABI is
-;                 reserved now so a future expansion to real 32-bit
-;                 seeking needs no calling-convention change.
+;                 file_close's own convention). The full signed 32-bit
+;                 offset range is accepted (2026-07-26 -- previously
+;                 restricted to a 16-bit sign-extension only), and
+;                 file positions/sizes up to the full 32 bits
+;                 FCB_FSIZE/FCB_FPOS hold are likewise supported,
+;                 matching this file's own widened append-mode
+;                 positioning in fopen_check_append.
 ; Returns: DF = 0 on success (RD = the resulting absolute position,
 ;          low word only), DF = 1 on error (bad whence, offset out of
 ;          the supported range, or the resulting position would fall
@@ -5096,37 +5896,12 @@ fwrite_calc_written:
             smi     3
             lbdf    fseek_bad_whence    ; whence >= 3: invalid
 
-            ; validate the offset is a genuine 16-bit sign-extension
-            mov     rf, fsk_off_lo
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = off_lo
-            mov     rf, fsk_off_hi
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = off_hi
-
-            ghi     rd
-            ani     $80
-            lbz     fsk_off_pos         ; off_lo's sign bit clear:
-                                        ; off_hi must be 0
-            ghi     r8
-            xri     $FF
-            lbnz    fseek_bad_offset
-            glo     r8
-            xri     $FF
-            lbnz    fseek_bad_offset
-            lbr     fsk_off_checked
-
-fsk_off_pos:
-            ghi     r8
-            lbnz    fseek_bad_offset
-            glo     r8
-            lbnz    fseek_bad_offset
-
-fsk_off_checked:
+            ; Offset accepted at its full 32-bit signed range (2026-07-
+            ; 26, >64K support -- was validated as a 16-bit sign-
+            ; extension only). No up-front validation needed here: the
+            ; target computation below (fsk_add_base, and fsk_
+            ; target_set's own explicit non-negativity check) is what
+            ; actually determines validity.
             mov     rf, fsk_whence
             ldn     rf
             lbz     fsk_target_set
@@ -5135,129 +5910,206 @@ fsk_off_checked:
             lbr     fsk_target_end
 
 fsk_target_set:
-            ; target = off_lo, must be non-negative
-            ghi     rd
+            ; target = offset (full 32-bit), must be non-negative
+            mov     rf, fsk_off_hi
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7                  ; R7 = offset high word
+
+            ghi     r7
             ani     $80
             lbnz    fseek_bad_offset    ; SEEK_SET with a negative
                                         ; offset makes no sense
+
+            mov     rf, fsk_off_lo
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = offset low word
+
             mov     rf, fsk_target
-            ghi     rd
+            ghi     r7
             str     rf
             inc     rf
-            glo     rd
+            glo     r7
             str     rf
+            inc     rf
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf                  ; fsk_target = offset (32-bit)
             lbr     fsk_range_check
 
 fsk_target_cur:
             mov     rf, fsk_fcb
             lda     rf
-            phi     r9
+            phi     rb
             ldn     rf
-            plo     r9                  ; R9 = FCB base
-            mov     rf, r9
+            plo     rb                  ; RB = FCB base
+            mov     rf, rb
             add16   rf, FCB_FPOS
-            add16   rf, 2               ; -> FCB_FPOS's low word
             lda     rf
             phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     r8
             ldn     rf
-            plo     r9                  ; R9 = FPOS (low word) = base
+            plo     r8                  ; R9:R8 = FPOS (full 32-bit) = base
             lbr     fsk_add_base
 
 fsk_target_end:
             mov     rf, fsk_fcb
             lda     rf
-            phi     r9
+            phi     rb
             ldn     rf
-            plo     r9                  ; R9 = FCB base
-            mov     rf, r9
+            plo     rb                  ; RB = FCB base
+            mov     rf, rb
             add16   rf, FCB_FSIZE
-            add16   rf, 2               ; -> FCB_FSIZE's low word
             lda     rf
             phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     r8
             ldn     rf
-            plo     r9                  ; R9 = FSIZE (low word) = base
+            plo     r8                  ; R9:R8 = FSIZE (full 32-bit) = base
 
 fsk_add_base:
-            ; target = base(R9) + off_lo(RD), verified to land in
-            ; [0, 65535] via a byte-level add-with-carry, then a case
-            ; split on off_hi/carry-out. Independently verified
-            ; against 2000+ randomized + edge cases in Python before
-            ; writing this, since 2's-complement carry reasoning is
-            ; easy to get subtly wrong.
-            glo     r9
+            ; target = base(R9:R8) + offset(fsk_off_hi:fsk_off_lo),
+            ; full 32-bit signed add with carry-based range validation
+            ; -- generalizes the already-proven 16-bit version's exact
+            ; reasoning (carry-out + offset's own sign bit determine
+            ; validity) unchanged, just extended from 2 bytes to 4.
+            ; Independently verified against 5000+ randomized + edge
+            ; cases in Python before writing this, since 2's-
+            ; complement carry reasoning is easy to get subtly wrong.
+            mov     rf, fsk_off_hi
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; RA = offset high word
+            mov     rf, fsk_off_lo
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = offset low word
+
+            glo     r8
             str     r2
             glo     rd
-            add                         ; D = off_lo.lo + base.lo
-            plo     rc                  ; RC.lo = low_word.lo
-            ghi     r9
+            add                         ; D = base.lo.lo + off.lo.lo
+            plo     rc
+            ghi     r8
             str     r2
             ghi     rd
-            adc                         ; D = off_lo.hi + base.hi + carry
-            phi     rc                  ; RC.hi = low_word.hi
+            adc                         ; D = base.lo.hi + off.lo.hi + carry
+            phi     rc                  ; RC = result's low word
+
+            glo     r9
+            str     r2
+            glo     ra
+            adc                         ; D = base.hi.lo + off.hi.lo + carry
+            plo     r7
+            ghi     r9
+            str     r2
+            ghi     ra
+            adc                         ; D = base.hi.hi + off.hi.hi + carry, DF=overall carry-out
+            phi     r7                  ; R7:RC = full 32-bit sum
+
             lbdf    fsk_lowcarry        ; DF=1: the add carried out
 
-            ; no carry: valid only if off was non-negative (off_hi==0)
-            mov     rf, fsk_off_hi
-            ldn     rf
-            lbnz    fseek_bad_offset    ; off_hi != 0 (off was
-                                        ; negative) and didn't carry
-                                        ; -> result is still negative
+            ; no carry: valid only if offset was non-negative
+            ghi     ra
+            ani     $80
+            lbnz    fseek_bad_offset    ; offset was negative but
+                                        ; didn't carry -> still negative
             lbr     fsk_target_have
 
 fsk_lowcarry:
-            ; carried out: valid only if off was negative (off_hi ==
-            ; $FFFF), wrapping correctly back into [0,65535]
-            mov     rf, fsk_off_hi
-            ldn     rf
-            xri     $FF
-            lbnz    fseek_bad_offset    ; off_hi == 0 (off was non-
-                                        ; negative) and it carried ->
-                                        ; overflow past 65535
+            ; carried out: valid only if offset was negative, wrapping
+            ; correctly back into [0, 0xFFFFFFFF]
+            ghi     ra
+            ani     $80
+            lbz     fseek_bad_offset    ; offset was non-negative but
+                                        ; carried -> overflow
 
 fsk_target_have:
             mov     rf, fsk_target
+            ghi     r7
+            str     rf
+            inc     rf
+            glo     r7
+            str     rf
+            inc     rf
             ghi     rc
             str     rf
             inc     rf
             glo     rc
-            str     rf                  ; fsk_target = RC
+            str     rf                  ; fsk_target = R7:RC (32-bit)
 
 fsk_range_check:
-            ; 0 <= target <= FSIZE(low word) -- can't seek before the
-            ; start or past the end
+            ; 0 <= target <= FSIZE (full 32-bit) -- can't seek before
+            ; the start or past the end. target's own non-negativity
+            ; was already established above (fsk_target_set's explicit
+            ; check, or fsk_add_base's carry-based validation), so
+            ; only the upper bound needs checking here.
             mov     rf, fsk_fcb
             lda     rf
-            phi     r9
+            phi     rb
             ldn     rf
-            plo     r9
-            mov     rf, r9
+            plo     rb                  ; RB = FCB base
+            mov     rf, rb
             add16   rf, FCB_FSIZE
-            add16   rf, 2
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
             lda     rf
             phi     r8
             ldn     rf
-            plo     r8                  ; R8 = FSIZE (low word)
+            plo     r8                  ; R9:R8 = FSIZE (full 32-bit)
 
             mov     rf, fsk_target
             lda     rf
             phi     rd
+            lda     rf
+            plo     rd
+            lda     rf
+            phi     rc
             ldn     rf
-            plo     rd                  ; RD = target
+            plo     rc                  ; RD:RC = target (full 32-bit)
 
-            ; FSIZE >= target ?
-            glo     rd
+            ; FSIZE >= target ? -- LSB-first SM/SMB chain, same
+            ; staging convention (target subtrahend, FSIZE minuend) as
+            ; the pre-widening 16-bit version above
+            glo     rc
             str     r2
             glo     r8
-            sm
-            ghi     rd
+            sm                          ; D = FSIZE.lo.lo - target.lo.lo
+            ghi     rc
             str     r2
             ghi     r8
             smb
+            glo     rd
+            str     r2
+            glo     r9
+            smb
+            ghi     rd
+            str     r2
+            ghi     r9
+            smb                         ; DF=1 if no overall borrow (FSIZE>=target)
             lbnf    fseek_bad_offset    ; DF=0: FSIZE < target
 
-            ; target == 0 ? -> rewind shortcut (the general
-            ; last_byte_index = target-1 walk below can't handle
-            ; target==0, since that would underflow)
+            ; target == 0 (all 4 bytes)? -> rewind shortcut (the
+            ; general last_byte_index = target-1 walk below can't
+            ; handle target==0, since that would underflow)
+            glo     rc
+            lbnz    fsk_general
+            ghi     rc
+            lbnz    fsk_general
             glo     rd
             lbnz    fsk_general
             ghi     rd
@@ -5301,73 +6153,123 @@ fsk_rewind:
             lbr     fsk_set_fpos
 
 fsk_general:
-            ; last_byte_index = target - 1
+            ; last_byte_index = target - 1, full 32-bit (2026-07-26,
+            ; >64K support). RD:R8 = target here.
             mov     rf, fsk_target
             lda     rf
             phi     rd
-            ldn     rf
+            lda     rf
             plo     rd
-            sub16   rd, 1               ; RD = last_byte_index
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; RD:R8 = target
 
-            ; sector_index (0-127) = last_byte_index >> 9
-            ghi     rd
-            shr
-            plo     rc                  ; RC.0 = sector_index
+            sub16   r8, 1
+            lbdf    fsk_lbi_no_borrow
+            sub16   rd, 1
+fsk_lbi_no_borrow:
+            ; RD:R8 = last_byte_index
 
             ; boff (0-511) = last_byte_index & 511
-            glo     rd
-            plo     r8
-            ghi     rd
-            ani     1
-            phi     r8                  ; R8 = boff
             mov     rf, fsk_boff
             ghi     r8
+            ani     1
             str     rf
             inc     rf
             glo     r8
-            str     rf                  ; fsk_boff = boff, stashed --
-                                        ; R8 needed as scratch again
-                                        ; below
+            str     rf                  ; fsk_boff = last_byte_index & 511
 
-            ; cluster_index (0-127) = sector_index >> spc_shift -- same
-            ; D-clobber-safe shift-loop shape as fopen_check_append's
-            ; own already-hardware-confirmed version (see its header
-            ; comment for why the loop counter can't share D with the
-            ; value being shifted)
-            mov     rf, bpb_spc_shift
-            ldn     rf
-            plo     r9                  ; R9.0 = spc_shift (loop count)
-            glo     rc                  ; D = sector_index
-            plo     r8                  ; R8.0 = shift accumulator
-fsk_cidx_shr:
-            glo     r9
-            lbz     fsk_cidx_done
-            glo     r8
+            ; sector_index = last_byte_index >> 9, via >>8 (byte
+            ; reassignment) then >>1 (SHRC chain, MSB to LSB) -- same
+            ; algorithm as fopen_check_append's own already-verified
+            ; (and once-corrected -- see its own header comment for the
+            ; ghi-vs-glo bug caught there) version above.
+            ghi     r8
+            plo     r7
+            glo     rd
+            phi     r7
+            ghi     rd
+            plo     r9
+            ldi     0
+            phi     r9
+
+            ghi     r9
             shr
-            plo     r8
-            dec     r9
-            lbr     fsk_cidx_shr
-fsk_cidx_done:
-            glo     r8                  ; D = cluster_index
-            plo     r9                  ; stash before the mov below
-                                        ; clobbers D (gotcha #4)
-            mov     rf, fsk_cluster_idx
+            phi     r9
             glo     r9
-            str     rf
+            shrc
+            plo     r9
+            ghi     r7
+            shrc
+            phi     r7
+            glo     r7
+            shrc
+            plo     r7                  ; R9:R7 = sector_index (>>9);
+                                        ; R9 (its own high word)
+                                        ; discarded from here on, same
+                                        ; documented 32MB-scope limit
+                                        ; as fopen_check_append's own
+                                        ; version
 
-            ; sector_in_clust = sector_index & (spc-1)
+            ; REAL BUG, FOUND AND FIXED (2026-07-27): same exact bug as
+            ; fopen_check_append's own copy of this algorithm -- see its
+            ; header comment for the full story (hardware-confirmed on a
+            ; 512MB card with a genuine spc=128, invisible on every
+            ; prior test card since spc=1 there made the cluster_index
+            ; shift loop below run zero iterations, leaving R7 untouched
+            ; by luck). sector_in_clust must be computed HERE, using
+            ; sector_index (R7) BEFORE the cluster_index shift loop just
+            ; below overwrites it.
             mov     rf, bpb_spc
             ldn     rf
             smi     1
-            str     r2
-            glo     rc                  ; D = sector_index (still in RC)
+            str     r2                  ; [R2] = spc-1 (mask)
+            glo     r7                  ; D = sector_index's low byte
+                                        ; (R7 still holds sector_index
+                                        ; here)
             and
-            plo     rc
+            plo     r9                  ; stash (mov below clobbers D;
+                                        ; R9's own earlier value --
+                                        ; sector_index's discarded high
+                                        ; word -- is free to reuse)
             mov     rf, fsk_sector_in_clust
-            glo     rc
+            glo     r9
             str     rf
 
-            ; --- walk fat_get fsk_cluster_idx times from FCB_SCLUST ---
+            ; cluster_index = sector_index >> spc_shift (16-bit,
+            ; R7 only) -- same D-clobber-safe variable-shift-count loop
+            ; shape as fopen_check_append's own already-hardware-
+            ; confirmed version (see its header comment for why the
+            ; loop counter can't share D with the value being shifted)
+            mov     rf, bpb_spc_shift
+            ldn     rf
+            plo     r9                  ; R9.0 = spc_shift (loop count)
+fsk_cidx_shr:
+            glo     r9
+            lbz     fsk_cidx_done
+            ghi     r7
+            shr
+            phi     r7
+            glo     r7
+            shrc
+            plo     r7
+            dec     r9
+            lbr     fsk_cidx_shr
+fsk_cidx_done:
+            ; R7 = cluster_index (16-bit). sector_in_clust was already
+            ; computed and stored above, before this loop had a chance
+            ; to overwrite R7 -- see the 2026-07-27 bug-fix comment near
+            ; this section's own start.
+            mov     rf, fsk_cluster_idx
+            ghi     r7
+            str     rf
+            inc     rf
+            glo     r7
+            str     rf                  ; fsk_cluster_idx = cluster_index
+
+            ; --- walk fat_get fsk_cluster_idx times from FCB_SCLUST --
+            ; RC now holds a 16-bit hop count (was 8-bit) ---
             mov     rf, fsk_fcb
             lda     rf
             phi     rb
@@ -5381,11 +6283,16 @@ fsk_cidx_done:
             plo     rd                  ; RD = FCB_SCLUST
 
             mov     rf, fsk_cluster_idx
+            lda     rf
+            phi     rc
             ldn     rf
-            plo     rc                  ; RC.0 = hops remaining
+            plo     rc                  ; RC = hops remaining (16-bit)
 fsk_walk_loop:
             glo     rc
+            lbnz    fsk_walk_go
+            ghi     rc
             lbz     fsk_walk_done
+fsk_walk_go:
             push    r9
             push    ra
             push    rb
@@ -5464,24 +6371,35 @@ fsk_set_fpos:
             ldn     rf
             plo     rb                  ; RB = FCB base
 
-            mov     rf, fsk_target
+            ; FCB_FPOS = fsk_target, straight 4-byte copy (2026-07-26,
+            ; >64K support -- was low-word-only; both fields share the
+            ; same MSB-first layout, so no reversal needed). RD still
+            ; ends up holding target's low word for the return value
+            ; below, matching this routine's own long-established,
+            ; still-unchanged "RD = low word only" return convention
+            ; (K_FILE_SEEK's own documented contract) -- a caller
+            ; wanting the full 32-bit result has no way to get the high
+            ; word back from this call today; widening the RETURN
+            ; value itself would be a separate, bigger ABI decision,
+            ; out of scope for this pass.
+            mov     rf, fsk_target      ; RF = source (target)
+            mov     r8, rb
+            add16   r8, FCB_FPOS        ; R8 = dest (FCB_FPOS)
             lda     rf
-            phi     rd
+            str     r8
+            inc     r8
+            lda     rf
+            str     r8
+            inc     r8
+            lda     rf
+            phi     rd                  ; RD.hi = target's low word's
+                                        ; high byte (for the return
+                                        ; value below)
+            str     r8
+            inc     r8
             ldn     rf
-            plo     rd                  ; RD = target
-
-            mov     rf, rb
-            add16   rf, FCB_FPOS
-            add16   rf, 2               ; -> low word
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; FCB_FPOS (low word) = target
-                                        ; (high word left as-is -- 0,
-                                        ; matching every other place in
-                                        ; this file that only ever
-                                        ; writes FCB_FPOS's low word)
+            plo     rd                  ; RD.lo = target's LSB
+            str     r8                  ; FCB_FPOS (full 32-bit) = target
 
             ; clear this FCB's own IOVALID flag -- the buffered sector
             ; (if any) no longer matches the new position
@@ -5578,6 +6496,35 @@ fc_target_off:  dw      0
 fc_elba:        ds      LBA_SIZE
 fc_eoff:        dw      0
 
+; fc_base8/fc_namepart_len/fc_suffix_n/fc_collision and the
+; fc_saved_*/fc_scan_* fields below support _check_shortname_collision
+; and _file_create's own ~1-~9 numeric-tail retry loop (2026-07-25) --
+; _gen_short_name's fallback truncation has no uniqueness check of its
+; own (see its header), so two unrelated long names truncating to the
+; identical first-8-characters silently produced two directory entries
+; with the same raw 11-byte short name -- a real FAT16 spec violation
+; that fsck.fat correctly (and destructively) "fixes" by auto-renaming
+; one of them, discovered via a real hardware fsck report ("Duplicate
+; directory entry", test_args1.bat/test_args2.bat both truncating to
+; "TEST_ARG"). fc_base8 is the ORIGINAL (unmutated) 8-byte name part,
+; captured once before any ~N is applied; fc_namepart_len is the count
+; of real (non-space-padding) characters in it, 0-8.
+fc_base8:       ds      8
+fc_namepart_len: db     0
+fc_suffix_n:    db      0
+fc_suffix_tens: db      0
+fc_suffix_ones: db      0
+fc_collision:   db      0
+fc_saved_sect:  db      0
+fc_saved_eptr:  dw      0
+fc_saved_eleft: db      0
+fc_saved_lba:   ds      LBA_SIZE
+fc_saved_lfnok: db      0
+
+; csc_sector_count: _check_shortname_collision's own once-per-sector
+; cap counter -- see the hard-cap comment in that proc's own scan loop.
+csc_sector_count: db    0
+
 ; fc_new_attr/fc_new_cluster/fc_new_size: parameterize _file_create's
 ; short-entry write -- file_open's fopen_notfound always sets
 ; ATTR_ARCHIVE/0/0 (a plain file, first cluster lazily allocated on
@@ -5599,19 +6546,21 @@ fc_new_size:    dw      0,0             ; 4 bytes, big-endian
 ; fsk_*: scratch for file_seek (2026-07-20). Args stashed to memory
 ; immediately on entry (fsk_whence/fsk_off_hi/fsk_off_lo/fsk_fcb),
 ; since _switch_drive and fat_get both clobber broadly. fsk_target is
-; the resolved absolute position; fsk_boff/fsk_cluster_idx/
-; fsk_sector_in_clust mirror fa_boff/fa_cluster_idx/fa_sector_in_clust
-; above (same role, kept separate rather than shared since file_seek
-; and file_open's own append-mode positioning are each already
-; complex enough on their own -- not sharing state between them keeps
-; each easier to reason about independently).
+; the resolved absolute position (widened 2->4 bytes, 2026-07-26,
+; >64K support); fsk_boff/fsk_cluster_idx/fsk_sector_in_clust mirror
+; fa_boff/fa_cluster_idx/fa_sector_in_clust above (same role, kept
+; separate rather than shared since file_seek and file_open's own
+; append-mode positioning are each already complex enough on their
+; own -- not sharing state between them keeps each easier to reason
+; about independently; fsk_cluster_idx widened 1->2 bytes alongside
+; fa_cluster_idx's own identical widening, same reasoning).
 fsk_whence:         db      0
 fsk_off_hi:         dw      0
 fsk_off_lo:         dw      0
 fsk_fcb:            dw      0
-fsk_target:         dw      0
+fsk_target:         dw      0,0             ; 4 bytes, big-endian
 fsk_boff:           dw      0
-fsk_cluster_idx:    db      0
+fsk_cluster_idx:    dw      0
 fsk_sector_in_clust: db     0
 
                 public  file_dirent
@@ -5635,6 +6584,18 @@ fsk_sector_in_clust: db     0
                 public  fc_new_cluster
                 public  fc_new_size
                 public  fc_eoff
+                public  fc_base8
+                public  fc_namepart_len
+                public  fc_suffix_n
+                public  fc_suffix_tens
+                public  fc_suffix_ones
+                public  fc_collision
+                public  fc_saved_sect
+                public  fc_saved_eptr
+                public  fc_saved_eleft
+                public  fc_saved_lba
+                public  fc_saved_lfnok
+                public  csc_sector_count
                 public  fsk_whence
                 public  fsk_off_hi
                 public  fsk_off_lo

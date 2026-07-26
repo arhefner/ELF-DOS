@@ -66,10 +66,10 @@ INCS =  include\bios.inc    \
         include\opcodes.def \
         include\kernel.inc
 
-# ---- The 8 progs\*.asm that link against lib\ -- see build_progs.bat's
+# ---- The 9 progs\*.asm that link against lib\ -- see build_progs.bat's
 # own exclusion list, which must be kept in sync with this set ----
 SPECIAL_BINS = bin\printenv bin\export bin\unset \
-        bin\ls bin\more bin\edlin bin\move bin\xcopy
+        bin\ls bin\more bin\edlin bin\move bin\xcopy bin\shell
 
 # ---- The 3 test\*.asm that link against lib\ -- see build_test.bat's
 # own exclusion list, which must be kept in sync with this set ----
@@ -225,6 +225,13 @@ progs\move.prg: progs\move.asm include\kernel_api.inc include\bios.inc include\o
 bin\move: progs\move.prg lib\move.prg bin
 	$(LINK) $(LFLAGS) -o bin\move progs\move.prg lib\move.prg
 	-del /F /Q bin\move.lkb
+
+progs\shell.prg: progs\shell.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) shell.asm
+
+bin\shell: progs\shell.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\shell progs\shell.prg lib\env.prg
+	-del /F /Q bin\shell.lkb
 
 #------------------------------------------------------------------
 # Link rules (boot/kernel)

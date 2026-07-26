@@ -24,22 +24,41 @@
 ; single-file/multi-arg reference still shows a hidden entry, matching
 ; DOS's "hidden only affects casual listing" convention.
 ;
-; Each entry is printed as a fixed-width line:
-;   columns 1-5:   right-justified decimal byte count (files) or
-;                  blank (directories) -- low 16 bits only, since
-;                  this hardware's RAM makes files over 64K moot,
-;                  see kernel/file.asm's own FCB_FSIZE/FCB_FPOS
-;                  ceiling
-;   columns 6-12:  " <DIR> " for subdirectories, blank for files
-;   columns 13-31: last-write date/time, "MM/DD/YYYY HH:MM  "
-;                  (unpacked from DIRENT_WRTDATE/DIRENT_WRTTIME's
-;                  packed FAT bit fields -- see kernel/rtc.asm)
-;   columns 32+:   the file/directory name
+; Each entry is printed as a fixed-width line (column order changed
+; 2026-07-26, at the user's own request, to match later MS-DOS/Windows
+; `dir` output -- post-LFN versions print date/time before the size/
+; type column, not after; 12-hour AM/PM time and a size/name separator
+; both added the same day, after a hardware round showed the first cut
+; of the reorder missing a separator and using 24-hour time):
+;   date/time:  "MM/DD/YYYY  HH:MM AM/PM  " (unpacked from
+;               DIRENT_WRTDATE/DIRENT_WRTTIME's packed FAT bit fields
+;               -- see kernel/rtc.asm; hour converted from the on-disk
+;               24-hour value to 12-hour + AM/PM display)
+;   size/type:  right-justified, comma-grouped decimal byte count
+;               (files) or "<DIR>" (directories) -- both share this
+;               ONE 13-column right-justified field, so names line up
+;               consistently regardless of entry type (matching real
+;               Windows `dir`'s own convention), rather than two
+;               differently-sized fields. Up to 10 digits + 3 commas,
+;               "4,294,967,295" is the largest 32-bit value and fills
+;               the column exactly (2026-07-26, widened from a plain
+;               5-column 16-bit-only field to match kernel/file.asm's
+;               own >64K support -- see fmt_size32/lib/fmt32.asm)
+;   name:       the file/directory name, separated from the size/type
+;               field above by 2 spaces (a real hardware-found bug,
+;               2026-07-26: the first cut of the column reorder left
+;               NO separator here at all for files, so a name printed
+;               glued directly onto its own size digits)
 ;
 
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
+
+            extrn   fmt_size32          ; lib/fmt32.asm -- 32-bit
+                                        ; comma-grouped decimal
+                                        ; formatting, shared with
+                                        ; progs/stat.asm
 
             org     PROG_BASE
 
@@ -298,63 +317,15 @@ dma_exit_err:
 ; Modifies: R7-RD (and D)
 ;------------------------------------------------------------------
 print_dir_entry:
-            ; check ATTR_DIR bit
-            mov     rf, dir_result
-            add16   rf, DIRENT_ATTR
-            ldn     rf                  ; D = attribute byte
-            ani     ATTR_DIR
-            lbnz    pde_is_dir
+            ; ---- column order (2026-07-26): date/time, then the
+            ; dir-tag-or-size field, then name -- matching later
+            ; MS-DOS/Windows `dir` output (post-LFN) rather than this
+            ; project's own original size-first layout, at the user's
+            ; own request. Purely a reorder of the same three already-
+            ; working blocks below (date/time unpacking+printing, the
+            ; mutually-exclusive size-vs-<DIR>-tag block, the name) --
+            ; none of their own internal formatting logic changed. ----
 
-            ; ---- file: right-justified 5-column decimal size ----
-            mov     rf, dir_result
-            add16   rf, DIRENT_SIZE
-            add16   rf, 2               ; skip to the low word (bytes 2,3)
-            lda     rf                  ; D = size byte 2 (low word MSB)
-            phi     rd
-            ldn     rf                  ; D = size byte 3 (low word LSB)
-            plo     rd                  ; RD = size (0-65535)
-
-            mov     rf, size_buf
-            call    f_uintout           ; writes decimal ASCII into *rf, advances rf
-            ldi     0
-            str     rf                  ; null-terminate
-
-            ; count digits written, to right-justify in 5 columns
-            mov     rf, size_buf
-            ldi     0
-            plo     rc                  ; RC.0 = digit count
-pde_count_loop:
-            ldn     rf
-            lbz     pde_count_done
-            inc     rf
-            glo     rc
-            adi     1
-            plo     rc
-            lbr     pde_count_loop
-pde_count_done:
-            ; leading spaces = a substring of the 5-space buffer,
-            ; starting "digit count" chars in (fewer spaces needed
-            ; the more digits there are; always <= 5 digits since
-            ; the value is at most 65535)
-            mov     rf, spaces5
-            add16   rf, rc
-            call    K_MSG
-
-            mov     rf, size_buf
-            call    K_MSG               ; the digits themselves
-
-            mov     rf, tag_blank       ; blank 7-column directory tag
-            call    K_MSG
-            lbr     pde_print_datetime
-
-            ; ---- directory: blank size + " <DIR> " tag ----
-pde_is_dir:
-            mov     rf, spaces5         ; blank 5-column size field
-            call    K_MSG
-            mov     rf, dir_tag
-            call    K_MSG
-
-pde_print_datetime:
             ; ---- unpack last-write date into day/month/year ----
             mov     rf, dir_result
             add16   rf, DIRENT_WRTDATE
@@ -430,7 +401,57 @@ pde_print_datetime:
             glo     rd
             str     rf
 
-            ; ---- print "MM/DD/YYYY HH:MM  " ----
+            ; ---- convert the 24-hour wr_hour just stored above into a
+            ; 12-hour wr_hour12 (1-12) + "AM"/"PM" string, matching the
+            ; user's own desired format ("09:00 PM") rather than the
+            ; previous 24-hour display. RD.0 still holds the 24-hour
+            ; value here, untouched by the str above (str doesn't
+            ; modify RD). ----
+            glo     rd
+            smi     12
+            lbnf    dir_hour_is_am      ; DF=0 (borrow): wr_hour < 12
+
+            mov     rf, dir_ampm
+            ldi     'P'
+            str     rf
+            inc     rf
+            ldi     'M'
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf
+
+            glo     rd
+            smi     12
+            plo     rd                  ; RD.0 = wr_hour - 12 (0-11)
+            lbr     dir_hour12_zero_check
+
+dir_hour_is_am:
+            mov     rf, dir_ampm
+            ldi     'A'
+            str     rf
+            inc     rf
+            ldi     'M'
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf
+                                        ; RD.0 already = wr_hour (0-11)
+                                        ; -- no subtraction needed here
+
+dir_hour12_zero_check:
+            glo     rd
+            lbnz    dir_hour12_done     ; nonzero: use as-is (1-11)
+            ldi     12
+            plo     rd                  ; zero (midnight or noon, mod
+                                        ; 12): display as 12
+dir_hour12_done:
+            mov     rf, wr_hour12
+            glo     rd
+            str     rf                  ; wr_hour12 = display hour
+                                        ; (1-12)
+
+            ; ---- print "MM/DD/YYYY  HH:MM AM/PM  " ----
             mov     rf, wr_month
             ldn     rf
             plo     rd
@@ -456,8 +477,16 @@ pde_print_datetime:
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, size_buf        ; reuse size_buf -- this entry's
-                                        ; size has already been printed
+            mov     rf, size_buf        ; reuse size_buf (a separate,
+                                        ; small 6-byte scratch buffer
+                                        ; from size_buf13, which holds
+                                        ; the actual file-size column
+                                        ; printed LATER now, after
+                                        ; date/time -- see the 2026-
+                                        ; 07-26 column-reorder note
+                                        ; above) for wr_year's own
+                                        ; digits, a genuinely 16-bit
+                                        ; value unrelated to file size
             call    f_uintout
             ldi     0
             str     rf
@@ -465,9 +494,9 @@ pde_print_datetime:
             call    K_MSG
 
             call    K_INMSG
-            db      " ",0
+            db      "  ",0
 
-            mov     rf, wr_hour
+            mov     rf, wr_hour12
             ldn     rf
             plo     rd
             ldi     0
@@ -484,6 +513,105 @@ pde_print_datetime:
             phi     rd
             call    print2digit
 
+            call    K_INMSG
+            db      " ",0
+
+            mov     rf, dir_ampm
+            call    K_MSG
+
+            call    K_INMSG
+            db      "  ",0
+
+            ; ---- dir-tag-or-size field (moved here 2026-07-26, right
+            ; after date/time -- internal logic unchanged from the
+            ; original size-first layout, just relocated) ----
+            mov     rf, dir_result
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_DIR
+            lbnz    pde_is_dir
+
+            ; ---- file: right-justified 13-column comma-grouped
+            ; decimal size (2026-07-26, >64K support) -- was a plain
+            ; 5-column f_uintout of the low 16 bits only. Max value
+            ; 4,294,967,295 is exactly 13 characters (10 digits + 3
+            ; commas), matching the full 32-bit range kernel/file.asm
+            ; now supports. ----
+            mov     rf, dir_result
+            add16   rf, DIRENT_SIZE
+            lda     rf
+            phi     rd                  ; RD.hi = size byte 0 (MSB)
+            lda     rf
+            plo     rd                  ; RD.lo = size byte 1
+            lda     rf
+            phi     r8                  ; R8.hi = size byte 2
+            ldn     rf
+            plo     r8                  ; R8.lo = size byte 3 (LSB)
+                                        ; => RD:R8 = 32-bit size
+
+            mov     rf, size_buf13      ; RF = destination buffer
+            call    fmt_size32          ; builds the comma-grouped
+                                        ; digit string into size_buf13
+                                        ; and null-terminates it (see
+                                        ; lib/fmt32.asm -- factored out
+                                        ; 2026-07-26 so stat.asm and
+                                        ; any future program can share
+                                        ; this exact, already-verified
+                                        ; conversion instead of each
+                                        ; duplicating it)
+
+            ; count characters written, to right-justify in 13 columns
+            mov     rf, size_buf13
+            ldi     0
+            plo     rc                  ; RC.0 = character count
+pde_count_loop:
+            ldn     rf
+            lbz     pde_count_done
+            inc     rf
+            glo     rc
+            adi     1
+            plo     rc
+            lbr     pde_count_loop
+pde_count_done:
+            ; leading spaces = a substring of the 13-space buffer,
+            ; starting "char count" chars in (fewer spaces needed the
+            ; wider the formatted number is; always <= 13 characters
+            ; since the value is at most 4,294,967,295)
+            mov     rf, spaces13
+            add16   rf, rc
+            call    K_MSG
+
+            mov     rf, size_buf13
+            call    K_MSG               ; the digits+commas themselves
+            lbr     pde_print_name
+
+            ; ---- directory: "<DIR>" right-justified in the SAME
+            ; 13-column field the size uses, so names line up
+            ; consistently regardless of entry type (matching real
+            ; Windows `dir`'s own convention -- <DIR> and the byte
+            ; count share one right-justified field, not two
+            ; differently-sized ones). dir_tag is always exactly 7
+            ; characters, so the leading-space count is a fixed
+            ; constant (13-7=6) rather than dynamically measured, the
+            ; same way size_buf13's own count is measured at runtime
+            ; only because ITS length actually varies. ----
+pde_is_dir:
+            mov     rf, spaces13
+            add16   rf, 7               ; 13-7=6 leading spaces
+            call    K_MSG
+            mov     rf, dir_tag
+            call    K_MSG
+
+pde_print_name:
+            ; BUG FIX (hardware-found, 2026-07-26): the 2026-07-26
+            ; column reorder moved the size-or-<DIR> field to right
+            ; before the name, but never added a separator there -- so
+            ; a file's name printed glued directly onto its own size
+            ; digits ("805unset.c", no space at all), while a
+            ; directory only got the one space already baked into
+            ; dir_tag's own " <DIR> " text. Matches this file's own
+            ; established 2-space separator convention (used between
+            ; every other pair of columns above).
             call    K_INMSG
             db      "  ",0
 
@@ -532,19 +660,42 @@ p2d_print:
 arg_ptr:    dw      0
 dir_result: ds      DIRENT_LEN          ; 135-byte result buffer for
                                         ; K_DIR_READ/K_STAT
-size_buf:   ds      6                   ; decimal size scratch (max "65535"+null)
-spaces5:    db      "     ",0           ; 5 spaces -- blank size field, and
-                                        ; (via pointer offset) padding
-                                        ; source for right-justifying sizes
-dir_tag:    db      " <DIR> ",0         ; 7-column directory tag
-tag_blank:  db      "       ",0        ; 7 spaces -- blank tag field for files
+size_buf:   ds      6                   ; decimal scratch reused for
+                                        ; wr_year's own digits only now
+                                        ; (max "65535"+null) -- the
+                                        ; file-size column below has
+                                        ; its own size_buf13 (fmt_size32,
+                                        ; lib/fmt32.asm)
+dir_tag:    db      " <DIR> ",0         ; 7-column directory tag,
+                                        ; right-justified in the shared
+                                        ; 13-column size field (2026-
+                                        ; 07-26 column reorder -- see
+                                        ; pde_is_dir) -- tag_blank (the
+                                        ; old blank-tag-for-files field
+                                        ; this reorder made unnecessary,
+                                        ; see pde_print_name's own area
+                                        ; above) removed as dead code
 digit_buf:  ds      3                   ; scratch for print2digit ("99"+null)
+
+; size_buf13/spaces13: the widened (2026-07-26, >64K support) file-size
+; column -- size_buf13 holds fmt_size32's own comma-grouped digit
+; string (max "4,294,967,295" = 13 chars + null = 14); spaces13 is the
+; blank/right-justify-padding source, replacing the old spaces5 (no
+; longer used anywhere, removed). The digit-extraction scratch itself
+; (raw_digits/mod3_table) now lives in lib/fmt32.asm, shared with
+; progs/stat.asm (factored out 2026-07-26, at the user's own
+; suggestion, rather than duplicated here).
+size_buf13: ds      14
+spaces13:   db      "             ",0   ; 13 spaces
 
 wr_day:     db      0
 wr_month:   db      0
 wr_year:    dw      0
 wr_hour:    db      0
 wr_minute:  db      0
+wr_hour12:  db      0           ; 2026-07-26: 12-hour display value
+                                ; (1-12), converted from wr_hour
+dir_ampm:   ds      3           ; "AM"/"PM"+null
 
 dir_argv:       dw      0
 dir_argc:       db      0

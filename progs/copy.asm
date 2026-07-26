@@ -1,8 +1,15 @@
 ;
 ; copy.asm - copy one or more files
 ;
-; Usage: COPY <source> <destination>
-;        COPY <source> [source...] <destination-directory>
+; Usage: COPY [-y] <source> <destination>
+;        COPY [-y] <source> [source...] <destination-directory>
+;
+; -y (2026-07-26; widened the same day to work anywhere on the line,
+; matching XCOPY's own convention): auto-confirm any overwrite prompt
+; below, matching real DOS COPY's own /Y switch -- useful for
+; batch-script use, where an interactive Y/N prompt is exactly the
+; kind of thing that needs suppressing. May appear anywhere among the
+; arguments, not just first.
 ;
 ; Single-source form: <destination> may be a full path; if it names an
 ; existing directory, the source is copied into it under its own
@@ -25,7 +32,8 @@
 ;
 ; If a resolved destination file already exists, the user is prompted
 ; to confirm the overwrite (Y/N -- anything but Y/y cancels) for EACH
-; file; otherwise it's created directly, same as WTEST.
+; file, unless -y was given; otherwise it's created directly, same as
+; WTEST.
 ;
 ; Copying a file onto itself is not specially detected or guarded
 ; against -- it will open the same file twice, for read and write
@@ -77,34 +85,144 @@ DST_BUF_LEN:    equ     132
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
-            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
-            ; program's own name; argv[1..argc-2] are sources (just
-            ; argv[1] when argc==3); argv[argc-1] is the destination.
-            ; The shell's own tokenizer already handles quoting/
-            ; escaping, multiple/trailing spaces, and (2026-07-21)
-            ; wildcard expansion, so no hand-rolled splitting is
-            ; needed here.
+            ; --- optional "-y" flag, anywhere on the line (2026-07-26,
+            ; widened at the user's own request to match XCOPY's own
+            ; "flags can appear anywhere" convention rather than being
+            ; pinned to argv[1]): auto-confirm any overwrite prompt
+            ; below, matching real DOS COPY's own /Y switch. A single
+            ; pass filters the WHOLE argv line into a local, owned copy
+            ; (copy_argv_local) with every exact "-y" token dropped and
+            ; argc reduced to match -- argv[0] (this program's own
+            ; name, never read again) is always kept unconditionally,
+            ; so index 1 onward in the filtered array lines up exactly
+            ; as if "-y" had never been typed. Everything below this
+            ; block already reads through copy_argv/copy_argc uniformly
+            ; (never RA/RC directly), so nothing else in this file
+            ; needs to change -- copy_argv is simply pointed at the
+            ; filtered local array instead of the real argv table.
+            ; RA itself (the real table) is read-only throughout this
+            ; scan, never mutated -- avoids touching shell/kernel-owned
+            ; memory that isn't this program's own.
+            mov     rf, copy_yflag
+            ldi     0
+            str     rf
+
+            mov     rf, copy_orig_argc
             glo     rc
+            str     rf                  ; copy_orig_argc = argc (as
+                                        ; received, before filtering)
+
+            ldi     0
+            plo     r9                  ; R9.0 = source index i
+            ldi     0
+            plo     r8                  ; R8.0 = surviving count so far
+
+            mov     rb, copy_argv_local ; RB = filtered-array write
+                                        ; cursor
+
+cy_filter_loop:
+            mov     rf, copy_orig_argc
+            ldn     rf
+            str     r2
+            glo     r9
+            sm                          ; D = i - orig_argc
+            lbdf    cy_filter_done      ; i >= orig_argc: scanned every
+                                        ; real entry
+
+            ; RD = argv[i] (dereference the REAL table at RA + i*2 --
+            ; RA itself is only ever read here, never written)
+            glo     r9
+            plo     rd
+            ldi     0
+            phi     rd
+            shl16   rd                  ; RD = i*2
+            mov     rf, ra
+            add16   rf, rd              ; RF = &argv[i]
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = argv[i]'s string pointer
+
+            glo     r9
+            lbz     cy_filter_keep      ; i == 0: always keep (this
+                                        ; program's own name, never
+                                        ; checked as a flag)
+
+            mov     rf, rd
+            ldn     rf
+            xri     '-'
+            lbnz    cy_filter_keep
+
+            mov     rf, rd
+            inc     rf
+            ldn     rf
+            xri     'y'
+            lbnz    cy_filter_keep
+
+            mov     rf, rd
+            inc     rf
+            inc     rf
+            ldn     rf                  ; must be NUL for "-y" to be
+                                        ; exactly this whole token
+            lbnz    cy_filter_keep
+
+            ; exact "-y" match: record the flag, do NOT copy this
+            ; entry into the filtered array (dropping it is exactly
+            ; what removes it from the destination/source count below)
+            mov     rf, copy_yflag
+            ldi     1
+            str     rf
+            lbr     cy_filter_next
+
+cy_filter_keep:
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+            inc     rb                  ; copy_argv_local[count] =
+                                        ; argv[i]
+            glo     r8
+            adi     1
+            plo     r8
+
+cy_filter_next:
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     cy_filter_loop
+
+cy_filter_done:
+            mov     rf, copy_argv
+            mov     rd, copy_argv_local
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; copy_argv = &copy_argv_local
+                                        ; (the filtered array, not RA)
+
+            mov     rf, copy_argc
+            glo     r8
+            str     rf                  ; copy_argc = surviving count
+
+start_argcheck:
+            ; copy_argv/copy_argc are already fully populated by the
+            ; filter loop above (pointing at copy_argv_local, the
+            ; filtered array, with "-y" already removed and argc
+            ; already reduced to match) -- RA/RC themselves are NOT
+            ; used from here on; K_PATH_RESOLVE/K_DIR_OPEN/K_DIR_READ/
+            ; file_open all clobber RA per their own documented lists
+            ; anyway (same reasoning DEL's own multi-argument loop
+            ; already established for why this can't just stay in a
+            ; register). argv[0] is this program's own name;
+            ; argv[1..argc-2] are sources (just argv[1] when argc==3);
+            ; argv[argc-1] is the destination.
+            mov     rf, copy_argc
+            ldn     rf
             smi     3
             lbnf    usage_error         ; argc < 3: source and/or
                                         ; destination missing
-
-            ; stash argv + argc to memory -- K_PATH_RESOLVE/K_DIR_OPEN/
-            ; K_DIR_READ/file_open all clobber RA per their own
-            ; documented lists, so RA can't be trusted to survive from
-            ; entry through the rest of this program (same pattern
-            ; DEL's own multi-argument loop already established)
-            mov     rf, copy_argv
-            ghi     ra
-            str     rf
-            inc     rf
-            glo     ra
-            str     rf
-
-            mov     rf, copy_argc
-            glo     rc
-            str     rf
 
             ; dst_ptr = argv[argc-1] (the LAST argument -- identical
             ; to argv[2] when argc==3, so the single-source case is
@@ -249,7 +367,7 @@ copy_exit_err:
 
 usage_error:
             call    K_INMSG
-            db      "Usage: COPY <source> [source...] <destination>",13,10,0
+            db      "Usage: COPY [-y] <source> [source...] <destination>",13,10,0
             ldi     1
             rtn
 
@@ -455,6 +573,11 @@ co_check_overwrite:
             mov     rd, dst_fcb
             call    K_FILE_CLOSE
 
+            mov     rf, copy_yflag
+            ldn     rf
+            lbnz    co_dst_check_done   ; -y: skip the prompt entirely,
+                                        ; proceed as if "Y" was typed
+
             call    K_INMSG
             db      "Overwrite ",0
             mov     rf, real_dst
@@ -600,6 +723,17 @@ num_sources:    db      0
 copy_i:         db      0
 any_error:      db      0
 dst_is_dir_flag: db     0
+copy_yflag:     db      0
+copy_orig_argc: db      0
+copy_argv_local: ds     ARGV_MAX_ARGS*2 ; the "-y"-filtered argv table
+                                        ; copy_argv actually points at
+                                        ; after the entry-point filter
+                                        ; loop -- sized to the same
+                                        ; bound the real argv table
+                                        ; itself is capped at, so it
+                                        ; can never overflow regardless
+                                        ; of how many real arguments
+                                        ; were typed
 src_ptr:        dw      0
 dst_ptr:        dw      0
 real_dst:       dw      0
