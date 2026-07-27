@@ -2708,25 +2708,48 @@ pp_dirent:  ds      DIRENT_LEN
 ; Command-line history (2026-07-22). Persistent, disk-backed --
 ; "<shell_drive letter>:/bin/history.dat" -- the user's own proposal
 ; over a kernel-resident buffer, since it survives reboots and costs
-; zero permanent kernel bytes. Recall only for v1: Up/Down cycle
-; through history, replacing the line wholesale -- no mid-line cursor
-; movement. Escape sequences: hardware-confirmed 2026-07-23 that this
-; terminal actually sends the older VT52 convention for arrow keys --
-; bare ESC A (Up) / ESC B (Down), no bracket -- not the ANSI/VT100 CSI
-; form (ESC [ A / ESC [ B) originally assumed. Both are handled: VT52's
-; bare letter is checked first (since it's what's actually in use
-; here), with the bracketed CSI form kept as a fallback in case this
-; shell is ever used through a terminal/emulator in ANSI mode instead.
-; Anything else after ESC (in either form) is silently discarded rather
-; than corrupting the line. Backspace is 0x08 -- hardware-confirmed
-; working. Enter is CR (0x0D) or LF (0x0A) -- treating either as a
-; terminator was a deliberate defensive choice made before hardware
-; testing, since the exact byte(s) a live Enter keypress sends wasn't
-; independently confirmed the way the arrow keys/backspace now are;
-; hardware-confirmed 2026-07-22 that a blank Enter produces an
-; immediate clean reprompt with no spurious extra blank line, so
-; whatever this terminal actually sends for Enter, the CR-or-LF
-; handling deals with it correctly.
+; zero permanent kernel bytes. Escape sequences: this terminal sends
+; real ANSI/VT100 CSI form (ESC [ A / ESC [ B for Up/Down) -- an
+; earlier VT52-bare-letter theory (this comment's own original text)
+; turned out wrong and was corrected via hardware testing 2026-07-23;
+; see rlwh_escape's own header comment below for the full story and
+; why the bare-letter fallback was deliberately removed rather than
+; kept as defense-in-depth. Anything unrecognized after ESC is
+; silently discarded rather than corrupting the line. Backspace is
+; 0x08 -- hardware-confirmed working. Enter is CR (0x0D) or LF (0x0A)
+; -- treating either as a terminator was a deliberate defensive choice
+; made before hardware testing, since the exact byte(s) a live Enter
+; keypress sends wasn't independently confirmed the way the arrow
+; keys/backspace now are; hardware-confirmed 2026-07-22 that a blank
+; Enter produces an immediate clean reprompt with no spurious extra
+; blank line, so whatever this terminal actually sends for Enter, the
+; CR-or-LF handling deals with it correctly.
+;
+; Mid-line cursor editing (2026-07-27), added on top of the above:
+; Left/Right arrows (ESC [ D / ESC [ C, same CSI family as the
+; already-proven Up/Down) and Emacs/readline Ctrl shortcuts (Ctrl-A
+; home, Ctrl-E end, Ctrl-B left, Ctrl-F right, Ctrl-D delete-under-
+; cursor, Ctrl-H/backspace delete-behind-cursor -- generalized from the
+; original design's "always at the end of the line" assumption). A new
+; edit_cursor byte tracks position within LINE_BUF (0..hist_cur_len).
+; Insert and delete each shift LINE_BUF's own bytes via a small
+; byte-shuffle loop (edit_insert_char/edit_delete_at), then redraw via
+; the shared edit_redraw_tail (reprint the tail from edit_cursor
+; onward, blank any stale trailing character left by a delete, then
+; backspace the terminal cursor back to edit_cursor) -- independently
+; simulated at the byte level (including 8-bit register-wraparound
+; semantics, not just a high-level model) before being trusted, per
+; this project's own established practice for new buffer-manipulation
+; logic; see the plan file for the specific bug a naive pre-test/
+; decrement loop structure would have hit at cursor==0/length==0.
+; Deliberately deferred (need a cut buffer, not part of this pass):
+; Ctrl-K (kill to end of line), Ctrl-U (kill to start), Ctrl-W (delete
+; word back), Ctrl-Y (yank/paste) -- all four are explicitly matched
+; and silently discarded rather than falling through to the ordinary-
+; character path and being inserted as literal control bytes; so is
+; any other unrecognized byte below $20, closing a small pre-existing
+; gap (previously any unhandled control byte fell through and got
+; inserted as invisible literal text).
 ;
 ; read_line_with_history replaces K_INPUTL at its one call site
 ; (start_interactive) -- this call site is NEVER redirected (shell
@@ -2797,6 +2820,10 @@ read_line_with_history:
             ldi     0
             str     rf
 
+            mov     rf, edit_cursor
+            ldi     0
+            str     rf
+
             mov     rf, LINE_BUF
             ldi     0
             str     rf
@@ -2840,73 +2867,527 @@ rlwh_loop:
 
             glo     rc
             xri     13                  ; CR
-            lbz     rlwh_done
+            lbz     rlwh_finish
             glo     rc
             xri     10                  ; LF
-            lbz     rlwh_done
+            lbz     rlwh_finish
 
             glo     rc
-            xri     8                   ; backspace
+            xri     8                   ; backspace / Ctrl-H
             lbz     rlwh_backspace
 
-            ; ---- ordinary character: append if there's room ----
+            glo     rc
+            xri     1                   ; Ctrl-A: home
+            lbz     rlwh_home
+
+            glo     rc
+            xri     5                   ; Ctrl-E: end
+            lbz     rlwh_end
+
+            glo     rc
+            xri     2                   ; Ctrl-B: cursor left
+            lbz     rlwh_left
+
+            glo     rc
+            xri     6                   ; Ctrl-F: cursor right
+            lbz     rlwh_right
+
+            glo     rc
+            xri     4                   ; Ctrl-D: delete at cursor
+            lbz     rlwh_delete_at
+
+            ; ---- deferred: Ctrl-K/U/W/Y need a cut buffer, not
+            ; implemented yet -- explicitly discarded rather than
+            ; falling through to the ordinary-character path below
+            ; and being inserted as literal control bytes ----
+            glo     rc
+            xri     11                  ; Ctrl-K
+            lbz     rlwh_loop
+            glo     rc
+            xri     21                  ; Ctrl-U
+            lbz     rlwh_loop
+            glo     rc
+            xri     23                  ; Ctrl-W
+            lbz     rlwh_loop
+            glo     rc
+            xri     25                  ; Ctrl-Y
+            lbz     rlwh_loop
+
+            ; ---- any other control byte: silently discard rather
+            ; than insert as literal text (closes a pre-existing gap --
+            ; previously any unrecognized byte below $20 fell straight
+            ; through to the ordinary-character path) ----
+            glo     rc
+            smi     32
+            lbnf    rlwh_loop           ; < 32 ($20): discard
+
+            ; ---- ordinary character: insert at cursor if there's room ----
             mov     rf, hist_cur_len
             ldn     rf
             smi     127
             lbdf    rlwh_loop           ; at cap: silently drop
 
-            mov     rf, hist_cur_len
-            ldn     rf
-            plo     r8
-            ldi     0
-            phi     r8                  ; R8 = hist_cur_len (zero-ext)
-            mov     rf, LINE_BUF
-            add16   rf, r8              ; RF = LINE_BUF + hist_cur_len
-            glo     rc
-            str     rf
-            inc     rf
-            ldi     0
-            str     rf                  ; NUL-terminate right after
-
-            mov     rf, hist_cur_len
-            ldn     rf
-            adi     1
-            str     rf                  ; hist_cur_len++
-
-            glo     rc
-            call    K_TYPE              ; echo
+            call    edit_insert_char    ; RC.0 = character to insert
+                                        ; (already set, at the top of
+                                        ; this loop, and untouched by
+                                        ; every check above -- none of
+                                        ; them write RC)
 
             lbr     rlwh_loop
 
-rlwh_backspace:
+;------------------------------------------------------------------
+; edit_redraw_tail: reprint LINE_BUF[edit_cursor..hist_cur_len-1] (the
+; tail after an insert/delete at/before edit_cursor), print blank_count
+; trailing spaces to erase a stale character left over from a delete,
+; then walk the terminal cursor back to edit_cursor via backspaces.
+; Args:    D = blank_count (0 for insert, 1 for a single-character
+;          delete -- every edit operation in this pass changes exactly
+;          one character, so this is always 0 or 1)
+; Returns: nothing
+; Modifies: R8, R9, RF (and D)
+;------------------------------------------------------------------
+edit_redraw_tail:
+            plo     r9                  ; R9.0 = blank_count (stashed
+                                        ; to memory immediately below --
+                                        ; nothing survives in a
+                                        ; register across the K_TYPE
+                                        ; calls ahead)
+            mov     rf, ert_blank_count
+            glo     r9
+            str     rf
+
+            ; print starts from ert_start, NOT edit_cursor -- these are
+            ; DIFFERENT positions for insert (edit_cursor has already
+            ; advanced past the newly-inserted character by the time
+            ; this runs; ert_start is the OLD position, where the
+            ; visible content actually changed and where the terminal's
+            ; own physical cursor already sits). Real bug, hardware-
+            ; found (2026-07-27): the original version used edit_cursor
+            ; for both the print-start AND the backspace-target,
+            ; conflating two positions that only happen to coincide for
+            ; delete, not insert -- for insert this made the "tail"
+            ; start AT the already-advanced cursor, printing ZERO
+            ; characters on every ordinary keystroke (100% silent
+            ; input). See this routine's own callers for how ert_start
+            ; is set correctly in each case.
+            mov     rb, ert_pos
+            mov     rf, ert_start
+            ldn     rf
+            str     rb                  ; ert_pos = ert_start
+
+ert_print_loop:
+            mov     rf, ert_pos
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = ert_pos (zero-ext)
+            mov     rf, LINE_BUF
+            add16   rf, r8              ; RF = &LINE_BUF[ert_pos]
+            ldn     rf                  ; D = LINE_BUF[ert_pos]
+            lbz     ert_print_done      ; NUL: tail fully printed
+
+            call    K_TYPE              ; echo (D still holds the
+                                        ; character, set by ldn above)
+
+            mov     rf, ert_pos
+            ldn     rf
+            adi     1
+            str     rf                  ; ert_pos++
+            lbr     ert_print_loop
+
+ert_print_done:
+            ; ert_pos now equals hist_cur_len (the print loop walked
+            ; it there) -- print blank_count trailing spaces
+            mov     rf, ert_blank_count
+            ldn     rf
+            lbz     ert_no_blank
+
+            ldi     ' '
+            call    K_TYPE
+
+ert_no_blank:
+            ; backspace count = (ert_pos - edit_cursor) + blank_count
+            mov     rf, edit_cursor
+            ldn     rf
+            str     r2                  ; M(X) = edit_cursor (subtrahend)
+            mov     rf, ert_pos
+            ldn     rf                  ; D = ert_pos (minuend)
+            sm                          ; D = ert_pos - edit_cursor = tail_len
+            plo     r8                  ; stash (mov below clobbers D)
+
+            mov     rf, ert_blank_count
+            ldn     rf
+            str     r2                  ; M(X) = blank_count
+            glo     r8                  ; D = tail_len (reloaded)
+            add                         ; D = tail_len + blank_count
+            plo     r8                  ; stash (mov below clobbers D)
+            mov     rf, ert_bscount
+            glo     r8
+            str     rf
+
+ert_backspace_loop:
+            mov     rf, ert_bscount
+            ldn     rf
+            lbz     ert_backspace_done
+
+            ldi     8
+            call    K_TYPE
+
+            mov     rf, ert_bscount
+            ldn     rf
+            smi     1
+            str     rf
+            lbr     ert_backspace_loop
+
+ert_backspace_done:
+            rtn
+
+;------------------------------------------------------------------
+; edit_insert_char: insert RC.0 into LINE_BUF at edit_cursor, shifting
+; the existing tail (including the NUL terminator) right by one, then
+; redraw and advance the cursor. Caller has already confirmed there's
+; room (hist_cur_len < 127).
+;
+; The shift loop is a POST-test loop (copy first, then check whether
+; that was the last needed copy) rather than the more obvious pre-
+; test-then-decrement shape -- independently verified via a byte-
+; accurate mechanical simulation (not just a high-level model) that a
+; pre-test/decrement loop breaks at cursor==0 with an empty line: the
+; loop counter would need to go to -1 to signal "done", but as an
+; unsigned byte it wraps to 255 instead, and a naive unsigned
+; comparison would then incorrectly treat 255 as "still >= 0" and
+; keep looping. The post-test shape never decrements past the target,
+; sidestepping the whole issue -- see the plan file for the full
+; derivation.
+; Args:    RC.0 = character to insert
+; Returns: nothing
+; Modifies: R7, R8, R9, RB, RF (and D)
+;------------------------------------------------------------------
+edit_insert_char:
+            mov     rb, eic_i
             mov     rf, hist_cur_len
             ldn     rf
-            lbz     rlwh_loop           ; empty: no-op
+            str     rb                  ; eic_i = hist_cur_len (shift
+                                        ; starts from the end, working
+                                        ; backward, to avoid clobbering
+                                        ; not-yet-moved bytes)
 
+eic_shift_loop:
+            mov     rf, eic_i
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = i (zero-extended)
+            mov     rf, LINE_BUF
+            add16   rf, r8              ; RF = &LINE_BUF[i]
+            ldn     rf                  ; D = LINE_BUF[i]
+            plo     r9                  ; stash (mov below clobbers D)
+            inc     rf                  ; RF = &LINE_BUF[i+1]
+            glo     r9
+            str     rf                  ; LINE_BUF[i+1] = LINE_BUF[i]
+
+            ; was that the last needed copy (i == edit_cursor)? see
+            ; this routine's own header for why this is a post-test
+            mov     rf, edit_cursor
+            ldn     rf
+            str     r2                  ; M(X) = edit_cursor
+            mov     rf, eic_i
+            ldn     rf                  ; D = i
+            sm                          ; D = i - edit_cursor
+            lbz     eic_shift_done      ; i == edit_cursor: done
+
+            mov     rf, eic_i
+            ldn     rf
             smi     1
-            plo     r8                  ; stash the decremented value
-                                        ; (gotcha #4: the mov below
-                                        ; would clobber D first)
-            mov     rf, hist_cur_len
-            glo     r8
-            str     rf                  ; hist_cur_len--
+            str     rf                  ; i--
+            lbr     eic_shift_loop
 
-            mov     rf, hist_cur_len
+eic_shift_done:
+            ; ert_start = edit_cursor (the OLD, pre-increment value --
+            ; must be captured here, before edit_cursor advances below)
+            mov     rb, ert_start
+            mov     rf, edit_cursor
+            ldn     rf
+            str     rb                  ; ert_start = edit_cursor (OLD)
+
+            mov     rf, edit_cursor
             ldn     rf
             plo     r8
             ldi     0
             phi     r8
             mov     rf, LINE_BUF
             add16   rf, r8
+            glo     rc
+            str     rf                  ; LINE_BUF[edit_cursor] = char
+                                        ; (still the OLD value here)
+
+            mov     rf, hist_cur_len
+            ldn     rf
+            adi     1
+            str     rf                  ; hist_cur_len++
+
+            mov     rf, edit_cursor
+            ldn     rf
+            adi     1
+            str     rf                  ; edit_cursor++ (now FINAL)
+
+            ldi     0                   ; blank_count = 0 (insert)
+            call    edit_redraw_tail
+            rtn
+
+;------------------------------------------------------------------
+; edit_delete_at: delete the character at LINE_BUF[hole], shifting
+; LINE_BUF[hole+1..hist_cur_len] (including the NUL) left by one, then
+; decrement hist_cur_len and redraw. Does NOT touch edit_cursor OR
+; ert_start -- the CALLER must set both to their final values BEFORE
+; calling (edit_cursor = the resting position after the delete; for
+; Ctrl-D that's unchanged/hole, for backspace that's hole too, but the
+; caller writes it explicitly either way; ert_start = hole in both
+; cases, since that's where the visible content actually changed and
+; -- critically -- where the terminal's own PHYSICAL cursor must
+; already be sitting by the time edit_redraw_tail runs: for Ctrl-D the
+; cursor never moves, so it's already there; for backspace the caller
+; must print one explicit backspace first to move it there, since the
+; physical cursor starts one position to the right of hole). Caller
+; has already confirmed hole < hist_cur_len.
+; Args:    D = hole (position to delete)
+; Returns: nothing
+; Modifies: R7, R8, R9, RF (and D)
+;------------------------------------------------------------------
+edit_delete_at:
+            plo     r9
+            mov     rf, eda_i
+            glo     r9
+            str     rf                  ; eda_i = hole
+
+eda_shift_loop:
+            ; pre-test is safe here (unlike the insert loop) since i
+            ; only ever increases -- no underflow risk
+            mov     rf, hist_cur_len
+            ldn     rf
+            str     r2                  ; M(X) = hist_cur_len
+            mov     rf, eda_i
+            ldn     rf                  ; D = i
+            sm                          ; D = i - hist_cur_len, DF=1 if
+                                        ; i >= hist_cur_len (no borrow)
+            lbdf    eda_shift_done
+
+            mov     rf, eda_i
+            ldn     rf
+            plo     r8
             ldi     0
-            str     rf                  ; LINE_BUF[new_len] = NUL
+            phi     r8
+            mov     rf, LINE_BUF
+            add16   rf, r8              ; RF = &LINE_BUF[i]
+            inc     rf                  ; RF = &LINE_BUF[i+1]
+            ldn     rf                  ; D = LINE_BUF[i+1]
+            plo     r9                  ; stash (mov below clobbers D)
+
+            mov     rf, eda_i
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            mov     rf, LINE_BUF
+            add16   rf, r8              ; RF = &LINE_BUF[i]
+            glo     r9
+            str     rf                  ; LINE_BUF[i] = LINE_BUF[i+1]
+
+            mov     rf, eda_i
+            ldn     rf
+            adi     1
+            str     rf                  ; i++
+            lbr     eda_shift_loop
+
+eda_shift_done:
+            mov     rf, hist_cur_len
+            ldn     rf
+            smi     1
+            str     rf                  ; hist_cur_len--
+
+            ldi     1                   ; blank_count = 1 (delete)
+            call    edit_redraw_tail
+            rtn
+
+;------------------------------------------------------------------
+; rlwh_home/rlwh_end/rlwh_left/rlwh_right/rlwh_delete_at: Ctrl-A/E/B/F/D
+; and (via rlwh_escape) the Left/Right arrow equivalents. Plain jump
+; targets, not call/return subroutines -- each ends with "lbr
+; rlwh_loop" directly, reached via lbz from both the main dispatch
+; chain and rlwh_escape.
+;------------------------------------------------------------------
+rlwh_home:
+            mov     rf, edit_cursor
+            ldn     rf
+            lbz     rlwh_loop           ; already at 0: no-op
+
+            mov     rf, rh_count
+            mov     rb, edit_cursor
+            ldn     rb
+            str     rf                  ; rh_count = edit_cursor
+
+rh_bs_loop:
+            mov     rf, rh_count
+            ldn     rf
+            lbz     rh_done
 
             ldi     8
             call    K_TYPE
-            ldi     ' '
+
+            mov     rf, rh_count
+            ldn     rf
+            smi     1
+            str     rf
+            lbr     rh_bs_loop
+
+rh_done:
+            mov     rf, edit_cursor
+            ldi     0
+            str     rf
+            lbr     rlwh_loop
+
+rlwh_end:
+            mov     rf, edit_cursor
+            ldn     rf
+            str     r2                  ; M(X) = edit_cursor
+            mov     rf, hist_cur_len
+            ldn     rf
+            sm                          ; D = hist_cur_len - edit_cursor
+            lbz     rlwh_loop           ; already at end: no-op
+
+            mov     rb, re_pos
+            mov     rf, edit_cursor
+            ldn     rf
+            str     rb                  ; re_pos = edit_cursor
+
+re_print_loop:
+            mov     rf, re_pos
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            mov     rf, LINE_BUF
+            add16   rf, r8
+            ldn     rf
+            lbz     re_print_done       ; NUL: done
+
             call    K_TYPE
+
+            mov     rf, re_pos
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     re_print_loop
+
+re_print_done:
+            mov     rb, edit_cursor
+            mov     rf, hist_cur_len
+            ldn     rf
+            str     rb                  ; edit_cursor = hist_cur_len
+            lbr     rlwh_loop
+
+rlwh_left:
+            mov     rf, edit_cursor
+            ldn     rf
+            lbz     rlwh_loop           ; already at 0: no-op
+
+            smi     1
+            plo     r8                  ; stash (mov below clobbers D)
+            mov     rf, edit_cursor
+            glo     r8
+            str     rf                  ; edit_cursor--
+
             ldi     8
             call    K_TYPE
+            lbr     rlwh_loop
+
+rlwh_right:
+            mov     rf, edit_cursor
+            ldn     rf
+            str     r2                  ; M(X) = edit_cursor
+            mov     rf, hist_cur_len
+            ldn     rf
+            sm                          ; D = hist_cur_len - edit_cursor
+            lbz     rlwh_loop           ; already at end: no-op
+
+            mov     rf, edit_cursor
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            mov     rf, LINE_BUF
+            add16   rf, r8
+            ldn     rf                  ; D = LINE_BUF[edit_cursor] --
+                                        ; the character about to be
+                                        ; passed over
+            call    K_TYPE
+
+            mov     rf, edit_cursor
+            ldn     rf
+            adi     1
+            str     rf                  ; edit_cursor++
+            lbr     rlwh_loop
+
+rlwh_delete_at:
+            mov     rf, edit_cursor
+            ldn     rf
+            str     r2                  ; M(X) = edit_cursor
+            mov     rf, hist_cur_len
+            ldn     rf
+            sm                          ; D = hist_cur_len - edit_cursor
+            lbz     rlwh_loop           ; at end: nothing to delete
+
+            ; Ctrl-D doesn't move the cursor -- it stays at hole, which
+            ; is also where the terminal's own physical cursor already
+            ; sits (nothing has moved it), so ert_start = edit_cursor
+            ; unchanged, and edit_cursor itself needs no rewrite
+            mov     rb, ert_start
+            mov     rf, edit_cursor
+            ldn     rf
+            str     rb                  ; ert_start = edit_cursor (=hole)
+
+            mov     rf, edit_cursor
+            ldn     rf                  ; D = hole = edit_cursor
+            call    edit_delete_at
+            lbr     rlwh_loop
+
+rlwh_backspace:
+            mov     rf, edit_cursor
+            ldn     rf
+            lbz     rlwh_loop           ; at start: no-op
+
+            smi     1                   ; D = edit_cursor - 1 = hole
+            plo     r8                  ; stash hole (mov below clobbers D)
+
+            mov     rb, ert_start
+            glo     r8
+            str     rb                  ; ert_start = hole
+
+            mov     rf, edit_cursor
+            glo     r8
+            str     rf                  ; edit_cursor = hole (its FINAL
+                                        ; value -- must be set BEFORE
+                                        ; calling edit_delete_at, since
+                                        ; edit_redraw_tail reads it as
+                                        ; the backspace target)
+
+            ; move the terminal's own PHYSICAL cursor from its current
+            ; position (one past hole) back to hole BEFORE the shift+
+            ; redraw runs -- edit_redraw_tail's own print loop starts
+            ; from ert_start and assumes the physical cursor is already
+            ; sitting there (true for Ctrl-D, where the cursor never
+            ; moves, but NOT true for backspace without this explicit
+            ; step first)
+            ldi     8
+            call    K_TYPE
+
+            ; D = hole -- reloaded fresh from memory (edit_cursor
+            ; already holds it, stored above), never trusted in R8
+            ; across the K_TYPE call (its own clobber footprint isn't
+            ; proven, gotcha #8/#10)
+            mov     rf, edit_cursor
+            ldn     rf
+            call    edit_delete_at
 
             lbr     rlwh_loop
 
@@ -2961,7 +3442,39 @@ rlwh_escape:
             glo     rc
             xri     'B'
             lbz     rlwh_down
-            lbr     rlwh_loop           ; unrecognized: discard
+            glo     rc
+            xri     'C'                 ; Right arrow -- same CSI
+                                        ; family as the already-proven
+                                        ; Up/Down, confirmed by the
+                                        ; user (2026-07-27)
+            lbz     rlwh_right
+            glo     rc
+            xri     'D'                 ; Left arrow
+            lbz     rlwh_left
+
+            ; Del key: "ESC [ 3 ~", a 4-byte sequence (vs. the 3-byte
+            ; "ESC [ A"-style arrows above) -- '3' here means a THIRD
+            ; byte is still expected before this sequence is complete,
+            ; unlike A/B/C/D which terminate the sequence immediately.
+            glo     rc
+            xri     '3'
+            lbnz    rlwh_loop           ; unrecognized: discard
+
+            call    f_uread             ; read the expected '~' terminator
+            plo     rc
+            glo     rc
+            xri     '~'
+            lbnz    rlwh_loop           ; malformed: discard rather than
+                                        ; guess -- same "never accept a
+                                        ; partial/malformed sequence"
+                                        ; philosophy as the Up/Down
+                                        ; byte-drop fix above
+            lbr     rlwh_delete_at      ; Del: same as Ctrl-D, delete
+                                        ; the character under the
+                                        ; cursor (distinct from
+                                        ; backspace/Ctrl-H, which
+                                        ; deletes the character BEFORE
+                                        ; the cursor)
 
 rlwh_up:
             call    hist_recall_up
@@ -2971,7 +3484,7 @@ rlwh_down:
             call    hist_recall_down
             lbr     rlwh_loop
 
-rlwh_done:
+rlwh_finish:
             rtn
 
 ;------------------------------------------------------------------
@@ -3045,6 +3558,15 @@ hrl_erase_done:
             mov     rf, hist_cur_len
             glo     rc
             str     rf
+
+            mov     rf, edit_cursor
+            glo     rc
+            str     rf                  ; edit_cursor = new length (end)
+                                        ; -- recalling a history entry
+                                        ; or restoring the originally-
+                                        ; typed line places the cursor
+                                        ; at the end, matching standard
+                                        ; bash/DOS behavior (2026-07-27)
 
             mov     rf, LINE_BUF
             call    K_MSG
@@ -3813,6 +4335,30 @@ hist_filesize:      dw      0
 hist_start_offset:  dw      0
 hist_cur_len:       db      0
 hist_erase_count:   db      0
+
+; Mid-line cursor editing (2026-07-27) -- see read_line_with_history's
+; own header comment above for the full design.
+edit_cursor:        db      0           ; position within LINE_BUF,
+                                        ; 0..hist_cur_len
+ert_blank_count:    db      0           ; edit_redraw_tail's own arg
+ert_start:          db      0           ; edit_redraw_tail's own print-
+                                        ; start position, set by the
+                                        ; caller -- distinct from
+                                        ; edit_cursor (the backspace
+                                        ; target), see edit_redraw_tail's
+                                        ; own header for why these two
+                                        ; positions can differ
+ert_pos:            db      0           ; edit_redraw_tail's own print
+                                        ; cursor
+ert_bscount:        db      0           ; edit_redraw_tail's own
+                                        ; backspace-loop counter
+eic_i:              db      0           ; edit_insert_char's own
+                                        ; shift-loop index
+eda_i:              db      0           ; edit_delete_at's own
+                                        ; shift-loop index
+rh_count:           db      0           ; rlwh_home's own backspace-
+                                        ; loop counter
+re_pos:             db      0           ; rlwh_end's own print cursor
 
 hist_tmp_fcb:       ds      FCB_LEN
 hist_tmp_iobuf:     ds      FCB_IOBUF_LEN
