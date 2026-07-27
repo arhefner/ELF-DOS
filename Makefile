@@ -185,9 +185,24 @@ lib/move.prg: lib/move.asm include/opcodes.def include/kernel_api.inc
 lib/fmt32.prg: lib/fmt32.asm include/opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) fmt32.asm
 
-bin/dir: progs/dir.prg lib/fmt32.prg | bin
-	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg
+lib/file_glob.prg: lib/file_glob.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/file_glob.inc
+	cd lib && $(ASM) $(ASMFLAGS) file_glob.asm
+
+bin/dir: progs/dir.prg lib/fmt32.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg lib/file_glob.prg
 	rm -f bin/dir.lkb
+
+bin/del: progs/del.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/del progs/del.prg lib/file_glob.prg
+	rm -f bin/del.lkb
+
+bin/copy: progs/copy.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/copy progs/copy.prg lib/file_glob.prg
+	rm -f bin/copy.lkb
+
+bin/attrib: progs/attrib.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/attrib progs/attrib.prg lib/file_glob.prg
+	rm -f bin/attrib.lkb
 
 bin/stat: progs/stat.prg lib/fmt32.prg | bin
 	$(LINK) $(LFLAGS) -o bin/stat progs/stat.prg lib/fmt32.prg
@@ -225,8 +240,8 @@ test/bin/big64test: test/big64test.prg lib/fmt32.prg | test/bin
 	$(LINK) $(LFLAGS) -o test/bin/big64test test/big64test.prg lib/fmt32.prg
 	rm -f test/bin/big64test.lkb
 
-bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg
+bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg
 	rm -f bin/ls.lkb
 
 bin/more: progs/more.prg lib/env.prg | bin
@@ -241,8 +256,8 @@ bin/shell: progs/shell.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/shell progs/shell.prg lib/env.prg
 	rm -f bin/shell.lkb
 
-bin/move: progs/move.prg lib/move.prg | bin
-	$(LINK) $(LFLAGS) -o bin/move progs/move.prg lib/move.prg
+bin/move: progs/move.prg lib/move.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/move progs/move.prg lib/move.prg lib/file_glob.prg
 	rm -f bin/move.lkb
 
 #------------------------------------------------------------------

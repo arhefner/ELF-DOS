@@ -24,6 +24,23 @@
 ; single-file/multi-arg reference still shows a hidden entry, matching
 ; DOS's "hidden only affects casual listing" convention.
 ;
+; Wildcard support (2026-07-27, redesigned): a "*"/"?" pattern argument
+; is detected via lib/file_glob.asm's is_glob and expanded via
+; glob_init/glob_next, one match at a time, into the SAME per-match
+; K_STAT+print_dir_entry body dir_multi_arg already uses -- whether the
+; pattern is the program's only argument or one of several. This is a
+; deliberate behavior improvement over the old shell-side pre-expansion
+; design: previously a glob matching exactly one file took a DIFFERENT
+; code path (the single-argument K_PATH_RESOLVE-and-maybe-list-a-
+; directory logic) than one matching several (dir_multi_arg) -- an
+; accidental quirk of match-count-dependent pre-expansion. Now match
+; count is irrelevant: ANY glob pattern always shows one line per
+; match, never recursing into a matched directory's own contents (a
+; literal, non-glob directory argument still lists its contents, as
+; always). A pattern matching zero files falls back to the literal,
+; unexpanded text (nullglob-off), which for a single argument re-enters
+; the original K_PATH_RESOLVE logic unchanged.
+;
 ; Each entry is printed as a fixed-width line (column order changed
 ; 2026-07-26, at the user's own request, to match later MS-DOS/Windows
 ; `dir` output -- post-LFN versions print date/time before the size/
@@ -34,16 +51,22 @@
 ;               DIRENT_WRTDATE/DIRENT_WRTTIME's packed FAT bit fields
 ;               -- see kernel/rtc.asm; hour converted from the on-disk
 ;               24-hour value to 12-hour + AM/PM display)
-;   size/type:  right-justified, comma-grouped decimal byte count
-;               (files) or "<DIR>" (directories) -- both share this
-;               ONE 13-column right-justified field, so names line up
-;               consistently regardless of entry type (matching real
-;               Windows `dir`'s own convention), rather than two
-;               differently-sized fields. Up to 10 digits + 3 commas,
-;               "4,294,967,295" is the largest 32-bit value and fills
-;               the column exactly (2026-07-26, widened from a plain
-;               5-column 16-bit-only field to match kernel/file.asm's
-;               own >64K support -- see fmt_size32/lib/fmt32.asm)
+;   type:       a dedicated 7-character column, " <DIR> " for a
+;               directory or 7 blank spaces for a file (2026-07-26,
+;               split from the size column below into its own field
+;               at the user's own request -- previously <DIR> and the
+;               byte count shared ONE right-justified field; now every
+;               entry always shows the SAME two columns, one of them
+;               blank, rather than one column whose content depends on
+;               entry type)
+;   size:       right-justified, comma-grouped decimal byte count for
+;               a file, or 13 blank spaces for a directory (its own
+;               type already shown in the column above). Up to 10
+;               digits + 3 commas, "4,294,967,295" is the largest
+;               32-bit value and fills the column exactly (2026-07-26,
+;               widened from a plain 5-column 16-bit-only field to
+;               match kernel/file.asm's own >64K support -- see
+;               fmt_size32/lib/fmt32.asm)
 ;   name:       the file/directory name, separated from the size/type
 ;               field above by 2 spaces (a real hardware-found bug,
 ;               2026-07-26: the first cut of the column reorder left
@@ -54,11 +77,15 @@
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
+#include    include/file_glob.inc
 
             extrn   fmt_size32          ; lib/fmt32.asm -- 32-bit
                                         ; comma-grouped decimal
                                         ; formatting, shared with
                                         ; progs/stat.asm
+            extrn   is_glob
+            extrn   glob_init
+            extrn   glob_next
 
             org     PROG_BASE
 
@@ -78,6 +105,17 @@ start:
                                         ; because this program reads RA
                                         ; right after this call)
 
+            ; stash it -- the new (2026-07-27) is_glob check in the
+            ; argc==2 path below clobbers RD before the literal-path
+            ; fallback would otherwise still need it as K_PATH_
+            ; RESOLVE's base cluster for a relative path
+            mov     rf, dir_curdir_clust
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
             ; RA = argv pointer, RC = argc (RC.0 alone is enough --
             ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
             ; program's own name.
@@ -91,14 +129,96 @@ start:
             lbnf    dir_open_target     ; argc < 2: no path given, list
                                         ; the current directory
 
-            ; argc == 2: exactly one path argument -- unchanged from
-            ; before multi-argument support existed
+            ; argc == 2: exactly one path argument. Check is_glob
+            ; FIRST (2026-07-27) -- see the file header for why a glob
+            ; routes into dir_multi_arg's own per-match body instead of
+            ; the literal K_PATH_RESOLVE-and-maybe-list-a-directory
+            ; logic below.
             mov     rb, ra
             add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[1] (path argument)
+            mov     rf, dir_single_arg
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; dir_single_arg = argv[1]
+
+            mov     rf, rd
+            call    is_glob
+            lbdf    dir_single_literal  ; DF=1: not a glob
+
+            ; --- is a glob: glob_init ---
+            mov     rf, dir_single_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            mov     rd, dir_glob_ctx
+            call    glob_init
+            lbdf    not_found           ; bad prefix path -- same
+                                        ; message as any other bad path
+
+            mov     rf, dir_any_error
+            ldi     0
+            str     rf
+
+            mov     rf, dir_glob_found
+            ldi     0
+            str     rf
+
+dir_single_glob_loop:
+            mov     rd, dir_glob_ctx
+            call    glob_next
+            lbdf    dir_single_glob_done  ; exhausted
+
+            ; BUG FIX (caught in review, before ever assembling): RF
+            ; holds glob_next's own returned match pointer at this
+            ; point -- "mov rf, dir_glob_found" below would silently
+            ; overwrite it with dir_glob_found's OWN address before
+            ; dir_stat_and_print ever got a chance to read it. Stash
+            ; it in R9 first (free at this point), restore right
+            ; before the call.
+            mov     r9, rf              ; R9 = matched full path
+
+            mov     rf, dir_glob_found
+            ldi     1
+            str     rf
+
+            mov     rf, r9              ; RF = matched full path again
+            call    dir_stat_and_print
+            lbr     dir_single_glob_loop
+
+dir_single_glob_done:
+            mov     rf, dir_glob_found
+            ldn     rf
+            lbz     dir_single_literal  ; zero matches: nullglob-off
+                                        ; fallback to the literal text
+
+            mov     rf, dir_any_error
+            ldn     rf
+            lbnz    dma_exit_err        ; reuse dir_multi_arg's own
+                                        ; error exit
+            ldi     0                   ; exit code 0 = success
+            rtn
+
+dir_single_literal:
+            mov     rb, dir_single_arg
             lda     rb
             phi     rf
             ldn     rb
             plo     rf                  ; RF = argv[1] (path argument)
+            mov     rb, dir_curdir_clust
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = cur_dir cluster (base
+                                        ; for a relative path -- see the
+                                        ; stash in start: above)
             call    K_PATH_RESOLVE      ; RD = parent cluster, RF = final
                                         ; component, DF = 0/1
             lbdf    not_found           ; bad intermediate component
@@ -255,24 +375,68 @@ dma_loop:
             ldn     rf
             plo     rd                  ; RD = argv[dir_i]
 
-            ; stash the path pointer for the possible error message
-            ; below BEFORE calling K_STAT
             mov     rf, dir_cur_path
             ghi     rd
             str     rf
             inc     rf
             glo     rd
+            str     rf                  ; dir_cur_path = argv[dir_i]
+
+            mov     rf, rd
+            call    is_glob
+            lbdf    dma_literal         ; DF=1: not a glob
+
+            ; --- is a glob: glob_init ---
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            mov     rd, dir_glob_ctx
+            call    glob_init
+            lbdf    dma_bad_path        ; bad prefix path: this argv
+                                        ; entry's own error
+
+            mov     rf, dir_glob_found
+            ldi     0
             str     rf
 
-            mov     rf, rd              ; RF = path string
-            mov     rd, dir_result      ; RD = result buffer
-            call    K_STAT              ; DF = 0/1
-            lbdf    dma_not_found
+dma_glob_loop:
+            mov     rd, dir_glob_ctx
+            call    glob_next
+            lbdf    dma_glob_done       ; exhausted
 
-            call    print_dir_entry
+            ; BUG FIX (caught in review, before ever assembling): see
+            ; dir_single_glob_loop's own identical fix above -- RF
+            ; must be stashed before the flag-set clobbers it.
+            mov     r9, rf              ; R9 = matched full path
+
+            mov     rf, dir_glob_found
+            ldi     1
+            str     rf
+
+            mov     rf, r9              ; RF = matched full path again
+            call    dir_stat_and_print
+            lbr     dma_glob_loop
+
+dma_glob_done:
+            mov     rf, dir_glob_found
+            ldn     rf
+            lbnz    dma_next            ; had at least one match: done
+
+            ; zero matches: nullglob-off fallback to the literal,
+            ; unexpanded text
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    dir_stat_and_print
             lbr     dma_next
 
-dma_not_found:
+dma_bad_path:
             call    K_INMSG
             db      "Not found: ",0
             mov     rf, dir_cur_path
@@ -288,6 +452,16 @@ dma_not_found:
             mov     rf, dir_any_error
             ldi     $FF
             str     rf
+            lbr     dma_next
+
+dma_literal:
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    dir_stat_and_print
 
 dma_next:
             mov     rf, dir_i
@@ -306,6 +480,52 @@ dma_done:
 
 dma_exit_err:
             ldi     1
+            rtn
+
+;------------------------------------------------------------------
+; dir_stat_and_print: K_STAT a single path and print its entry line
+; via print_dir_entry, or print "Not found: "+path and set
+; dir_any_error on failure. Shared by dir_multi_arg's own per-item loop
+; and the argc==2 glob-match loop above.
+; Args:    RF = path
+; Returns: nothing
+; Modifies: everything (calls K_STAT/print_dir_entry)
+;------------------------------------------------------------------
+dir_stat_and_print:
+            mov     r9, rf              ; R9 = path (RF is about to be
+                                        ; reused for K_STAT's own args)
+            mov     rf, dir_cur_path
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf                  ; dir_cur_path = path (for the
+                                        ; possible error message)
+
+            mov     rf, r9              ; RF = path string
+            mov     rd, dir_result      ; RD = result buffer
+            call    K_STAT              ; DF = 0/1
+            lbdf    dsp_not_found
+
+            call    print_dir_entry
+            rtn
+
+dsp_not_found:
+            call    K_INMSG
+            db      "Not found: ",0
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, dir_any_error
+            ldi     $FF
+            str     rf
             rtn
 
 ;------------------------------------------------------------------
@@ -522,14 +742,40 @@ dir_hour12_done:
             call    K_INMSG
             db      "  ",0
 
-            ; ---- dir-tag-or-size field (moved here 2026-07-26, right
-            ; after date/time -- internal logic unchanged from the
-            ; original size-first layout, just relocated) ----
+            ; ---- <DIR>-or-blank column (2026-07-26, split into its
+            ; own field at the user's own request -- see the file
+            ; header for the full rationale): a dedicated 7-character
+            ; column, separate from the size column that follows. ----
             mov     rf, dir_result
             add16   rf, DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_DIR
-            lbnz    pde_is_dir
+            lbz     pde_dirtag_blank
+
+            mov     rf, dir_tag
+            call    K_MSG
+            lbr     pde_dirtag_done
+
+pde_dirtag_blank:
+            mov     rf, spaces13
+            add16   rf, 6               ; 13-7=6 -- last 7 chars of
+                                        ; spaces13 = 7 blank spaces,
+                                        ; matching dir_tag's own width
+            call    K_MSG
+
+pde_dirtag_done:
+            call    K_INMSG
+            db      "  ",0
+
+            ; ---- size-or-blank column: right-justified 13-column
+            ; comma-grouped decimal byte count for a file, or 13
+            ; blank spaces for a directory (its own type already
+            ; shown in the column above) ----
+            mov     rf, dir_result
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_DIR
+            lbnz    pde_size_blank
 
             ; ---- file: right-justified 13-column comma-grouped
             ; decimal size (2026-07-26, >64K support) -- was a plain
@@ -585,33 +831,20 @@ pde_count_done:
             call    K_MSG               ; the digits+commas themselves
             lbr     pde_print_name
 
-            ; ---- directory: "<DIR>" right-justified in the SAME
-            ; 13-column field the size uses, so names line up
-            ; consistently regardless of entry type (matching real
-            ; Windows `dir`'s own convention -- <DIR> and the byte
-            ; count share one right-justified field, not two
-            ; differently-sized ones). dir_tag is always exactly 7
-            ; characters, so the leading-space count is a fixed
-            ; constant (13-7=6) rather than dynamically measured, the
-            ; same way size_buf13's own count is measured at runtime
-            ; only because ITS length actually varies. ----
-pde_is_dir:
+pde_size_blank:
             mov     rf, spaces13
-            add16   rf, 7               ; 13-7=6 leading spaces
-            call    K_MSG
-            mov     rf, dir_tag
-            call    K_MSG
+            call    K_MSG               ; 13 blank spaces -- no size
+                                        ; shown for a directory, its
+                                        ; own type already printed in
+                                        ; the dedicated column above
 
 pde_print_name:
-            ; BUG FIX (hardware-found, 2026-07-26): the 2026-07-26
-            ; column reorder moved the size-or-<DIR> field to right
-            ; before the name, but never added a separator there -- so
-            ; a file's name printed glued directly onto its own size
-            ; digits ("805unset.c", no space at all), while a
-            ; directory only got the one space already baked into
-            ; dir_tag's own " <DIR> " text. Matches this file's own
-            ; established 2-space separator convention (used between
-            ; every other pair of columns above).
+            ; separator before the name (2026-07-26; originally a
+            ; hardware-found bug where this was missing entirely --
+            ; see the file's own git history -- now applies uniformly
+            ; regardless of entry type, matching this file's own
+            ; established 2-space separator convention used between
+            ; every other pair of columns).
             call    K_INMSG
             db      "  ",0
 
@@ -702,5 +935,9 @@ dir_argc:       db      0
 dir_i:          db      0
 dir_any_error:  db      0
 dir_cur_path:   dw      0
+dir_curdir_clust: dw    0
+dir_single_arg: dw      0
+dir_glob_found: db      0
+dir_glob_ctx:   ds      GLOB_CTX_LEN
 
             end     start

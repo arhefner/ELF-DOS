@@ -145,6 +145,166 @@ dir_last_off:   dw      0
 
             rtn
 
+            endp
+
+;==================================================================
+; dir_save_state: snapshot the directory iterator's current scan
+; position into a caller-provided DIR_STATE_LEN-byte buffer, so a
+; later dir_restore_state call can resume dir_read exactly where this
+; call left off -- even though other, unrelated directory operations
+; (K_STAT, file_open, another program's own dir scan, etc.) may run in
+; between and freely clobber dir_clust/dir_sect/dir_eptr/dir_eleft/
+; dir_cur_lba/dir_buf in the meantime. Added 2026-07-27 for
+; lib/file_glob.asm's glob_next, whose original design re-scanned the
+; whole directory from the start on every call (real, user-reported
+; slowness for a directory with many matches) precisely because there
+; was previously no way for a caller outside this file to snapshot/
+; restore this state.
+;
+; Deliberately does NOT save dir_lfn/dir_lfn_chk/dir_lfn_ok/
+; dir_last_off: dir_read's own logic (see its "clear LFN state"
+; writes, both on a successful match and on drd_skip_no_lfn) leaves
+; dir_lfn_ok = 0 immediately before EVERY successful return -- an LFN
+; sequence is fully consumed within the single dir_read call that
+; returns the entry it describes, never spanning a call boundary, so
+; there is nothing meaningful to preserve there. dir_last_off is a
+; "find my way back to THIS entry" value for a different use case
+; (file_open's own rewrite-in-place need), not needed to resume
+; scanning forward.
+;
+; Args:    RF = pointer to a caller-owned DIR_STATE_LEN-byte buffer
+; Returns: nothing
+; Modifies: RF, RD (and D)
+;==================================================================
+
+            proc    dir_save_state
+
+            mov     rd, dir_clust       ; dir_clust/dir_sect/dir_eptr/
+                                        ; dir_eleft are declared
+                                        ; contiguously in _dir_data
+                                        ; above (2+1+2+1 = 6 bytes) --
+                                        ; read as one block
+            lda     rd
+            str     rf
+            inc     rf
+            lda     rd
+            str     rf
+            inc     rf
+            lda     rd
+            str     rf
+            inc     rf
+            lda     rd
+            str     rf
+            inc     rf
+            lda     rd
+            str     rf
+            inc     rf
+            ldn     rd
+            str     rf
+            inc     rf                  ; buf[0..5] saved
+
+            mov     rd, dir_cur_lba     ; 3 bytes (LBA_SIZE)
+            lda     rd
+            str     rf
+            inc     rf
+            lda     rd
+            str     rf
+            inc     rf
+            ldn     rd
+            str     rf                  ; buf[6..8] saved
+
+            rtn
+
+            endp
+
+;==================================================================
+; dir_restore_state: restore a snapshot taken by dir_save_state, and
+; reload dir_buf from disk at the restored dir_cur_lba so the next
+; dir_read call resumes scanning exactly where the snapshot was taken.
+; dir_buf's own content is NOT part of the snapshot -- it's re-derived
+; here via a direct disk read instead, the same "restore via a fresh
+; read rather than a literal byte copy" pattern already established
+; elsewhere in this codebase (e.g. dir_create's/dir_remove's own
+; dir_buf-borrowing code).
+;
+; Explicitly clears dir_lfn_ok = 0 regardless of whatever it was left
+; at by any directory activity that ran while this snapshot was
+; "paused" -- correct because dir_save_state's own snapshot is only
+; ever taken at a point where dir_lfn_ok is guaranteed already 0 (see
+; dir_save_state's own header).
+;
+; Args:    RF = pointer to a DIR_STATE_LEN-byte buffer previously
+;          filled by dir_save_state
+; Returns: DF = 0 on success, DF = 1 if the disk re-read failed (the
+;          snapshot's own dir_cur_lba could no longer be read --
+;          treat as a hard I/O error, same as any other failed
+;          dir_read/K_DIR_READ)
+; Modifies: everything (R7, R8, RD, RF, and D, DF)
+;==================================================================
+
+            proc    dir_restore_state
+
+            mov     rd, dir_clust
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            str     rd
+            inc     rd
+            ldn     rf
+            str     rd                  ; dir_clust/dir_sect/dir_eptr/
+                                        ; dir_eleft restored (6 bytes)
+            inc     rf                  ; RF -> the snapshot's own
+                                        ; dir_cur_lba bytes
+
+            mov     rd, dir_cur_lba
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            str     rd
+            inc     rd
+            ldn     rf
+            str     rd                  ; dir_cur_lba restored (3
+                                        ; bytes) -- RF (the caller's
+                                        ; snapshot buffer) no longer
+                                        ; needed past this point
+
+            mov     rf, dir_lfn_ok
+            ldi     0
+            str     rf                  ; dir_lfn_ok = 0 (see header)
+
+            ; re-derive dir_buf's content via a direct disk read at
+            ; the just-restored dir_cur_lba -- same R7/R8 layout
+            ; _dir_next_sector's own "dns_read" uses when it originally
+            ; stored dir_cur_lba (R8.lo=byte0, R7.hi=byte1, R7.lo=byte2,
+            ; R8.hi=0 always -- an LBA never needs more than 24 bits on
+            ; this hardware)
+            mov     rf, dir_cur_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+
+            mov     rf, dir_buf
+            call    f_ideread           ; DF = 0/1
+            rtn
+
+            endp
+
 ;==================================================================
 ; dir_read: fetch the next valid directory entry
 ;
@@ -152,8 +312,6 @@ dir_last_off:   dw      0
 ; Returns: DF = 0 and result buffer filled with entry data
 ;          DF = 1 if end of directory or I/O error
 ;==================================================================
-
-            endp
 
             proc    dir_read
 

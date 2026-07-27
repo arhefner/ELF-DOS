@@ -8,10 +8,21 @@
 ; "ATTRIB +H <path...>" sets the hidden bit; "ATTRIB -H <path...>"
 ; clears it -- silent on success for every argument, per this project's
 ; "no news is good news" convention (matches DEL/COPY/MD/RD/REN).
-; Multiple paths (explicit, or via the shell's own file-globbing, e.g.
-; "attrib +h *.bak") are handled independently: a failure on one prints
+; Multiple paths are handled independently: a failure on one prints
 ; its own "Not found: " and the rest still run (matching DEL's own
 ; precedent); the final exit code reflects whether ANY argument failed.
+;
+; Wildcard support (2026-07-27, redesigned): each argv entry is
+; checked via lib/file_glob.asm's is_glob -- a plain path is processed
+; directly, exactly as before; a "*"/"?" pattern is expanded via
+; glob_init/glob_next and every match processed the same way,
+; individually. This replaces the old design (the shell's own
+; tokenizer pre-expanding "attrib +h *.bak" into one argv entry per
+; match before ATTRIB ever ran) -- see lib/file_glob.asm's own header
+; for why: the old design had a hard ARGV_MAX_ARGS=16 ceiling. A
+; pattern matching zero files falls back to attempting the literal,
+; unexpanded text (nullglob-off) -- it will then simply report "Not
+; found" like any other missing literal path.
 ;
 ; Built on the new K_FILE_SETATTR kernel primitive (a general set/
 ; clear-mask attribute-byte rewrite) for apply mode and the existing
@@ -30,6 +41,11 @@
 
 #include    include/opcodes.def
 #include    include/kernel_api.inc
+#include    include/file_glob.inc
+
+            extrn   is_glob
+            extrn   glob_init
+            extrn   glob_next
 
 ATTRIB_MODE_SHOW:  equ     0
 ATTRIB_MODE_APPLY: equ     1
@@ -172,7 +188,10 @@ attrib_loop:
             xor                         ; D = attrib_argc XOR attrib_i
             lbz     attrib_done         ; attrib_i == argc: done
 
-            ; R9 = argv[attrib_i]
+            ; R9 = argv[attrib_i], stashed into attrib_argv_text --
+            ; never trusted in a register across is_glob/glob_init/
+            ; glob_next (all but is_glob document a broad "Modifies:
+            ; everything" clobber footprint)
             mov     rf, attrib_i
             ldn     rf
             plo     r8
@@ -191,70 +210,79 @@ attrib_loop:
             ldn     rf
             plo     r9                  ; R9 = argv[attrib_i]
 
-            mov     rf, attrib_cur_path
+            mov     rf, attrib_argv_text
             ghi     r9
             str     rf
             inc     rf
             glo     r9
-            str     rf                  ; attrib_cur_path = R9 (stashed
-                                        ; for the possible error message,
-                                        ; and for show mode's own print)
+            str     rf                  ; attrib_argv_text = argv[attrib_i]
 
-            mov     rf, attrib_mode
+            mov     rf, attrib_argv_text
+            lda     rf
+            phi     rd
             ldn     rf
-            lbnz    attrib_apply        ; mode == APPLY
+            plo     rd
+            mov     rf, rd              ; RF = attrib_argv_text (deref)
+            call    is_glob
+            lbdf    attrib_literal      ; DF=1: not a glob
 
-            ; ---- show mode: K_STAT + print "H  "/"-  " + path ----
-            mov     rf, r9              ; RF = path
-            mov     rd, attrib_statbuf  ; RD = result buffer
-            call    K_STAT
-            lbdf    attrib_not_found
-
-            mov     rf, attrib_statbuf
-            add16   rf, DIRENT_ATTR
-            ldn     rf                  ; D = attribute byte
-            ani     ATTR_HIDDEN
-            lbz     attrib_show_notset
-
-            call    K_INMSG
-            db      "H  ",0
-            lbr     attrib_show_path
-
-attrib_show_notset:
-            call    K_INMSG
-            db      "-  ",0
-
-attrib_show_path:
-            mov     rf, attrib_cur_path
+            ; --- is a glob: glob_init ---
+            mov     rf, attrib_argv_text
             lda     rf
             phi     rd
             ldn     rf
             plo     rd
             mov     rf, rd
-            call    K_MSG
-            call    K_INMSG
-            db      13,10,0
+            mov     rd, attrib_glob_ctx
+            call    glob_init
+            lbdf    attrib_glob_bad_path
+
+            mov     rf, attrib_glob_found
+            ldi     0
+            str     rf
+
+attrib_glob_loop:
+            mov     rd, attrib_glob_ctx
+            call    glob_next
+            lbdf    attrib_glob_done    ; exhausted
+
+            ; BUG FIX (caught in review, before ever assembling): RF
+            ; holds glob_next's own returned match pointer at this
+            ; point -- "mov rf, attrib_glob_found" below would
+            ; silently overwrite it with attrib_glob_found's OWN
+            ; address before attrib_process_one ever got a chance to
+            ; read it. Stash it in R9 first (free at this point),
+            ; restore right before the call.
+            mov     r9, rf              ; R9 = matched full path
+
+            mov     rf, attrib_glob_found
+            ldi     1
+            str     rf
+
+            mov     rf, r9              ; RF = matched full path again
+            call    attrib_process_one
+            lbr     attrib_glob_loop
+
+attrib_glob_done:
+            mov     rf, attrib_glob_found
+            ldn     rf
+            lbnz    attrib_next         ; had at least one match: done
+
+            ; zero matches: nullglob-off fallback to the literal,
+            ; unexpanded text
+            mov     rf, attrib_argv_text
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    attrib_process_one
             lbr     attrib_next
 
-attrib_apply:
-            mov     rf, attrib_setmask
-            ldn     rf
-            plo     rc
-            mov     rf, attrib_clearmask
-            ldn     rf
-            phi     rc                  ; RC.0 = set mask, RC.1 = clear
-                                        ; mask -- K_FILE_SETATTR's own
-                                        ; convention
-
-            mov     rf, r9              ; RF = path (R9 untouched since
-                                        ; it was loaded above)
-            call    K_FILE_SETATTR      ; DF = 0/1
-            lbnf    attrib_next         ; success: silent, next arg
-
-attrib_not_found:
+attrib_glob_bad_path:
             call    K_INMSG
             db      "Not found: ",0
-            mov     rf, attrib_cur_path
+            mov     rf, attrib_argv_text
             lda     rf
             phi     rd
             ldn     rf
@@ -263,10 +291,19 @@ attrib_not_found:
             call    K_MSG
             call    K_INMSG
             db      13,10,0
-
             mov     rf, attrib_any_error
             ldi     $FF
             str     rf
+            lbr     attrib_next
+
+attrib_literal:
+            mov     rf, attrib_argv_text
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    attrib_process_one
 
 attrib_next:
             mov     rf, attrib_i
@@ -293,6 +330,104 @@ usage:
             ldi     1                   ; exit code 1 = error
             rtn
 
+;------------------------------------------------------------------
+; attrib_process_one: show or apply the hidden-attribute change for a
+; single, already-resolved path.
+; Args:    RF = path (full path or bare name)
+; Returns: nothing
+; Modifies: everything (calls K_STAT/K_FILE_SETATTR/K_MSG/K_INMSG)
+;------------------------------------------------------------------
+attrib_process_one:
+            mov     rb, attrib_cur_path
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; attrib_cur_path = RF (stashed
+                                        ; for the possible error
+                                        ; message, and for show mode's
+                                        ; own print)
+
+            mov     rf, attrib_mode
+            ldn     rf
+            lbnz    apo_apply           ; mode == APPLY
+
+            ; ---- show mode: K_STAT + print "H  "/"-  " + path ----
+            mov     rf, attrib_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd              ; RF = path
+            mov     rd, attrib_statbuf  ; RD = result buffer
+            call    K_STAT
+            lbdf    apo_not_found
+
+            mov     rf, attrib_statbuf
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_HIDDEN
+            lbz     apo_show_notset
+
+            call    K_INMSG
+            db      "H  ",0
+            lbr     apo_show_path
+
+apo_show_notset:
+            call    K_INMSG
+            db      "-  ",0
+
+apo_show_path:
+            mov     rf, attrib_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+            rtn
+
+apo_apply:
+            mov     rf, attrib_setmask
+            ldn     rf
+            plo     rc
+            mov     rf, attrib_clearmask
+            ldn     rf
+            phi     rc                  ; RC.0 = set mask, RC.1 = clear
+                                        ; mask -- K_FILE_SETATTR's own
+                                        ; convention
+
+            mov     rf, attrib_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd              ; RF = path
+            call    K_FILE_SETATTR      ; DF = 0/1
+            lbnf    apo_ok              ; success: silent
+
+apo_not_found:
+            call    K_INMSG
+            db      "Not found: ",0
+            mov     rf, attrib_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, attrib_any_error
+            ldi     $FF
+            str     rf
+
+apo_ok:
+            rtn
+
 attrib_mode:        db      0
 attrib_start_i:     db      0
 attrib_setmask:     db      0
@@ -300,8 +435,11 @@ attrib_clearmask:   db      0
 attrib_argv:        dw      0
 attrib_argc:        db      0
 attrib_i:           db      0
+attrib_argv_text:   dw      0
 attrib_cur_path:    dw      0
 attrib_any_error:   db      0
+attrib_glob_found:  db      0
 attrib_statbuf:     ds      DIRENT_LEN
+attrib_glob_ctx:    ds      GLOB_CTX_LEN
 
             end     start

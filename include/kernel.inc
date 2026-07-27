@@ -287,6 +287,16 @@ PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 ; ----------------------------------------------------------------
 LBA_SIZE:       equ     3           ; bytes per stored LBA
 
+; DIR_STATE_LEN: size of the directory iterator's scan-position
+; snapshot (K_DIR_SAVE_STATE/K_DIR_RESTORE_STATE, kernel/dir.asm),
+; restated in kernel_api.inc for any program that needs to declare a
+; buffer for it (currently lib/file_glob.asm's glob_next). 6 bytes
+; (dir_clust+dir_sect+dir_eptr+dir_eleft, contiguous in _dir_data) + 3
+; bytes (dir_cur_lba, LBA_SIZE) = 9. Deliberately excludes dir_lfn/
+; dir_lfn_chk/dir_lfn_ok/dir_last_off -- see dir_save_state's own
+; header comment for why none of them need to be part of a snapshot.
+DIR_STATE_LEN:  equ     9
+
 ; ----------------------------------------------------------------
 ; BPB data block offsets -- the 11 fields bpb_init populates, always
 ; contiguous at the top of kernel.asm's _kernel_data block (part1_lba

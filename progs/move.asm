@@ -12,8 +12,16 @@
 ; already be an existing directory, checked once up front before any
 ; file is touched. A failure on one source prints its own error and
 ; moves on to the next rather than aborting the whole command; final
-; exit code reflects whether ANY source failed. No wildcards handled
-; directly here -- the shell's own tokenizer already expands them.
+; exit code reflects whether ANY source failed.
+;
+; Wildcard support (2026-07-27, redesigned): identical shape to COPY's
+; own -- see progs/copy.asm's header for the full rationale. Each
+; source argument is checked via lib/file_glob.asm's is_glob; a plain
+; filename is moved directly, a "*"/"?" pattern is expanded via
+; glob_init/glob_next and every match moved individually, and the
+; "destination must be an existing directory" requirement is decided
+; statically (before any expansion) whenever ANY source is a glob
+; pattern at all, matching COPY's own identical policy exactly.
 ;
 ; For each source, first tries a fast, data-free rename via
 ; lib/move.asm's move_rename -- it takes the fast path whenever the
@@ -40,12 +48,16 @@
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
+#include    include/file_glob.inc
 
 MOVE_CHUNK_LEN: equ     512     ; matches COPY's own chunk size --
                                 ; see copy.asm's own comment for why
 DST_BUF_LEN:    equ     132
 
             extrn   move_rename
+            extrn   is_glob
+            extrn   glob_init
+            extrn   glob_next
 
             org     PROG_BASE
 
@@ -111,6 +123,63 @@ start:
             smi     2
             str     rb
 
+            ; --- does ANY source argument (argv[1..num_sources])
+            ; contain a wildcard? Decided statically here, before any
+            ; expansion -- see progs/copy.asm's own identical logic
+            ; for the full rationale. ---
+            mov     rf, move_any_glob
+            ldi     0
+            str     rf
+
+            mov     rf, move_scan_i
+            ldi     1
+            str     rf
+
+move_glob_prescan:
+            mov     rf, move_scan_i
+            ldn     rf
+            str     r2
+            mov     rf, num_sources
+            ldn     rf                  ; D = num_sources
+            adi     1                   ; D = num_sources + 1
+            xor                         ; D = (num_sources+1) XOR
+                                        ; move_scan_i
+            lbz     move_glob_prescan_done
+
+            mov     rf, move_scan_i
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            shl16   r8                  ; R8 = move_scan_i * 2
+            mov     rf, move_argv
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = move_argv (base,
+                                        ; reloaded fresh)
+            add16   rb, r8              ; RB = &argv[move_scan_i]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[move_scan_i]
+            mov     rf, rd
+            call    is_glob
+            lbdf    move_glob_prescan_next  ; DF=1: not a glob
+
+            mov     rf, move_any_glob
+            ldi     1
+            str     rf
+
+move_glob_prescan_next:
+            mov     rf, move_scan_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     move_glob_prescan
+
+move_glob_prescan_done:
+
             ; --- is dst_ptr an existing directory? (checked ONCE,
             ; regardless of num_sources) -- same pattern CD/COPY use ---
             call    check_dst_is_dir    ; DF = 0/1
@@ -125,17 +194,38 @@ start_not_dir:
             str     rf
 
 start_have_flag:
-            ; multiple sources REQUIRE an existing destination
-            ; directory -- reject up front, before touching any file
+            ; multiple sources, OR a single source that's itself a
+            ; glob pattern, REQUIRE an existing destination directory
+            ; -- reject up front, before touching any file
+            mov     rf, move_must_be_dir
+            ldi     0
+            str     rf
+
             mov     rf, num_sources
             ldn     rf
             smi     2
-            lbnf    start_run           ; num_sources < 2: single-
-                                        ; source form, always OK
+            lbnf    move_cmbd_check_glob
+            mov     rf, move_must_be_dir
+            ldi     1
+            str     rf
+            lbr     move_cmbd_done
+move_cmbd_check_glob:
+            mov     rf, move_any_glob
+            ldn     rf
+            lbz     move_cmbd_done
+            mov     rf, move_must_be_dir
+            ldi     1
+            str     rf
+move_cmbd_done:
+
+            mov     rf, move_must_be_dir
+            ldn     rf
+            lbz     start_run           ; doesn't need to be a
+                                        ; directory: proceed
             mov     rf, dst_is_dir_flag
             ldn     rf
-            lbnz    start_run           ; multi-source AND a real
-                                        ; directory: OK
+            lbnz    start_run           ; must be a directory, and is
+                                        ; one: OK
 
             call    K_INMSG
             db      "Destination must be an existing directory for multiple sources.",13,10,0
@@ -163,7 +253,9 @@ move_loop_sources:
             lbz     move_all_done       ; move_i == num_sources+1:
                                         ; every source handled
 
-            ; RD = argv[move_i] (this source)
+            ; move_cur_arg = argv[move_i] (this source) -- stashed to
+            ; memory immediately, never trusted in a register across
+            ; is_glob/glob_init/glob_next
             mov     rf, move_i
             ldn     rf
             plo     r8
@@ -182,19 +274,92 @@ move_loop_sources:
             phi     rd
             ldn     rb
             plo     rd                  ; RD = argv[move_i]
-            mov     rf, src_ptr
+            mov     rf, move_cur_arg
             ghi     rd
             str     rf
             inc     rf
             glo     rd
-            str     rf                  ; src_ptr = this source
+            str     rf                  ; move_cur_arg = argv[move_i]
 
-            call    move_one            ; DF = 0/1
-            lbnf    move_next
+            mov     rf, move_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd              ; RF = move_cur_arg (dereferenced)
+            call    is_glob
+            lbdf    move_src_literal    ; DF=1: not a glob
 
+            ; --- is a glob: glob_init ---
+            mov     rf, move_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            mov     rd, move_glob_ctx
+            call    glob_init
+            lbdf    move_src_bad_path   ; bad prefix path: this argv
+                                        ; entry's own error
+
+            mov     rf, move_glob_found
+            ldi     0
+            str     rf
+
+move_src_glob_loop:
+            mov     rd, move_glob_ctx
+            call    glob_next
+            lbdf    move_src_glob_done  ; exhausted
+
+            ; BUG FIX (caught in review, before ever assembling): RF
+            ; holds glob_next's own returned match pointer at this
+            ; point -- "mov rf, move_glob_found" below would silently
+            ; overwrite it with move_glob_found's OWN address before
+            ; move_process_one ever got a chance to read it. Stash it
+            ; in R9 first (free at this point), restore right before
+            ; the call.
+            mov     r9, rf              ; R9 = matched full path
+
+            mov     rf, move_glob_found
+            ldi     1
+            str     rf
+
+            mov     rf, r9              ; RF = matched full path again
+            call    move_process_one
+            lbr     move_src_glob_loop
+
+move_src_glob_done:
+            mov     rf, move_glob_found
+            ldn     rf
+            lbnz    move_next           ; had at least one match: done
+
+            ; zero matches: nullglob-off fallback to the literal,
+            ; unexpanded text
+            mov     rf, move_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    move_process_one
+            lbr     move_next
+
+move_src_bad_path:
+            call    K_INMSG
+            db      "Source file not found.",13,10,0
             mov     rf, any_error
             ldi     $FF
             str     rf
+            lbr     move_next
+
+move_src_literal:
+            mov     rf, move_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    move_process_one
 
 move_next:
             mov     rf, move_i
@@ -222,6 +387,32 @@ usage_error:
             call    K_INMSG
             db      "Usage: MOVE <source> [source...] <destination>",13,10,0
             ldi     1
+            rtn
+
+;------------------------------------------------------------------
+; move_process_one: move a single, already-resolved source path,
+; setting any_error on failure. Args: RF = source path
+; Returns: nothing
+; Modifies: everything (calls move_one)
+;------------------------------------------------------------------
+move_process_one:
+            mov     r9, rf              ; R9 = source path (RF is about
+                                        ; to be reused as a scratch
+                                        ; pointer to store it)
+            mov     rf, src_ptr
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf                  ; src_ptr = this source
+
+            call    move_one            ; DF = 0/1
+            lbnf    mpo_ok
+
+            mov     rf, any_error
+            ldi     $FF
+            str     rf
+mpo_ok:
             rtn
 
 ;------------------------------------------------------------------
@@ -651,6 +842,12 @@ dst_is_dir_flag: db     0
 src_ptr:        dw      0
 dst_ptr:        dw      0
 real_dst:       dw      0
+move_any_glob:  db      0
+move_scan_i:    db      0
+move_must_be_dir: db    0
+move_cur_arg:   dw      0
+move_glob_found: db     0
+move_glob_ctx:  ds      GLOB_CTX_LEN
 
 ; CALLER-ALLOCATED FCBs (2026-07-15), FCB POINTER IS THE HANDLE
 ; (2026-07-21) -- same convention as COPY's own src_fcb/dst_fcb, given

@@ -58,6 +58,8 @@
             extrn   kernel_batch_args_getarg
             extrn   dir_open
             extrn   dir_read
+            extrn   dir_save_state
+            extrn   dir_restore_state
             extrn   path_resolve
             extrn   prog_run
             extrn   prog_run_shell
@@ -270,7 +272,16 @@ k_batch_goto:   lbr     batch_goto          ; $017F
 ; and kernel/batch.asm's own module header for the full design.
 k_batch_args_reserve: lbr kernel_batch_args_reserve  ; $0182
 k_batch_args_getarg:  lbr kernel_batch_args_getarg   ; $0185
-                ; next free jump-table address: $0188
+
+; K_DIR_SAVE_STATE/K_DIR_RESTORE_STATE: snapshot/restore the
+; directory iterator's own scan position (2026-07-27), added so
+; lib/file_glob.asm's glob_next can resume a directory scan exactly
+; where it left off instead of re-scanning from the start on every
+; call -- see kernel/dir.asm's own dir_save_state/dir_restore_state
+; headers for the full design and kernel_api.inc's own doc comments.
+k_dir_save_state:    lbr     dir_save_state      ; $0188
+k_dir_restore_state: lbr     dir_restore_state   ; $018B
+                ; next free jump-table address: $018E
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

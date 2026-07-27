@@ -86,15 +86,29 @@
 ; unequal strings is unconfirmed; ls_namecmp's own ordering contract
 ; is fully known since it's defined right here.
 ;
+; Wildcard support (2026-07-27, redesigned): identical shape to DIR's
+; own -- see progs/dir.asm's header for the full rationale. A "*"/"?"
+; pattern (single-path or one of several) is detected via lib/
+; file_glob.asm's is_glob and expanded via glob_init/glob_next into
+; the SAME per-match K_STAT+ls_add_entry body ls_multi_stat already
+; uses, one match at a time; a single-path glob no longer takes a
+; different code path than a multi-path one just because of how many
+; files it happens to match. A pattern matching zero files falls back
+; to the literal, unexpanded text (nullglob-off).
+;
 
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
+#include    include/file_glob.inc
 
             extrn   bump_init
             extrn   bump_alloc
             extrn   env_getenv
             extrn   env_parse_uint
+            extrn   is_glob
+            extrn   glob_init
+            extrn   glob_next
 
 ; ---- per-entry storage struct (fixed size, LSENT_LEN bytes) ----
 LSENT_ATTR:     equ     0           ; 1 byte, FAT attribute byte
@@ -474,10 +488,82 @@ ls_resolve_body:
             ldn     rf
             plo     rd                  ; RD = ls_patharg
             glo     rd
-            lbnz    ls_resolve_go
+            lbnz    ls_have_patharg
             ghi     rd
-            lbnz    ls_resolve_go
+            lbnz    ls_have_patharg
             lbr     ls_open             ; no path arg -- list current dir
+
+ls_have_patharg:
+            ; check is_glob first (2026-07-27) -- see the file header
+            ; for why a glob routes into ls_multi_stat's own per-match
+            ; K_STAT+ls_add_entry body instead of the literal
+            ; K_PATH_RESOLVE-and-maybe-list-a-directory logic below.
+            mov     rf, rd
+            call    is_glob
+            lbdf    ls_resolve_go       ; DF=1: not a glob -- proceed
+                                        ; exactly as before (RD still
+                                        ; = ls_patharg, untouched by
+                                        ; is_glob -- its own header
+                                        ; documents "Modifies: RF, D"
+                                        ; only, confirmed not assumed)
+
+            ; --- is a glob: glob_init ---
+            mov     rf, ls_patharg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = ls_patharg (reload --
+                                        ; is_glob advanced RF through
+                                        ; it above)
+            mov     rf, rd
+            mov     rd, ls_glob_ctx
+            call    glob_init
+            lbdf    ls_not_found        ; bad prefix path -- same
+                                        ; message as any other bad path
+
+            call    ls_init_collect
+
+            mov     rf, ls_glob_found
+            ldi     0
+            str     rf
+
+ls_single_glob_loop:
+            mov     rd, ls_glob_ctx
+            call    glob_next
+            lbdf    ls_single_glob_done ; exhausted
+
+            ; BUG FIX (caught in review, before ever assembling): RF
+            ; holds glob_next's own returned match pointer at this
+            ; point -- "mov rf, ls_glob_found" below would silently
+            ; overwrite it with ls_glob_found's OWN address before
+            ; ls_stat_and_add ever got a chance to read it. Stash it
+            ; in R9 first (free at this point), restore right before
+            ; the call.
+            mov     r9, rf              ; R9 = matched full path
+
+            mov     rf, ls_glob_found
+            ldi     1
+            str     rf
+
+            mov     rf, r9              ; RF = matched full path again
+            call    ls_stat_and_add     ; DF=1: out of RAM
+            lbdf    ls_collect_done
+            lbr     ls_single_glob_loop
+
+ls_single_glob_done:
+            mov     rf, ls_glob_found
+            ldn     rf
+            lbnz    ls_collect_done     ; had at least one match: done
+                                        ; (sort+print handles ls_any_
+                                        ; error at exit time)
+
+            ; zero matches: nullglob-off fallback to the literal,
+            ; unexpanded pattern
+            mov     rf, ls_patharg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = ls_patharg (re-derived)
 
 ls_resolve_go:
             mov     rf, rd              ; RF = path string
@@ -1025,6 +1111,59 @@ lpn_done:
             rtn
 
 ;------------------------------------------------------------------
+; ls_stat_and_add: K_STAT a single path and add it via ls_add_entry,
+; or print "Not found: "+path and set ls_any_error on failure. Shared
+; by ls_multi_stat's own per-path loop and the single-path glob loop
+; in ls_resolve_body above (factored out 2026-07-27, replacing what
+; used to be inline in ls_multi_stat only).
+; Args:    RF = path
+; Returns: DF = 0 (keep collecting) or DF = 1 (ls_add_entry ran out of
+;          RAM -- caller should stop collecting entirely, same
+;          convention ls_add_entry itself uses); a K_STAT failure
+;          (path not found) always returns DF = 0, since that's a
+;          per-item error, not a "stop everything" signal
+; Modifies: everything (calls K_STAT/ls_add_entry)
+;------------------------------------------------------------------
+ls_stat_and_add:
+            mov     r9, rf              ; R9 = path (RF is about to be
+                                        ; reused for K_STAT's own args)
+            mov     rf, ls_cur_path
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf                  ; ls_cur_path = path (for the
+                                        ; possible error message)
+
+            mov     rf, r9              ; RF = path string
+            mov     rd, ls_scratch      ; RD = result buffer
+            call    K_STAT              ; DF = 0/1
+            lbdf    lsa_not_found
+
+            call    ls_add_entry        ; DF = 0/1, propagated to caller
+            rtn
+
+lsa_not_found:
+            call    K_INMSG
+            db      "Not found: ",0
+            mov     rf, ls_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, ls_any_error
+            ldi     $FF
+            str     rf
+            clc                         ; DF=0: not a "stop collecting"
+                                        ; condition, just this one item
+            rtn
+
+;------------------------------------------------------------------
 ; ls_single_file: the one path argument resolved to a FILE (not a
 ; directory) -- ls_scratch is already filled by ls_find_loop's own
 ; successful match, so this just adds that one entry and jumps
@@ -1041,14 +1180,17 @@ ls_single_file:
             lbr     ls_collect_done
 
 ;------------------------------------------------------------------
-; ls_multi_stat: two or more path arguments (typically via the
-; shell's own glob expansion, e.g. "LS *.txt") -- K_STAT each one
-; independently and add it to the collection via ls_add_entry, same
-; as a directory-scan entry (works for both columnar and -l output
-; with no changes to either print routine, since a multi-stat match's
-; attribute byte is exactly what -l mode's own per-entry logic
-; already branches on). A bad argument prints its own error and the
-; rest still run; ls_any_error drives the final exit code.
+; ls_multi_stat: two or more path arguments -- each one is checked via
+; is_glob (2026-07-27) and either K_STAT'd directly (a literal name,
+; via the shared ls_stat_and_add helper above) or expanded via
+; glob_init/glob_next, one match at a time, into that same helper. A
+; pattern matching zero files falls back to the literal, unexpanded
+; text. Every match/literal is added to the collection via
+; ls_add_entry, same as a directory-scan entry (works for both
+; columnar and -l output with no changes to either print routine,
+; since attribute byte is exactly what -l mode's own per-entry logic
+; already branches on). A bad path/argument prints its own error and
+; the rest still run; ls_any_error drives the final exit code.
 ;------------------------------------------------------------------
 ls_multi_stat:
             call    ls_init_collect
@@ -1080,27 +1222,69 @@ lms_loop:
             ldn     rf
             plo     rd                  ; RD = ls_paths[ls_multi_i]
 
-            ; stash the path pointer for the possible error message
-            ; below BEFORE calling K_STAT -- its own clobber footprint
-            ; isn't proven anywhere in this codebase yet
             mov     rf, ls_cur_path
             ghi     rd
             str     rf
             inc     rf
             glo     rd
+            str     rf                  ; ls_cur_path = ls_paths[ls_multi_i]
+
+            mov     rf, rd
+            call    is_glob
+            lbdf    lms_literal         ; DF=1: not a glob
+
+            ; --- is a glob (2026-07-27): glob_init ---
+            mov     rf, ls_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            mov     rd, ls_glob_ctx
+            call    glob_init
+            lbdf    lms_bad_path        ; bad prefix path: this path
+                                        ; entry's own error
+
+            mov     rf, ls_glob_found
+            ldi     0
             str     rf
 
-            mov     rf, rd              ; RF = path string
-            mov     rd, ls_scratch      ; RD = result buffer
-            call    K_STAT              ; DF = 0/1
-            lbdf    lms_not_found
+lms_glob_loop:
+            mov     rd, ls_glob_ctx
+            call    glob_next
+            lbdf    lms_glob_done       ; exhausted
 
-            call    ls_add_entry        ; DF=1: out of RAM, stop
-                                        ; collecting entirely
+            mov     r9, rf              ; R9 = matched full path (RF
+                                        ; is about to be reused to set
+                                        ; the found flag)
+
+            mov     rf, ls_glob_found
+            ldi     1
+            str     rf
+
+            mov     rf, r9              ; RF = matched full path again
+            call    ls_stat_and_add     ; DF=1: out of RAM
+            lbdf    ls_collect_done
+            lbr     lms_glob_loop
+
+lms_glob_done:
+            mov     rf, ls_glob_found
+            ldn     rf
+            lbnz    lms_next            ; had at least one match: done
+
+            ; zero matches: nullglob-off fallback to the literal,
+            ; unexpanded text
+            mov     rf, ls_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    ls_stat_and_add
             lbdf    ls_collect_done
             lbr     lms_next
 
-lms_not_found:
+lms_bad_path:
             call    K_INMSG
             db      "Not found: ",0
             mov     rf, ls_cur_path
@@ -1116,6 +1300,17 @@ lms_not_found:
             mov     rf, ls_any_error
             ldi     $FF
             str     rf
+            lbr     lms_next
+
+lms_literal:
+            mov     rf, ls_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    ls_stat_and_add
+            lbdf    ls_collect_done
 
 lms_next:
             mov     rf, ls_multi_i
@@ -3210,6 +3405,12 @@ ls_cur_path:    dw      0           ; ls_multi_stat's current path,
                                     ; stashed before each K_STAT call
 ls_any_error:   db      0           ; set if any ls_multi_stat lookup
                                     ; failed -- drives the exit code
+ls_glob_found:  db      0           ; shared by the single-path glob
+                                    ; loop (ls_resolve_body) and the
+                                    ; per-path glob loop inside
+                                    ; ls_multi_stat -- mutually
+                                    ; exclusive, never active at once
+ls_glob_ctx:    ds      GLOB_CTX_LEN ; ditto
 
 ls_count:       dw      0
 ls_next_entry:  dw      0

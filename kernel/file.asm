@@ -116,6 +116,7 @@
             extrn   fcrw_slot
             extrn   fcrw_iobuf
             extrn   _fclose_rewrite_size
+            extrn   _fcb_seek_to
             extrn   _file_create
             extrn   _delete_located_entry
             extrn   _mark_entry_deleted
@@ -156,34 +157,34 @@
             extrn   fsk_off_lo
             extrn   fsk_fcb
             extrn   fsk_target
-            extrn   fsk_boff
-            extrn   fsk_cluster_idx
-            extrn   fsk_sector_in_clust
 ; _shared_scratch (declared in a tiny standalone proc below, right
 ; before file_init -- storage placement in the final binary is
 ; determined by link order across all files, not by source position,
 ; so this doesn't need to sit anywhere near _file_data's own big data
 ; block): 9 bytes shared directly across 5 mutually-exclusive scratch
 ; groups that used to be 5 separate, permanently-allocated field sets
-; -- file_open's mode-2 (append) positioning (fa_*), file_delete's
-; cluster-chain-free loop (fdel_*), dir_create/MD (dcr_*), dir_remove/
-; RD (drm_*), and file_rename/REN (ren_*). Confirmed mutually
-; exclusive: this kernel is single-threaded/non-reentrant, and NONE of
-; these 5 top-level routines ever calls into another of the 5 -- they
-; only share LEAF helpers (_file_create, _mark_entry_deleted,
-; _delete_located_entry, _scan_dir_for_name, path_resolve,
-; fat_get/fat_alloc/fat_set), none of which touch this block.
-; (_file_create's OWN scratch, fc_*, is a separate matter -- it's live
-; *during* dir_create's and file_rename's own calls into it, so it
-; can't share this block.) Sized to the single largest need
-; (file_rename's own 4 fields).
+; -- _fcb_seek_to's own positioning math (fst_*, shared by file_open's
+; mode-2/append repositioning and file_seek's general case since
+; 2026-07-27, formerly two separate copies with their own separate
+; fa_*/fsk_boff+fsk_cluster_idx+fsk_sector_in_clust scratch -- see
+; _fcb_seek_to's own header), file_delete's cluster-chain-free loop
+; (fdel_*), dir_create/MD (dcr_*), dir_remove/RD (drm_*), and
+; file_rename/REN (ren_*). Confirmed mutually exclusive: this kernel
+; is single-threaded/non-reentrant, and NONE of these 5 top-level
+; operations ever calls into another of the 5 -- they only share LEAF
+; helpers (_file_create, _mark_entry_deleted, _delete_located_entry,
+; _scan_dir_for_name, path_resolve, fat_get/fat_alloc/fat_set), none of
+; which touch this block. (_file_create's OWN scratch, fc_*, is a
+; separate matter -- it's live *during* dir_create's and file_rename's
+; own calls into it, so it can't share this block.) Sized to the
+; single largest need (file_rename's own 4 fields).
 ;
 ; Each field below is a `#define` (pure textual substitution), NOT an
 ; `equ` (a real symbol-table entry) -- deliberately. An isolated
 ; investigation (2026-07-21) found a real Asm/02 bug: declaring a name
 ; via `extrn` earlier in a file, then LATER defining that SAME name
 ; via `equ`, silently collapses the equ's value to the base symbol's
-; own address, discarding any "+offset" -- and every one of these 15
+; own address, discarding any "+offset" -- and every one of these
 ; field names NEEDS an `extrn` for cross-proc use in this same file
 ; (gotcha #6), so this exact shape is unavoidable for `equ`. `#define`
 ; sidesteps it entirely: it never creates a real symbol, so there's
@@ -195,19 +196,16 @@
 ; kernel/file.asm content, standalone-assembled) before ever touching
 ; the real file -- see CLAUDE.md's gotcha #15 for the complete
 ; writeup. Must appear before this file's FIRST use of any of these
-; 15 names (file_open's append-mode logic, a few hundred lines below)
-; since `#define` only applies forward from its own point in the
-; source, unlike `extrn`/`public` which apply file-wide regardless of
-; position.
-#define     fa_boff             _shared_scratch
-#define     fa_cluster_idx      _shared_scratch+2 ; widened 1->2 bytes
-                                        ; 2026-07-26 (>64K support) --
+; names (_fcb_seek_to, a few hundred lines below) since `#define` only
+; applies forward from its own point in the source, unlike
+; `extrn`/`public` which apply file-wide regardless of position.
+#define     fst_fcb             _shared_scratch
+#define     fst_boff            _shared_scratch+2
+#define     fst_cluster_idx     _shared_scratch+4 ; 2 bytes (>64K support)
+#define     fst_sector_in_clust _shared_scratch+6 ; 7 bytes total (0-6),
                                         ; still fits well within this
                                         ; block's existing 9-byte size
-                                        ; (fa_boff(2)+fa_cluster_idx(2)+
-                                        ; fa_sector_in_clust(1)=5, vs.
-                                        ; ren_*'s own 9-byte need)
-#define     fa_sector_in_clust  _shared_scratch+4
+                                        ; (vs. ren_*'s own 9-byte need)
 #define     fdel_next_clust     _shared_scratch
 #define     fdel_chksum         _shared_scratch+2
 #define     dcr_parent          _shared_scratch
@@ -245,6 +243,254 @@ _shared_scratch:    ds      9
 
             rtn
 
+            endp
+
+;==================================================================
+; _fcb_seek_to: reposition an FCB's CCLUST/CSECT/BOFF to a given
+; absolute byte offset within the file, by walking the FAT chain from
+; FCB_SCLUST. Does NOT touch FCB_FPOS or FCB_FLAGS -- purely the
+; on-disk-position fields; callers set FPOS themselves (a plain
+; 4-byte copy from the same target they passed in here).
+;
+; Shared positioning math extracted (2026-07-27, at the user's own
+; request, to reclaim some of the kernel margin the K_DIR_SAVE_STATE/
+; K_DIR_RESTORE_STATE addition spent) from file_open's own append-mode
+; repositioning (fopen_check_append) and file_seek's own general case
+; (fsk_general) -- both had computed byte-for-byte identical
+; last_byte_index/boff/sector_index/sector_in_clust/cluster_index/
+; fat_get-walk/wrap logic against a target position, deliberately kept
+; as two separate copies during the >64K widening work (2026-07-26,
+; "each already complex enough on their own"). Safe to consolidate now
+; specifically because both copies have since been independently
+; hardware-bug-hunted and fixed IDENTICALLY twice over (the >>8/ghi-
+; vs-glo bug and the sector_in_clust-computed-too-late bug, both found
+; and fixed the same way in both copies) -- exactly the kind of
+; "nothing has diverged between them" signal that makes a
+; consolidation pass low-risk rather than a way to introduce a new,
+; subtly-different third bug.
+;
+; Deliberately requires target > 0 -- last_byte_index = target-1
+; would underflow at target==0. Callers handle target==0 themselves
+; via their own already-existing, UNTOUCHED shortcuts
+; (fopen_check_append's own FSIZE==0 early-exit does nothing at all,
+; since a fresh FCB's fields are already correctly zero at that point;
+; file_seek's own fsk_rewind explicitly zeroes CCLUST/CSECT/BOFF) --
+; left unconsolidated deliberately, since the two callers' "what does
+; target==0 actually mean here" logic differs (fopen: do nothing;
+; file_seek: explicit reset) enough that folding it in would only
+; complicate this routine's own contract for a small saving.
+;
+; Args:    RD:R8 = target (32-bit byte offset, target > 0)
+;          RB = FCB base (already resolved by the caller)
+; Returns: DF = 0 on success (FCB_CCLUST/CSECT/BOFF all set)
+;          DF = 1 on a fat_get I/O error mid-walk (FCB left
+;          completely untouched -- same "abandon safely" contract
+;          both original call sites already had)
+; Modifies: everything (R7-RD)
+;==================================================================
+
+            proc    _fcb_seek_to
+
+            mov     rf, fst_fcb
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf                  ; fst_fcb = RB (FCB base)
+
+            ; last_byte_index = target - 1 (RD:R8 already = target)
+            sub16   r8, 1
+            lbdf    fst_lbi_no_borrow
+            sub16   rd, 1
+fst_lbi_no_borrow:
+            ; RD:R8 = last_byte_index
+
+            ; boff (0-511) = last_byte_index & 511
+            mov     rf, fst_boff
+            ghi     r8
+            ani     1
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf                  ; fst_boff = last_byte_index & 511
+
+            ; sector_index = last_byte_index >> 9, via >>8 (byte
+            ; reassignment) then >>1 (SHRC chain, MSB to LSB) --
+            ; unchanged from the two original call sites' own already-
+            ; verified version (see this file's own git history for the
+            ; ghi-vs-glo bug this exact sequence once had and was
+            ; fixed for, now folded into this single copy)
+            ghi     r8                  ; D = old R8.hi (P1)
+            plo     r7                  ; R7.lo = P1 (temp)
+            glo     rd                  ; D = old RD.lo (P2)
+            phi     r7                  ; R7.hi = P2  => R7 = (P2,P1)
+            ghi     rd                  ; D = old RD.hi (P3)
+            plo     r9                  ; R9.lo = P3
+            ldi     0
+            phi     r9                  ; R9 = (0,P3)  => R9:R7 = last_byte_index >> 8
+
+            ghi     r9
+            shr
+            phi     r9
+            glo     r9
+            shrc
+            plo     r9
+            ghi     r7
+            shrc
+            phi     r7
+            glo     r7
+            shrc
+            plo     r7                  ; R9:R7 = sector_index; R9's
+                                        ; own high word discarded (same
+                                        ; documented 32MB-scope limit
+                                        ; the original two copies had)
+
+            ; sector_in_clust = sector_index & (spc-1) -- computed
+            ; BEFORE the cluster_index shift loop below overwrites R7
+            ; (see this file's own git history for the hardware-found
+            ; bug this ordering fixes, on a real spc=128 card)
+            mov     rf, bpb_spc
+            ldn     rf
+            smi     1
+            str     r2                  ; [R2] = spc-1 (mask)
+            glo     r7                  ; D = sector_index's low byte
+                                        ; (R7 still holds sector_index
+                                        ; here)
+            and
+            plo     r9                  ; stash (mov below clobbers D;
+                                        ; R9's own earlier value --
+                                        ; sector_index's discarded high
+                                        ; word -- is free to reuse)
+            mov     rf, fst_sector_in_clust
+            glo     r9                  ; D = result (reloaded)
+            str     rf                  ; fst_sector_in_clust = result
+
+            ; cluster_index = sector_index >> spc_shift (16-bit, R7
+            ; only) -- D-clobber-safe variable-shift-count loop: the
+            ; loop condition's own "glo r9" clobbers D every iteration,
+            ; so the shifted value must be reloaded into D fresh right
+            ; before each "shr", never carried through in D itself
+            mov     rf, bpb_spc_shift
+            ldn     rf
+            plo     r9                  ; R9.0 = spc_shift (loop count)
+fst_cidx_shr:
+            glo     r9
+            lbz     fst_cidx_done
+            ghi     r7
+            shr
+            phi     r7
+            glo     r7
+            shrc
+            plo     r7
+            dec     r9
+            lbr     fst_cidx_shr
+fst_cidx_done:
+            mov     rf, fst_cluster_idx
+            ghi     r7
+            str     rf
+            inc     rf
+            glo     r7
+            str     rf                  ; fst_cluster_idx = cluster_index
+
+            ; --- walk fat_get fst_cluster_idx times from FCB_SCLUST ---
+            mov     rf, fst_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = FCB base
+            mov     rf, rb
+            add16   rf, FCB_SCLUST
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = FCB_SCLUST
+
+            mov     rf, fst_cluster_idx
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = hops remaining (16-bit)
+fst_walk_loop:
+            glo     rc
+            lbnz    fst_walk_go
+            ghi     rc
+            lbz     fst_walk_done
+fst_walk_go:
+            push    r9
+            push    ra
+            push    rb
+            push    rc
+            call    fat_get             ; RD = next cluster
+            pop     rc
+            pop     rb
+            pop     ra
+            pop     r9
+            lbdf    fst_ioerr           ; I/O error: nothing written yet
+            dec     rc
+            lbr     fst_walk_loop
+fst_walk_done:
+            ; RD = target cluster
+
+            mov     rf, fst_boff
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = boff
+            add16   r8, 1               ; R8 = new_boff (1-512)
+
+            mov     rf, fst_sector_in_clust
+            ldn     rf
+            plo     r9                  ; R9.0 = new_csect
+
+            ghi     r8
+            xri     2
+            lbnz    fst_no_wrap
+            glo     r8
+            lbnz    fst_no_wrap
+            ldi     0
+            phi     r8
+            plo     r8                  ; new_boff wrapped to 0
+            glo     r9
+            adi     1
+            plo     r9                  ; new_csect += 1
+fst_no_wrap:
+            mov     rf, fst_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = FCB base (reload -- the
+                                        ; fat_get walk clobbered it)
+
+            mov     rf, rb
+            add16   rf, FCB_CCLUST
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; FCB_CCLUST = target cluster
+
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            glo     r9
+            str     rf                  ; FCB_CSECT = new_csect
+
+            mov     rf, rb
+            add16   rf, FCB_BOFF
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf                  ; FCB_BOFF = new_boff
+
+            clc
+            rtn
+
+fst_ioerr:
+            stc
+            rtn
+
+            endp
+
 ; ----------------------------------------------------------------
 ; file_open: open a file by path into a caller-supplied FCB
 ; Args:   RF = pointer to null-terminated path string. May be a bare
@@ -260,7 +506,6 @@ _shared_scratch:    ds      9
 ;               intermediate path component isn't a directory, or the
 ;               path names a directory rather than a file)
 ; ----------------------------------------------------------------
-            endp
 
             proc    file_open
 
@@ -590,285 +835,36 @@ fopen_check_append:
             ghi     rd
             lbz     fopen_no_append     ; FSIZE == 0 (all 4 bytes): nothing to do
 fopen_append_have_size:
-            ; last_byte_index = FSIZE - 1, full 32-bit (FSIZE > 0
-            ; confirmed above, so this can't underflow past 0)
-            sub16   r8, 1
-            lbdf    fa_lbi_no_borrow
-            sub16   rd, 1
-fa_lbi_no_borrow:
-            ; RD:R8 = last_byte_index
-
-            ; boff (0-511) = last_byte_index & 511 -- direct byte ops,
-            ; no shift needed
-            mov     rf, fa_boff
-            ghi     r8
-            ani     1
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; fa_boff = last_byte_index & 511
-
-            ; sector_index = last_byte_index >> 9, done as >>8 (a pure
-            ; byte reassignment, no shift instructions needed) then >>1
-            ; (a SHRC chain from the MSB down to the LSB) -- verified
-            ; against a Python simulation across 3000+ random 32-bit
-            ; values plus edge cases before ever writing this. >>8:
-            ; new R9=(0,old RD.hi), new R7=(old RD.lo,old R8.hi) --
-            ; old R8.lo is the byte that falls off the bottom (already
-            ; captured by fa_boff above, not needed again).
-            ;
-            ; REAL BUG, caught during a second, more careful manual
-            ; re-trace after the first draft had already assembled and
-            ; passed every sweep clean (a reminder that a clean build
-            ; and clean sweeps only rule out the bug *classes* those
-            ; sweeps check for, not a plain logic error like this one):
-            ; the first draft read "glo r8" here (R8's LOW byte, P0 --
-            ; the byte that's supposed to be DROPPED by this >>8 shift,
-            ; not carried forward) instead of "ghi r8" (R8's HIGH byte,
-            ; P1 -- the byte this step actually needs). Caught by
-            ; re-deriving R8's own byte layout from its load sequence
-            ; above (lda/phi=P1 into R8.hi, ldn/plo=P0 into R8.lo) and
-            ; comparing against the already-correct Python model, which
-            ; had used P1 for this step from the start -- the assembly
-            ; just didn't match its own verified model on the first
-            ; pass. Re-verified afterward with a mechanical 1802-
-            ; instruction-level simulator (not just a re-read) across
-            ; 2000+ random 32-bit values for this step alone, plus the
-            ; full boff/sector_index/cluster_index/sector_in_clust
-            ; pipeline together.
-            ghi     r8                  ; D = old R8.hi (P1)
-            plo     r7                  ; R7.lo = P1 (temp, will be
-                                        ; overwritten by R7.hi next --
-                                        ; order matters: read before
-                                        ; the phi below touches R7)
-            glo     rd                  ; D = old RD.lo (P2)
-            phi     r7                  ; R7.hi = P2  => R7 = (P2,P1)
-            ghi     rd                  ; D = old RD.hi (P3)
-            plo     r9                  ; R9.lo = P3
-            ldi     0
-            phi     r9                  ; R9 = (0,P3)  => R9:R7 = last_byte_index >> 8
-
-            ghi     r9
-            shr
-            phi     r9
-            glo     r9
-            shrc
-            plo     r9
-            ghi     r7
-            shrc
-            phi     r7
-            glo     r7
-            shrc
-            plo     r7                  ; R9:R7 = sector_index (>>9).
-                                        ; R9 (sector_index's own high
-                                        ; word) is discarded from here
-                                        ; on -- deliberate, documented
-                                        ; scope limit (see below).
-
-            ; REAL BUG, FOUND AND FIXED (2026-07-27): sector_in_clust
-            ; must be computed HERE, using sector_index (R7) BEFORE the
-            ; cluster_index shift loop just below destroys it. The
-            ; original code computed sector_in_clust AFTER that loop,
-            ; reading R7 on the assumption it still held sector_index --
-            ; but the shift loop overwrites R7 with cluster_index
-            ; instead, so sector_in_clust was actually being computed
-            ; from the WRONG value (cluster_index masked by spc-1, not
-            ; sector_index masked by spc-1). This was invisible on
-            ; every card tested before this session: spc=1 on every
-            ; prior test card means bpb_spc_shift=0, so the shift loop
-            ; below runs ZERO iterations and never touches R7 -- purely
-            ; by luck, not by correctness. First exposed hardware-side
-            ; on a 512MB card with a real, legitimate spc=128 (FAT16's
-            ; own ~65525-cluster ceiling actually forces a cluster size
-            ; this large for a volume this size -- confirmed by reading
-            ; boot/krnboot.asm's own BPB-parsing code, which reads the
-            ; textbook-correct boot-sector byte offset). A diagnostic
-            ; showed a 60000-byte file's own append-mode repositioning
-            ; computing FCB_CSECT=0 instead of the correct 117,
-            ; explaining a silently-truncated FAT chain (subsequent
-            ; writes landing in the wrong sector-within-cluster,
-            ; eventually overwriting/aliasing instead of genuinely
-            ; extending the file). sector_in_clust = sector_index &
-            ; (spc-1) -- low byte of R7 only, since spc-1 is always a
-            ; small single-byte mask.
-            mov     rf, bpb_spc
-            ldn     rf
-            smi     1
-            str     r2                  ; [R2] = spc-1 (mask)
-            glo     r7                  ; D = sector_index's low byte
-                                        ; (R7 still holds sector_index
-                                        ; here -- the shift loop that
-                                        ; would destroy it hasn't run
-                                        ; yet)
-            and
-            ; BUG FIX (preserved from the original): "mov rf,
-            ; fa_sector_in_clust" itself clobbers D, so the AND result
-            ; must be stashed first.
-            plo     r9                  ; stash (R9's own earlier value
-                                        ; -- sector_index's discarded
-                                        ; high word -- is free to reuse
-                                        ; here; its loop-counter job for
-                                        ; cluster_index hasn't started
-                                        ; yet either)
-            mov     rf, fa_sector_in_clust
-            glo     r9                  ; D = result (reloaded)
-            str     rf                  ; fa_sector_in_clust = result
-
-            ; cluster_index = sector_index >> spc_shift -- operates on
-            ; R7 (sector_index's low 16 bits) only, supporting files up
-            ; to 32MB even at the smallest possible cluster size
-            ; (spc=1), far beyond anything realistic on this hardware;
-            ; a genuinely 32-bit-wide sector_index was judged not worth
-            ; the extra complexity for a case this project will never
-            ; actually hit. Same "reload fresh right before use, don't
-            ; trust D across the loop condition's own clobber" shape
-            ; the original single-byte version already had to learn
-            ; the hard way (see the preserved history below), now
-            ; widened to a 16-bit SHR/SHRC chain.
-            ;
-            ; BUG FIX (original, single-byte version): this loop used
-            ; to carry the partially-shifted value through D across
-            ; iterations ("glo rc" once before the loop, then just
-            ; "shr" each time) -- but the loop's OWN condition check
-            ; ("glo r9", reading the shift counter) clobbers D on every
-            ; iteration, including the first, before "shr" ever runs.
-            ; So "shr" always ended up shifting the DECREMENTING
-            ; COUNTER's own value, not sector_index, and since that
-            ; counter always reaches 0 through the very same
-            ; shifts+decrements, the loop always produced
-            ; cluster_index=0 regardless of the true sector_index --
-            ; for every spc value, not just spc=1 (confirmed via a
-            ; hardware diagnostic trace). Fixed by keeping the
-            ; shifting value in a real register, reloading it into D
-            ; fresh immediately before each "shr", storing straight
-            ; back -- the same discipline this widened version follows.
-            mov     rf, bpb_spc_shift
-            ldn     rf
-            plo     r9                  ; R9.0 = spc_shift (loop count
-                                        ; -- R9's own earlier value,
-                                        ; sector_index's discarded high
-                                        ; word, is no longer needed)
-fa_cidx_shr:
-            glo     r9
-            lbz     fa_cidx_done
-            ghi     r7                  ; D = accumulator high byte
-                                        ; (reloaded fresh, not carried
-                                        ; through the loop-condition
-                                        ; check's own D clobber)
-            shr
-            phi     r7
-            glo     r7                  ; D = accumulator low byte
-            shrc
-            plo     r7                  ; R7 = shifted value (16-bit)
-            dec     r9
-            lbr     fa_cidx_shr
-fa_cidx_done:
-            ; R7 = cluster_index (16-bit) -- write to fa_cluster_idx
-            ; (now 2 bytes, was 1 -- see its own #define comment).
-            ; sector_in_clust was already computed and stored above,
-            ; before this loop had a chance to overwrite R7 -- see the
-            ; 2026-07-27 bug-fix comment near this proc's own start.
-            mov     rf, fa_cluster_idx
-            ghi     r7
-            str     rf
-            inc     rf
-            glo     r7
-            str     rf                  ; fa_cluster_idx = cluster_index
-
-            ; --- walk fat_get fa_cluster_idx times from FCB_SCLUST --
-            ; RC now holds a 16-bit hop count (was 8-bit), matching
-            ; fa_cluster_idx's own widened size ---
-            mov     rf, rb
-            add16   rf, FCB_SCLUST
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = FCB_SCLUST
-
-            mov     rf, fa_cluster_idx
-            lda     rf
-            phi     rc
-            ldn     rf
-            plo     rc                  ; RC = hops remaining (16-bit)
-fa_walk_loop:
-            glo     rc
-            lbnz    fa_walk_go
-            ghi     rc
-            lbz     fa_walk_done
-fa_walk_go:
-            push    r9
-            push    ra
-            push    rb
-            push    rc
-            call    fat_get             ; RD = next cluster
-            pop     rc
-            pop     rb
-            pop     ra
-            pop     r9
+            ; RD:R8 = FSIZE (target), RB = fcb slot base -- exactly
+            ; _fcb_seek_to's own argument convention (2026-07-27,
+            ; consolidated with file_seek's fsk_general, which computed
+            ; byte-for-byte identical positioning math against a
+            ; different target -- see _fcb_seek_to's own header for the
+            ; full rationale). last_byte_index/boff/sector_index/
+            ; sector_in_clust/cluster_index/fat_get-walk/wrap-and-write
+            ; all now live there, not here.
+            call    _fcb_seek_to        ; -> DF=0/1, FCB_CCLUST/CSECT/
+                                        ; BOFF set on success
             lbdf    fopen_no_append     ; I/O error: leave the FCB at
                                         ; its default position-0 state
-            dec     rc
-            lbr     fa_walk_loop
-fa_walk_done:
-            ; RD = target cluster
+                                        ; (DF is unconditionally cleared
+                                        ; below regardless -- matches
+                                        ; the pre-consolidation
+                                        ; behavior exactly: an append-
+                                        ; reposition failure never fails
+                                        ; the open itself)
 
-            ; --- new position = one past the last valid byte ---
-            mov     rf, fa_boff
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = boff
-            add16   r8, 1               ; R8 = new_boff (1-512)
-
-            mov     rf, fa_sector_in_clust
-            ldn     rf
-            plo     r9                  ; R9.0 = new_csect
-
-            ghi     r8
-            xri     2
-            lbnz    fa_no_sector_wrap
-            glo     r8
-            lbnz    fa_no_sector_wrap
-            ldi     0
-            phi     r8
-            plo     r8                  ; new_boff wrapped to 0
-            glo     r9
-            adi     1
-            plo     r9                  ; new_csect += 1
-fa_no_sector_wrap:
-            ; RD = target cluster, R9.0 = new_csect, R8 = new_boff
-
+            ; FCB_FPOS = FCB_FSIZE, straight 4-byte copy (2026-07-26,
+            ; >64K support -- both fields share the same MSB-first
+            ; layout, so no reversal needed). RB reloaded fresh here --
+            ; _fcb_seek_to's own "Modifies: everything" contract means
+            ; nothing survives the call.
             mov     rf, fo_fcb
             lda     rf
             phi     rb
             ldn     rf
-            plo     rb                  ; RB = fcb slot base (reload --
-                                        ; the fat_get walk clobbered it)
+            plo     rb                  ; RB = fcb slot base (reload)
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; FCB_CCLUST = target cluster
-
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            glo     r9
-            str     rf                  ; FCB_CSECT = new_csect
-
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_BOFF = new_boff
-
-            ; FCB_FPOS = FCB_FSIZE, straight 4-byte copy (2026-07-26,
-            ; >64K support -- both fields share the same MSB-first
-            ; layout, so no reversal needed)
             mov     rf, rb
             add16   rf, FCB_FSIZE       ; RF = source (FSIZE)
             mov     r8, rb
@@ -6153,8 +6149,17 @@ fsk_rewind:
             lbr     fsk_set_fpos
 
 fsk_general:
-            ; last_byte_index = target - 1, full 32-bit (2026-07-26,
-            ; >64K support). RD:R8 = target here.
+            ; RD:R8 = fsk_target (target > 0, guaranteed by the
+            ; target==0 check just before this label was reached --
+            ; see fsk_range_check above), RB = FCB base -- exactly
+            ; _fcb_seek_to's own argument convention (2026-07-27,
+            ; consolidated with file_open's own append-mode
+            ; repositioning, which computed byte-for-byte identical
+            ; positioning math against a different target -- see
+            ; _fcb_seek_to's own header for the full rationale).
+            ; last_byte_index/boff/sector_index/sector_in_clust/
+            ; cluster_index/fat_get-walk/wrap-and-write all now live
+            ; there, not here.
             mov     rf, fsk_target
             lda     rf
             phi     rd
@@ -6163,206 +6168,21 @@ fsk_general:
             lda     rf
             phi     r8
             ldn     rf
-            plo     r8                  ; RD:R8 = target
-
-            sub16   r8, 1
-            lbdf    fsk_lbi_no_borrow
-            sub16   rd, 1
-fsk_lbi_no_borrow:
-            ; RD:R8 = last_byte_index
-
-            ; boff (0-511) = last_byte_index & 511
-            mov     rf, fsk_boff
-            ghi     r8
-            ani     1
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; fsk_boff = last_byte_index & 511
-
-            ; sector_index = last_byte_index >> 9, via >>8 (byte
-            ; reassignment) then >>1 (SHRC chain, MSB to LSB) -- same
-            ; algorithm as fopen_check_append's own already-verified
-            ; (and once-corrected -- see its own header comment for the
-            ; ghi-vs-glo bug caught there) version above.
-            ghi     r8
-            plo     r7
-            glo     rd
-            phi     r7
-            ghi     rd
-            plo     r9
-            ldi     0
-            phi     r9
-
-            ghi     r9
-            shr
-            phi     r9
-            glo     r9
-            shrc
-            plo     r9
-            ghi     r7
-            shrc
-            phi     r7
-            glo     r7
-            shrc
-            plo     r7                  ; R9:R7 = sector_index (>>9);
-                                        ; R9 (its own high word)
-                                        ; discarded from here on, same
-                                        ; documented 32MB-scope limit
-                                        ; as fopen_check_append's own
-                                        ; version
-
-            ; REAL BUG, FOUND AND FIXED (2026-07-27): same exact bug as
-            ; fopen_check_append's own copy of this algorithm -- see its
-            ; header comment for the full story (hardware-confirmed on a
-            ; 512MB card with a genuine spc=128, invisible on every
-            ; prior test card since spc=1 there made the cluster_index
-            ; shift loop below run zero iterations, leaving R7 untouched
-            ; by luck). sector_in_clust must be computed HERE, using
-            ; sector_index (R7) BEFORE the cluster_index shift loop just
-            ; below overwrites it.
-            mov     rf, bpb_spc
-            ldn     rf
-            smi     1
-            str     r2                  ; [R2] = spc-1 (mask)
-            glo     r7                  ; D = sector_index's low byte
-                                        ; (R7 still holds sector_index
-                                        ; here)
-            and
-            plo     r9                  ; stash (mov below clobbers D;
-                                        ; R9's own earlier value --
-                                        ; sector_index's discarded high
-                                        ; word -- is free to reuse)
-            mov     rf, fsk_sector_in_clust
-            glo     r9
-            str     rf
-
-            ; cluster_index = sector_index >> spc_shift (16-bit,
-            ; R7 only) -- same D-clobber-safe variable-shift-count loop
-            ; shape as fopen_check_append's own already-hardware-
-            ; confirmed version (see its header comment for why the
-            ; loop counter can't share D with the value being shifted)
-            mov     rf, bpb_spc_shift
-            ldn     rf
-            plo     r9                  ; R9.0 = spc_shift (loop count)
-fsk_cidx_shr:
-            glo     r9
-            lbz     fsk_cidx_done
-            ghi     r7
-            shr
-            phi     r7
-            glo     r7
-            shrc
-            plo     r7
-            dec     r9
-            lbr     fsk_cidx_shr
-fsk_cidx_done:
-            ; R7 = cluster_index (16-bit). sector_in_clust was already
-            ; computed and stored above, before this loop had a chance
-            ; to overwrite R7 -- see the 2026-07-27 bug-fix comment near
-            ; this section's own start.
-            mov     rf, fsk_cluster_idx
-            ghi     r7
-            str     rf
-            inc     rf
-            glo     r7
-            str     rf                  ; fsk_cluster_idx = cluster_index
-
-            ; --- walk fat_get fsk_cluster_idx times from FCB_SCLUST --
-            ; RC now holds a 16-bit hop count (was 8-bit) ---
-            mov     rf, fsk_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb
-            mov     rf, rb
-            add16   rf, FCB_SCLUST
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = FCB_SCLUST
-
-            mov     rf, fsk_cluster_idx
-            lda     rf
-            phi     rc
-            ldn     rf
-            plo     rc                  ; RC = hops remaining (16-bit)
-fsk_walk_loop:
-            glo     rc
-            lbnz    fsk_walk_go
-            ghi     rc
-            lbz     fsk_walk_done
-fsk_walk_go:
-            push    r9
-            push    ra
-            push    rb
-            push    rc
-            call    fat_get             ; RD = next cluster
-            pop     rc
-            pop     rb
-            pop     ra
-            pop     r9
-            lbdf    fseek_io_err        ; I/O error mid-walk -- FCB
-                                        ; not yet touched, safe to
-                                        ; abandon
-            dec     rc
-            lbr     fsk_walk_loop
-fsk_walk_done:
-            ; RD = target cluster
+            plo     r8                  ; RD:R8 = fsk_target
 
             mov     rf, fsk_fcb
             lda     rf
             phi     rb
             ldn     rf
-            plo     rb                  ; RB = FCB base (reload -- the
-                                        ; fat_get walk clobbered it)
+            plo     rb                  ; RB = FCB base
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; FCB_CCLUST = target cluster
+            call    _fcb_seek_to        ; -> DF=0/1, FCB_CCLUST/CSECT/
+                                        ; BOFF set on success
+            lbdf    fseek_io_err
 
-            mov     rf, fsk_sector_in_clust
-            ldn     rf
-            plo     r9                  ; R9.0 = target sector-in-cluster
-
-            mov     rf, fsk_boff
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = boff (0-511)
-            add16   r8, 1               ; R8 = new_boff (1-512) -- "+1"
-                                        ; because last_byte_index was
-                                        ; target-1; converts back to
-                                        ; target's own offset
-
-            ghi     r8
-            xri     2
-            lbnz    fsk_no_wrap
-            glo     r8
-            lbnz    fsk_no_wrap
-            ldi     0
-            phi     r8
-            plo     r8                  ; new_boff wrapped to 0
-            glo     r9
-            adi     1
-            plo     r9                  ; new_csect += 1
-fsk_no_wrap:
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            glo     r9
-            str     rf                  ; FCB_CSECT = new_csect
-
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_BOFF = new_boff
+            lbr     fsk_set_fpos        ; shared FPOS/IOVALID/return
+                                        ; tail, unchanged -- already
+                                        ; used by fsk_rewind too
 
 fsk_set_fpos:
             mov     rf, fsk_fcb
@@ -6547,21 +6367,21 @@ fc_new_size:    dw      0,0             ; 4 bytes, big-endian
 ; immediately on entry (fsk_whence/fsk_off_hi/fsk_off_lo/fsk_fcb),
 ; since _switch_drive and fat_get both clobber broadly. fsk_target is
 ; the resolved absolute position (widened 2->4 bytes, 2026-07-26,
-; >64K support); fsk_boff/fsk_cluster_idx/fsk_sector_in_clust mirror
-; fa_boff/fa_cluster_idx/fa_sector_in_clust above (same role, kept
-; separate rather than shared since file_seek and file_open's own
-; append-mode positioning are each already complex enough on their
-; own -- not sharing state between them keeps each easier to reason
-; about independently; fsk_cluster_idx widened 1->2 bytes alongside
-; fa_cluster_idx's own identical widening, same reasoning).
+; >64K support). fsk_boff/fsk_cluster_idx/fsk_sector_in_clust (their
+; own separate, permanently-allocated fields, mirroring fa_boff/
+; fa_cluster_idx/fa_sector_in_clust's identical role in file_open's own
+; append-mode positioning) REMOVED 2026-07-27 -- both copies of that
+; positioning math were consolidated into the shared _fcb_seek_to,
+; whose own fst_boff/fst_cluster_idx/fst_sector_in_clust now live in
+; _shared_scratch instead (see this file's own #define block, and
+; _fcb_seek_to's own header for why consolidating was judged safe:
+; both copies had already been independently hardware-bug-hunted and
+; fixed identically twice, meaning nothing had diverged between them).
 fsk_whence:         db      0
 fsk_off_hi:         dw      0
 fsk_off_lo:         dw      0
 fsk_fcb:            dw      0
 fsk_target:         dw      0,0             ; 4 bytes, big-endian
-fsk_boff:           dw      0
-fsk_cluster_idx:    dw      0
-fsk_sector_in_clust: db     0
 
                 public  file_dirent
                 public  fo_name
@@ -6601,8 +6421,5 @@ fsk_sector_in_clust: db     0
                 public  fsk_off_lo
                 public  fsk_fcb
                 public  fsk_target
-                public  fsk_boff
-                public  fsk_cluster_idx
-                public  fsk_sector_in_clust
 
             endp

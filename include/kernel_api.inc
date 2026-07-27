@@ -180,6 +180,37 @@ K_FILE_SEEK:    equ     $0115
 K_DIR_OPEN:     equ     $0118
 K_DIR_READ:     equ     $011B
 
+; K_DIR_SAVE_STATE/K_DIR_RESTORE_STATE: snapshot/restore the directory
+; iterator's own scan position (2026-07-27), so a caller can pause a
+; K_DIR_OPEN/K_DIR_READ scan across other, unrelated kernel directory
+; operations (K_STAT, K_FILE_OPEN, etc.) and later resume it exactly
+; where it left off -- K_DIR_OPEN/K_DIR_READ share ONE kernel-resident
+; scan position, so without this, a caller wanting to interleave a
+; multi-call scan with other directory activity would have no choice
+; but to re-scan from the start each time (see lib/file_glob.asm's
+; glob_next, the motivating use case: iterating wildcard matches one
+; at a time while the caller processes each match in between calls).
+;
+; K_DIR_SAVE_STATE:
+;   Args:    RF = pointer to a caller-owned DIR_STATE_LEN-byte buffer
+;   Returns: nothing (buffer filled)
+; K_DIR_RESTORE_STATE:
+;   Args:    RF = pointer to a DIR_STATE_LEN-byte buffer previously
+;            filled by K_DIR_SAVE_STATE
+;   Returns: DF = 0 on success (the next K_DIR_READ call resumes
+;            exactly where the snapshot was taken); DF = 1 if the
+;            disk re-read needed to restore the current sector failed
+;            -- treat as a hard I/O error, same as any other failed
+;            K_DIR_READ
+K_DIR_SAVE_STATE:    equ     $0188
+K_DIR_RESTORE_STATE: equ     $018B
+
+; DIR_STATE_LEN: size of the K_DIR_SAVE_STATE/K_DIR_RESTORE_STATE
+; snapshot buffer, restated from kernel.inc for any program that needs
+; to declare one (a plain `ds DIR_STATE_LEN`, opaque -- same "publish
+; a size, not the struct" precedent as FCB_LEN/DIRENT_LEN above).
+DIR_STATE_LEN:  equ     9
+
 ; K_PROG_LOAD/K_PROG_EXEC: REMOVED 2026-07-13 (pre-release jump-table
 ; cleanup). Neither could ever be safely called by a program while it
 ; was running -- loading a second program to PROG_BASE overwrites the
@@ -640,4 +671,7 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $0179
+; next free jump-table slot address: $018E (this comment was stale at
+; $0179 before 2026-07-27 -- several entries had been appended above
+; without updating it; kernel/kernel.asm's own trailing comment, right
+; after the jump table itself, is the actual source of truth)
