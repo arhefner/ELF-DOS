@@ -188,13 +188,34 @@ lib/fmt32.prg: lib/fmt32.asm include/opcodes.def
 lib/file_glob.prg: lib/file_glob.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/file_glob.inc
 	cd lib && $(ASM) $(ASMFLAGS) file_glob.asm
 
-bin/dir: progs/dir.prg lib/fmt32.prg lib/file_glob.prg | bin
-	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg lib/file_glob.prg
+lib/vollabel.prg: lib/vollabel.asm include/opcodes.def include/kernel_api.inc include/vollabel.inc
+	cd lib && $(ASM) $(ASMFLAGS) vollabel.asm
+
+lib/pathstr.prg: lib/pathstr.asm include/opcodes.def include/bios.inc include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) pathstr.asm
+
+lib/ymodem.prg: lib/ymodem.asm include/opcodes.def include/bios.inc include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) ymodem.asm
+
+bin/dir: progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg | bin
+	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg
 	rm -f bin/dir.lkb
+
+bin/label: progs/label.prg lib/vollabel.prg | bin
+	$(LINK) $(LFLAGS) -o bin/label progs/label.prg lib/vollabel.prg
+	rm -f bin/label.lkb
+
+bin/pwd: progs/pwd.prg lib/pathstr.prg | bin
+	$(LINK) $(LFLAGS) -o bin/pwd progs/pwd.prg lib/pathstr.prg
+	rm -f bin/pwd.lkb
 
 bin/del: progs/del.prg lib/file_glob.prg | bin
 	$(LINK) $(LFLAGS) -o bin/del progs/del.prg lib/file_glob.prg
 	rm -f bin/del.lkb
+
+bin/touch: progs/touch.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/touch progs/touch.prg lib/file_glob.prg
+	rm -f bin/touch.lkb
 
 bin/copy: progs/copy.prg lib/file_glob.prg | bin
 	$(LINK) $(LFLAGS) -o bin/copy progs/copy.prg lib/file_glob.prg
@@ -259,6 +280,14 @@ bin/shell: progs/shell.prg lib/env.prg | bin
 bin/move: progs/move.prg lib/move.prg lib/file_glob.prg | bin
 	$(LINK) $(LFLAGS) -o bin/move progs/move.prg lib/move.prg lib/file_glob.prg
 	rm -f bin/move.lkb
+
+bin/yr: progs/yr.prg lib/ymodem.prg lib/fmt32.prg | bin
+	$(LINK) $(LFLAGS) -o bin/yr progs/yr.prg lib/ymodem.prg lib/fmt32.prg
+	rm -f bin/yr.lkb
+
+bin/ys: progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/ys progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg
+	rm -f bin/ys.lkb
 
 #------------------------------------------------------------------
 # Link rules

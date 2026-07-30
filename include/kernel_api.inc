@@ -596,6 +596,16 @@ K_GLOB_RESERVE:     equ     $0176       ; -> kernel_glob_reserve
 ;          target is "." or "..", or an I/O error writing the sector)
 K_FILE_SETATTR:     equ     $0179       ; -> file_setattr
 
+; K_FILE_TOUCH: update an existing directory entry's last-write date/
+; time to the current time. Touches nothing else -- content, size,
+; cluster chain, and attribute byte are all left exactly as they were.
+; Works on either a file or a directory, same "caller decides" spirit
+; as K_FILE_SETATTR just above.
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success, DF = 1 on error (not found, bad path,
+;          target is "." or "..", or an I/O error writing the sector)
+K_FILE_TOUCH:       equ     $018E       ; -> file_touch
+
 ; GLOB_BUF_LEN: size of the reservation K_GLOB_RESERVE makes --
 ; progs/shell.asm's own glob-expansion pass budgets its writes against
 ; this so it never overruns the reserved region.
@@ -671,7 +681,7 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $018E (this comment was stale at
+; next free jump-table slot address: $0191 (this comment was stale at
 ; $0179 before 2026-07-27 -- several entries had been appended above
 ; without updating it; kernel/kernel.asm's own trailing comment, right
 ; after the jump table itself, is the actual source of truth)

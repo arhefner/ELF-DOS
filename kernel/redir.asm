@@ -987,7 +987,18 @@ kim_scan:
             ldn     rf
             plo     r9                  ; R9 = kim_start
             sub16   rc, r9              ; RC = kim_resume - kim_start
-            sub16   rc, 1               ; RC -= 1 (exclude the NUL)
+            dec     rc                  ; RC -= 1 (exclude the NUL) --
+                                        ; DEC not SUB16 (2026-07-30):
+                                        ; a 1-byte no-D-clobber
+                                        ; instruction is strictly
+                                        ; better than SUB16's 8-byte,
+                                        ; D-clobbering macro expansion
+                                        ; whenever the constant is
+                                        ; small and DF isn't needed
+                                        ; from the subtraction itself
+                                        ; (confirmed here: the very
+                                        ; next instruction is a mov,
+                                        ; which clobbers D anyway)
 
             mov     rf, redir_out_active
             ldn     rf

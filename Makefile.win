@@ -23,19 +23,31 @@
 # DIFFERENCE FROM THE LINUX MAKEFILE: nmake has no equivalent of GNU
 # Make's $(wildcard ...)/$(patsubst ...), so "progs"/"test" can't build a
 # real per-file dependency graph for arbitrary progs\*.asm/test\*.asm the
-# way the Linux Makefile does. The 8 progs\ programs that link against
-# lib\ (printenv, export, unset, ls, more, edlin, move, xcopy) and the 3
-# test\ programs that do (envtest, bumptest, malloctest -- moved out of
-# progs\ 2026-07-25, see the Linux Makefile's own TEST_SRCS/TEST_EXES
-# comment) keep real nmake rules below, same as the Linux Makefile's own
-# explicit overrides for them, with proper incremental rebuilds. Every
-# OTHER progs\*.asm/test\*.asm file is auto-discovered (no Makefile.win
-# edit needed for a new one, matching the Linux Makefile's own praised
-# property) and built by the companion scripts build_progs.bat/
-# build_test.bat, which this Makefile calls -- but they rebuild their
-# whole set unconditionally each time, rather than tracking each file's
-# own timestamp. asm02/link02 are fast enough that this hasn't been
-# worth the extra complexity of a real incremental check in batch.
+# way the Linux Makefile does. The progs\ programs that link against
+# lib\ (printenv, export, unset, ls, more, edlin, move, xcopy, shell, yr,
+# ys) and the 3 test\ programs that do (envtest, bumptest, malloctest --
+# moved out of progs\ 2026-07-25, see the Linux Makefile's own
+# TEST_SRCS/TEST_EXES comment) keep real nmake rules below, same as the
+# Linux Makefile's own explicit overrides for them, with proper
+# incremental rebuilds. Every OTHER progs\*.asm/test\*.asm file is auto-
+# discovered (no Makefile.win edit needed for a new one, matching the
+# Linux Makefile's own praised property) and built by the companion
+# scripts build_progs.bat/build_test.bat, which this Makefile calls --
+# but they rebuild their whole set unconditionally each time, rather than
+# tracking each file's own timestamp. asm02/link02 are fast enough that
+# this hasn't been worth the extra complexity of a real incremental check
+# in batch.
+#
+# NOTE (pre-existing gap, not addressed by adding yr/ys here): several
+# newer file_glob.asm-linked Linux programs (dir, label, pwd, del, touch,
+# copy, attrib, stat) and their own lib\ deps (file_glob, fmt32, vollabel,
+# pathstr) still have no Makefile.win/build_progs.bat entries at all --
+# this Windows port has been lagging the Linux Makefile's own lib\ set
+# for a while (see the project's own session notes). ys.asm's own need
+# for lib\file_glob.prg is the first time that gap has blocked a NEW
+# program from building on Windows at all, so lib\file_glob.prg's own
+# assembly rule is added below (needed for bin\ys) -- the 8 programs
+# above that also need it on Linux are a separate, still-open gap.
 #
 
 ASM         = asm02
@@ -66,10 +78,11 @@ INCS =  include\bios.inc    \
         include\opcodes.def \
         include\kernel.inc
 
-# ---- The 9 progs\*.asm that link against lib\ -- see build_progs.bat's
+# ---- The progs\*.asm that link against lib\ -- see build_progs.bat's
 # own exclusion list, which must be kept in sync with this set ----
 SPECIAL_BINS = bin\printenv bin\export bin\unset \
-        bin\ls bin\more bin\edlin bin\move bin\xcopy bin\shell
+        bin\ls bin\more bin\edlin bin\move bin\xcopy bin\shell \
+        bin\yr bin\ys
 
 # ---- The 3 test\*.asm that link against lib\ -- see build_test.bat's
 # own exclusion list, which must be kept in sync with this set ----
@@ -142,6 +155,15 @@ lib\env.prg: lib\env.asm include\opcodes.def include\kernel_api.inc
 
 lib\move.prg: lib\move.asm include\opcodes.def include\kernel_api.inc
 	cd lib && $(ASM) $(ASMFLAGS) move.asm
+
+lib\ymodem.prg: lib\ymodem.asm include\opcodes.def include\bios.inc include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) ymodem.asm
+
+lib\fmt32.prg: lib\fmt32.asm include\opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) fmt32.asm
+
+lib\file_glob.prg: lib\file_glob.asm include\opcodes.def include\bios.inc include\kernel_api.inc include\file_glob.inc
+	cd lib && $(ASM) $(ASMFLAGS) file_glob.asm
 
 #------------------------------------------------------------------
 # The 10 progs\*.asm that link against lib\ -- explicit rules, real
@@ -232,6 +254,20 @@ progs\shell.prg: progs\shell.asm include\kernel_api.inc include\bios.inc include
 bin\shell: progs\shell.prg lib\env.prg bin
 	$(LINK) $(LFLAGS) -o bin\shell progs\shell.prg lib\env.prg
 	-del /F /Q bin\shell.lkb
+
+progs\yr.prg: progs\yr.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\ymodem.inc
+	cd progs && $(ASM) $(ASMFLAGS) yr.asm
+
+bin\yr: progs\yr.prg lib\ymodem.prg lib\fmt32.prg bin
+	$(LINK) $(LFLAGS) -o bin\yr progs\yr.prg lib\ymodem.prg lib\fmt32.prg
+	-del /F /Q bin\yr.lkb
+
+progs\ys.prg: progs\ys.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\ymodem.inc include\file_glob.inc
+	cd progs && $(ASM) $(ASMFLAGS) ys.asm
+
+bin\ys: progs\ys.prg lib\ymodem.prg lib\fmt32.prg lib\file_glob.prg bin
+	$(LINK) $(LFLAGS) -o bin\ys progs\ys.prg lib\ymodem.prg lib\fmt32.prg lib\file_glob.prg
+	-del /F /Q bin\ys.lkb
 
 #------------------------------------------------------------------
 # Link rules (boot/kernel)

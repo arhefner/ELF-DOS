@@ -78,6 +78,7 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 #include    include/file_glob.inc
+#include    include/vollabel.inc
 
             extrn   fmt_size32          ; lib/fmt32.asm -- 32-bit
                                         ; comma-grouped decimal
@@ -86,6 +87,12 @@
             extrn   is_glob
             extrn   glob_init
             extrn   glob_next
+            extrn   vol_label_get       ; lib/vollabel.asm -- 2026-07-30,
+                                        ; the "Volume in drive X is..."
+                                        ; header below
+            extrn   path_print_from_cluster  ; lib/pathstr.asm --
+                                        ; 2026-07-30, the "Directory of
+                                        ; <path>" header below
 
             org     PROG_BASE
 
@@ -116,6 +123,73 @@ start:
             glo     rd
             str     rf
 
+            ; stash argc/argv too, before the volume-label header print
+            ; below makes calls of its own that clobber RA/RC -- reloaded
+            ; fresh right after, so the existing argc-based branching
+            ; further down sees them exactly as before
+            mov     rf, dir_argv
+            ghi     ra
+            str     rf
+            inc     rf
+            glo     ra
+            str     rf
+            mov     rf, dir_argc
+            glo     rc
+            str     rf
+
+            ; --- "Volume in drive X is LABEL" / "has no label" header,
+            ; matching real MS-DOS DIR (2026-07-30). A second
+            ; K_GETCURDIR call, purely for its own D=cur_drive return
+            ; value -- a provably safe no-op status check (cur_drive's
+            ; BPB is already active from the first call above), chosen
+            ; over touching that first call site's own carefully-
+            ; reasoned RA/RC-survival comment. ---
+            call    K_GETCURDIR
+            adi     'C'                 ; D = 'C'+cur_drive
+            plo     r9                  ; stash -- "mov rf,
+                                        ; dir_vol_letter" right below
+                                        ; clobbers D (gotcha #4)
+            mov     rf, dir_vol_letter
+            glo     r9
+            str     rf
+
+            mov     rd, dir_vol_buf
+            call    vol_label_get       ; DF = 0/1
+            lbdf    dir_vol_none
+
+            call    K_INMSG
+            db      "Volume in drive ",0
+            mov     rf, dir_vol_letter
+            ldn     rf
+            call    K_TYPE
+            call    K_INMSG
+            db      " is ",0
+            mov     rf, dir_vol_buf
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+            lbr     dir_vol_done
+
+dir_vol_none:
+            call    K_INMSG
+            db      "Volume in drive ",0
+            mov     rf, dir_vol_letter
+            ldn     rf
+            call    K_TYPE
+            call    K_INMSG
+            db      " has no label.",13,10,0
+
+dir_vol_done:
+            ; reload RA/RC fresh -- both were clobbered by the calls above
+            mov     rf, dir_argv
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra
+            mov     rf, dir_argc
+            ldn     rf
+            plo     rc
+
             ; RA = argv pointer, RC = argc (RC.0 alone is enough --
             ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
             ; program's own name.
@@ -126,7 +200,7 @@ start:
 
             glo     rc
             smi     2
-            lbnf    dir_open_target     ; argc < 2: no path given, list
+            lbnf    dir_bare_listing    ; argc < 2: no path given, list
                                         ; the current directory
 
             ; argc == 2: exactly one path argument. Check is_glob
@@ -277,6 +351,47 @@ dir_find:
             phi     rd
             ldn     rf                  ; D = cluster low byte
             plo     rd
+            lbr     dir_open_target
+
+; dir_bare_listing: argc < 2 (no path given) -- reload RD from the
+; cluster stashed at the very top of start:, before any of the
+; volume-label header's own calls (a second K_GETCURDIR, vol_label_get)
+; had a chance to clobber it. A real hardware-found bug (2026-07-30):
+; dir_open_target expects RD to already hold the target cluster on
+; entry, and this bare-listing path used to just fall straight into it
+; with none of the header code in between -- back when RD still
+; genuinely held the FIRST K_GETCURDIR's own result, untouched. Once
+; the header code was inserted, RD ended up holding whatever
+; vol_label_get's internal directory scan happened to leave behind
+; instead, silently opening a garbage cluster (dir_curdir_clust/RA/RC
+; were already being reloaded fresh after the header, RD was not).
+dir_bare_listing:
+            ; "Directory of <path>" header (2026-07-30), matching real
+            ; MS-DOS's own blank-line/Directory-of/blank-line layout --
+            ; only for the bare (no-argument) listing, since
+            ; path_print_from_cluster assumes the cluster it's given
+            ; belongs to the CURRENTLY ACTIVE drive, true here (cur_dir
+            ; on the active drive) but not guaranteed for an arbitrary
+            ; resolved path argument on a different drive
+            call    K_INMSG
+            db      13,10,"Directory of ",0
+
+            mov     rf, dir_curdir_clust
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    path_print_from_cluster
+
+            call    K_INMSG
+            db      13,10,13,10,0
+
+            mov     rf, dir_curdir_clust
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; reload RD -- clobbered by
+                                        ; path_print_from_cluster above
 
 dir_open_target:
             call    K_DIR_OPEN
@@ -939,5 +1054,7 @@ dir_curdir_clust: dw    0
 dir_single_arg: dw      0
 dir_glob_found: db      0
 dir_glob_ctx:   ds      GLOB_CTX_LEN
+dir_vol_letter: db      0
+dir_vol_buf:    ds      12
 
             end     start

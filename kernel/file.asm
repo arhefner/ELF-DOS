@@ -298,10 +298,19 @@ _shared_scratch:    ds      9
             glo     rb
             str     rf                  ; fst_fcb = RB (FCB base)
 
-            ; last_byte_index = target - 1 (RD:R8 already = target)
+            ; last_byte_index = target - 1 (RD:R8 already = target).
+            ; The low-word subtract must stay SUB16, not DEC (2026-07-30
+            ; add16/sub16-with-small-constant sweep) -- its own DF
+            ; result is what the lbdf right below tests, to decide
+            ; whether the borrow propagates into the high word; DEC
+            ; never sets DF at all. The high-word propagation right
+            ; after IS safely a DEC, though -- nothing reads DF from
+            ; it (falls straight into fst_lbi_no_borrow, whose own
+            ; very next instructions overwrite D via mov/ghi before
+            ; anything could read it).
             sub16   r8, 1
             lbdf    fst_lbi_no_borrow
-            sub16   rd, 1
+            dec     rd
 fst_lbi_no_borrow:
             ; RD:R8 = last_byte_index
 
@@ -436,7 +445,12 @@ fst_walk_done:
             phi     r8
             ldn     rf
             plo     r8                  ; R8 = boff
-            add16   r8, 1               ; R8 = new_boff (1-512)
+            inc     r8                  ; R8 = new_boff (1-512) --
+                                        ; INC not ADD16 (2026-07-30
+                                        ; sweep): 1-byte, no-D-clobber,
+                                        ; and the very next real
+                                        ; instruction (mov) clobbers D
+                                        ; anyway regardless
 
             mov     rf, fst_sector_in_clust
             ldn     rf
@@ -2161,7 +2175,11 @@ fc_mark_have:
             ldi     $E5
             str     rf
             inc     rf
-            sub16   rd, 1
+            dec     rd                  ; DEC not SUB16 (2026-07-30
+                                        ; sweep) -- fc_mark_deleted's
+                                        ; own first instruction (ghi
+                                        ; rd) reloads D fresh on every
+                                        ; loop iteration regardless
             lbr     fc_mark_deleted
 fc_mark_done:
             ; write the patched old sector back before moving on
@@ -3650,7 +3668,10 @@ dcr_zero1:
             ldi     0
             str     rf
             inc     rf
-            sub16   rc, 1
+            dec     rc                  ; DEC not SUB16 (2026-07-30
+                                        ; sweep) -- the immediately
+                                        ; following ghi rc reloads D
+                                        ; fresh regardless
             ghi     rc
             lbnz    dcr_zero1
             glo     rc
@@ -3812,7 +3833,10 @@ dcr_zero2:
             ldi     0
             str     rf
             inc     rf
-            sub16   rc, 1
+            dec     rc                  ; DEC not SUB16 (2026-07-30
+                                        ; sweep) -- the immediately
+                                        ; following ghi rc reloads D
+                                        ; fresh regardless
             ghi     rc
             lbnz    dcr_zero2
             glo     rc
@@ -4602,6 +4626,101 @@ fsa_err:
 
 fsa_setmask:    db      0
 fsa_clearmask:  db      0
+
+; ----------------------------------------------------------------
+; file_touch: update an existing directory entry's last-write date/time
+; to the current time, touching nothing else (content, size, cluster
+; chain, attribute byte all untouched). Works on either a file or a
+; directory, same "caller decides" reasoning as file_setattr just above
+; -- nothing about restamping a timestamp is file-only.
+;
+; Reuses _find_dirent for the locate step (identical to file_setattr),
+; then does the exact rtc_refresh/_pack_fat_datetime/DE_WRTTIME+DE_WRTDATE
+; patch sequence _fclose_rewrite_size already uses on every size-changing
+; close -- just without that routine's own DE_SIZE/DE_CLUSTER half, and
+; with no FCB involved at all: the entry's own sector is read fresh by
+; _find_dirent, exactly as file_setattr's already does.
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success, DF = 1 on error (not found, bad path,
+;          target is "." or "..", or an I/O error writing the sector)
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    file_touch
+
+            call    _find_dirent        ; DF = 0/1; file_dirent/
+                                        ; dir_last_off/dir_cur_lba/
+                                        ; dir_buf describe the match on
+                                        ; success
+            lbdf    ftc_err
+
+            ; reject "." and ".." as the target -- same reasoning and
+            ; placement as file_setattr's own guard
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    _is_dot_or_dotdot
+            lbdf    ftc_err
+
+            call    rtc_refresh
+            call    _pack_fat_datetime  ; RD = packed date, R8 = packed time
+            mov     r9, rd              ; R9 = packed date (stash)
+            mov     rc, r8              ; RC = packed time (stash)
+
+            mov     rf, dir_last_off
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = short entry's own byte
+                                        ; offset within dir_buf
+
+            mov     rf, dir_buf+DE_WRTTIME
+            add16   rf, rb              ; RF -> entry's WrtTime field
+                                        ; (WrtDate immediately follows,
+                                        ; DE_WRTTIME folded into the mov
+                                        ; the same way file_setattr's own
+                                        ; DE_ATTR patch already does --
+                                        ; gotcha #15/#17, confirmed safe)
+
+            glo     rc                  ; D = packed time low byte
+            str     rf
+            inc     rf
+            ghi     rc                  ; D = packed time high byte
+            str     rf                  ; DE_WRTTIME (LE) written
+            inc     rf                  ; RF -> DE_WRTDATE
+
+            glo     r9                  ; D = packed date low byte
+            str     rf
+            inc     rf
+            ghi     r9                  ; D = packed date high byte
+            str     rf                  ; DE_WRTDATE (LE) written
+
+            ; write the patched sector back -- same 3-byte-LBA
+            ; extraction + f_idewrite pattern file_setattr already uses
+            mov     rf, dir_cur_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+
+            mov     rf, dir_buf
+            call    f_idewrite
+            lbdf    ftc_err
+
+            clc                         ; DF = 0, success
+            rtn
+
+ftc_err:
+            stc                         ; DF = 1, error
+            rtn
 
 ; ----------------------------------------------------------------
 ; file_read: read bytes from an open file into a buffer
@@ -5515,10 +5634,16 @@ fwrite_copy_done:
             ; use above is long done by this point).
             mov     r8, rb
             add16   r8, FCB_FPOS
-            add16   r8, 3               ; R8 -> FPOS's LSB
+            inc     r8                  ; R8 -> FPOS's LSB (INC x3, not
+            inc     r8                  ; ADD16 -- 2026-07-30 sweep;
+            inc     r8                  ; the very next real instruction
+                                        ; is a mov, which clobbers D
+                                        ; anyway regardless)
             mov     r9, rb
             add16   r9, FCB_FSIZE
-            add16   r9, 3               ; R9 -> FSIZE's LSB
+            inc     r9                  ; R9 -> FSIZE's LSB (INC x3;
+            inc     r9                  ; the very next instruction,
+            inc     r9                  ; ldn r9, reloads D fresh)
 
             ldn     r9                  ; D = FSIZE byte 3 (LSB)
             str     r2

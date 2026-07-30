@@ -51,6 +51,7 @@
             extrn   file_rename
             extrn   file_stat
             extrn   file_setattr
+            extrn   file_touch
             extrn   batch_start
             extrn   batch_readline
             extrn   batch_goto
@@ -281,7 +282,12 @@ k_batch_args_getarg:  lbr kernel_batch_args_getarg   ; $0185
 ; headers for the full design and kernel_api.inc's own doc comments.
 k_dir_save_state:    lbr     dir_save_state      ; $0188
 k_dir_restore_state: lbr     dir_restore_state   ; $018B
-                ; next free jump-table address: $018E
+
+; K_FILE_TOUCH: update an existing directory entry's last-write date/
+; time to the current time, touching nothing else (2026-07-30) -- see
+; kernel/file.asm's file_touch for the full design.
+k_file_touch:   lbr     file_touch          ; $018E
+                ; next free jump-table address: $0191
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

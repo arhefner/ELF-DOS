@@ -1,7 +1,7 @@
 @echo off
 rem build_progs.bat - auto-discover and build every "ordinary"
 rem (single-file) progs\*.asm into bin\<name>, skipping template.asm
-rem and the 8 programs that link against lib\ (those get real nmake
+rem and the programs that link against lib\ (those get real nmake
 rem rules in Makefile.win instead, with proper incremental rebuilds --
 rem see its own header comment). Invoked by "nmake /F Makefile.win
 rem progs" so that adding a new progs\*.asm file needs no Makefile.win
@@ -45,6 +45,8 @@ for %%f in (progs\*.asm) do (
     if /I "!name!"=="move"       set "skip=1"
     if /I "!name!"=="xcopy"      set "skip=1"
     if /I "!name!"=="shell"      set "skip=1"
+    if /I "!name!"=="yr"         set "skip=1"
+    if /I "!name!"=="ys"         set "skip=1"
 
     if not defined skip (
         echo Building !name!...
