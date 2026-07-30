@@ -61,7 +61,7 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $4600       ; user programs load here (see kernel.inc;
+PROG_BASE:      equ     $4200       ; user programs load here (see kernel.inc;
                                     ; == KERN_LOAD in boot/mbr.asm by design --
                                     ; krnboot's own sector is dead once boot
                                     ; completes, so program loads reuse it)

@@ -8,10 +8,21 @@
 ; ----------------------------------------------------------------
 ; Memory layout
 ; ----------------------------------------------------------------
-; Moved $2000 -> $3000 -> $4000 -> $3E00 -> $4600 over time as the
-; kernel has grown (and, for one move, shrunk). The move to $4600
-; (2026-07-20) was forced by file_seek's real implementation (a
-; substantial new kernel routine, replacing the old rewind-only
+; Moved $2000 -> $3000 -> $4000 -> $3E00 -> $4600 -> $4200 over time as
+; the kernel has grown (and, for two moves, shrunk). The move to
+; $4200 (2026-07-30, batch-module branch, TEST-MACHINE-ONLY) followed
+; the loadable batch module split (kernel/batch.asm's batch_start/
+; batch_readline/batch_goto moved out into a standalone kernel/
+; batch_mod.asm, loaded on demand rather than staying permanently
+; resident -- see that file's own header comment), which dropped
+; "Highest address" from $42bd to $409f (542 bytes). $4200 was chosen
+; over the originally-discussed $4000 (which would have needed a
+; further ~160 bytes nobody could find safely) as a deliberate
+; middle ground: 1K more RAM for user programs than the old $4600,
+; while still keeping real margin (353 bytes at $409f) for future
+; kernel-side diagnostics rather than spending it all now. The move
+; to $4600 (2026-07-20) was forced by file_seek's real implementation
+; (a substantial new kernel routine, replacing the old rewind-only
 ; placeholder) growing "Highest address" to $3f44 -- 324 bytes past
 ; the old $3E00 boundary. Moved with real headroom (not just enough
 ; to clear the overflow) per this project's own standing practice.
@@ -47,7 +58,7 @@
 ; and boot/mbr.asm's/boot/krnboot.asm's copies of KERN_LOAD/KERN_ENTRY
 ; all in sync) well before it gets close. Note this trades directly
 ; against RAM available to programs (mem_base..mem_top).
-PROG_BASE:      equ     $4600       ; user programs load here; == KERN_LOAD
+PROG_BASE:      equ     $4200       ; user programs load here; == KERN_LOAD
                                     ; (boot/mbr.asm) by design, see above
 
 ; $0080-$00FF: the ROM's small boot-time stack lives here (see

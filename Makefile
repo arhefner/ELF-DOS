@@ -123,7 +123,7 @@ kernel/file.prg: kernel/file.asm $(INCS)
 kernel/loader.prg: kernel/loader.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) loader.asm
 
-kernel/batch.prg: kernel/batch.asm $(INCS)
+kernel/batch.prg: kernel/batch.asm $(INCS) include/batchmod.inc
 	cd kernel && $(ASM) $(ASMFLAGS) batch.asm
 
 kernel/redir.prg: kernel/redir.asm $(INCS)
@@ -131,6 +131,21 @@ kernel/redir.prg: kernel/redir.asm $(INCS)
 
 kernel/glob.prg: kernel/glob.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) glob.asm
+
+# kernel/batch_mod.asm: the loadable batch-script module (2026-07-30
+# phase 1) -- NOT part of KOBJ/kernel.bin. A standalone build, own
+# fixed org ($D000, include/batchmod.inc), landing on disk as
+# bin/batch.mod (deployed alongside every other bin/* file, loaded
+# fresh into RAM by kernel/batch.asm's own dispatcher whenever a .bat
+# script runs). See kernel/batch_mod.asm's own header comment for the
+# full design. TEST-MACHINE-ONLY for now -- fixed load address, not
+# yet relocatable.
+kernel/batch_mod.prg: kernel/batch_mod.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/batchmod.inc
+	cd kernel && $(ASM) $(ASMFLAGS) batch_mod.asm
+
+bin/batch.mod: kernel/batch_mod.prg | bin
+	$(LINK) $(LFLAGS) -o bin/batch.mod kernel/batch_mod.prg
+	rm -f bin/batch.lkb
 
 # Programs are single-file: each progs/X.asm assembles and links on
 # its own (no multi-module link order to worry about, unlike KOBJ).
@@ -338,7 +353,7 @@ update: $(FULL_BIN)
 # matches the on-device /bin layout). Not installed by this Makefile --
 # see the note near the top of this file for getting bin/'s contents
 # onto the FAT16 partition.
-progs: $(PROG_EXES)
+progs: $(PROG_EXES) bin/batch.mod
 
 # Build every test/*.asm into test/bin/<name> -- same bare-name
 # convention as progs/, deliberately never mixed into bin/ itself (see
