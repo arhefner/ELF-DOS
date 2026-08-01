@@ -4,8 +4,8 @@
 ; Written by ROM f_boot to $0100, entered at $0106.
 ; Sets up the stack, resets the IDE/SD subsystem, loads the kernel
 ; bootstrap's KRNBOOT_SECTORS consecutive sectors (sectors 1..
-; KRNBOOT_SECTORS) to $4600, and jumps to the bootstrap entry point
-; at $4606. KRNBOOT_SECTORS grew from 1 to 3 as part of the
+; KRNBOOT_SECTORS) to $4400, and jumps to the bootstrap entry point
+; at $4406. KRNBOOT_SECTORS grew from 1 to 3 as part of the
 ; multi-sector krnboot expansion (moving bpb_init's body into
 ; krnboot.asm's own sectors) -- see that file's own header comment
 ; for the full reasoning; boot/krnboot.asm's own "ldi 4" (where the
@@ -40,6 +40,22 @@
 ; headroom (see kernel.inc's own copy of this history for the exact
 ; numbers), not just enough to clear the immediate overflow.
 ;
+; Moved DOWN to $4200 (2026-07-30, batch-module branch, TEST-MACHINE-
+; ONLY) after the loadable batch module split freed 542 bytes of
+; kernel-resident space ("Highest address" $42bd -> $409f) -- see
+; kernel.inc's own copy of this history for the full reasoning and
+; kernel/batch_mod.asm's header comment for the module itself. $4200
+; trades some of that reclaimed space for more program RAM (1K more
+; than the old $4600) while keeping real margin (353 bytes) for
+; future kernel-side work, rather than pushing all the way to $4000.
+;
+; Moved UP to $4400 (2026-07-31) after the batch-module Phase 2
+; relocation retrofit (kernel/batch.asm's dispatcher now calls
+; lib/modload.asm's mod_load/lib/icall.asm's icall instead of the old
+; fixed-$D000 logic) pushed "Highest address" 56 bytes past $4200 --
+; moved with real headroom (not just enough to clear the 56-byte
+; overflow), per this project's own standing practice.
+;
 ; Binary must be exactly 512 bytes:
 ;   $0100-$01BD  boot code (446 bytes max)
 ;   $01BE-$01FD  partition table (4 x 16 bytes, written by fdisk)
@@ -53,8 +69,8 @@
 #include    include/bios.inc
 #include    include/opcodes.def
 
-#define     KERN_LOAD   $4600           ; kernel bootstrap loads here
-#define     KERN_ENTRY  $4606           ; kernel bootstrap entry point
+#define     KERN_LOAD   $4400           ; kernel bootstrap loads here
+#define     KERN_ENTRY  $4406           ; kernel bootstrap entry point
 #define     KRNBOOT_SECTORS 3           ; sectors 1..3 hold the bootstrap
                                         ; (must match krnboot.asm's own
                                         ; sector count and sys/sys.c's
@@ -88,7 +104,7 @@ mbr_main:   call        f_freemem       ; RF = address of highest RAM byte
             phi         r8              ; R8.1 = drive/head = 0
 
             mov         ra,KERN_LOAD    ; RA = current destination,
-                                        ; starts at $4600
+                                        ; starts at $4400
             ldi         KRNBOOT_SECTORS
             plo         rc              ; RC.0 = sectors remaining
 
@@ -103,7 +119,7 @@ mbr_load_loop:
             glo         rc
             lbnz        mbr_load_loop
 
-            lbr         KERN_ENTRY      ; jump to $3E06, kernel bootstrap
+            lbr         KERN_ENTRY      ; jump to $4406, kernel bootstrap
 
 ;--------------------------------------------------------------
 ; Boot error handler

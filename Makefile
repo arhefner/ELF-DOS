@@ -60,7 +60,9 @@ KOBJ =  kernel/kernel.prg  \
         kernel/loader.prg  \
         kernel/batch.prg   \
         kernel/redir.prg   \
-        kernel/glob.prg
+        kernel/glob.prg    \
+        lib/modload.prg    \
+        lib/icall.prg
 
 # ---- Common include dependencies ----
 INCS =  include/bios.inc    \
@@ -123,7 +125,7 @@ kernel/file.prg: kernel/file.asm $(INCS)
 kernel/loader.prg: kernel/loader.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) loader.asm
 
-kernel/batch.prg: kernel/batch.asm $(INCS)
+kernel/batch.prg: kernel/batch.asm $(INCS) include/batchmod.inc
 	cd kernel && $(ASM) $(ASMFLAGS) batch.asm
 
 kernel/redir.prg: kernel/redir.asm $(INCS)
@@ -131,6 +133,21 @@ kernel/redir.prg: kernel/redir.asm $(INCS)
 
 kernel/glob.prg: kernel/glob.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) glob.asm
+
+# kernel/batch_mod.asm: the loadable batch-script module (2026-07-30
+# phase 1) -- NOT part of KOBJ/kernel.bin. A standalone build, own
+# fixed org ($D000, include/batchmod.inc), landing on disk as
+# bin/batch.mod (deployed alongside every other bin/* file, loaded
+# fresh into RAM by kernel/batch.asm's own dispatcher whenever a .bat
+# script runs). See kernel/batch_mod.asm's own header comment for the
+# full design. TEST-MACHINE-ONLY for now -- fixed load address, not
+# yet relocatable.
+kernel/batch_mod.prg: kernel/batch_mod.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/batchmod.inc include/modformat.inc
+	cd kernel && $(ASM) $(ASMFLAGS) batch_mod.asm
+
+bin/batch.mod: kernel/batch_mod.prg | bin
+	$(LINK) $(LFLAGS) -m -o bin/batch.mod kernel/batch_mod.prg
+	rm -f bin/batch.lkb
 
 # Programs are single-file: each progs/X.asm assembles and links on
 # its own (no multi-module link order to worry about, unlike KOBJ).
@@ -196,6 +213,15 @@ lib/pathstr.prg: lib/pathstr.asm include/opcodes.def include/bios.inc include/ke
 
 lib/ymodem.prg: lib/ymodem.asm include/opcodes.def include/bios.inc include/kernel_api.inc
 	cd lib && $(ASM) $(ASMFLAGS) ymodem.asm
+
+lib/lineedit.prg: lib/lineedit.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/lineedit.inc
+	cd lib && $(ASM) $(ASMFLAGS) lineedit.asm
+
+lib/icall.prg: lib/icall.asm include/opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) icall.asm
+
+lib/modload.prg: lib/modload.asm include/opcodes.def include/bios.inc include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) modload.asm
 
 bin/dir: progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg | bin
 	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg
@@ -269,8 +295,8 @@ bin/more: progs/more.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/more progs/more.prg lib/env.prg
 	rm -f bin/more.lkb
 
-bin/edlin: progs/edlin.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg
+bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg | bin
+	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg
 	rm -f bin/edlin.lkb
 
 bin/shell: progs/shell.prg lib/env.prg | bin
@@ -338,7 +364,7 @@ update: $(FULL_BIN)
 # matches the on-device /bin layout). Not installed by this Makefile --
 # see the note near the top of this file for getting bin/'s contents
 # onto the FAT16 partition.
-progs: $(PROG_EXES)
+progs: $(PROG_EXES) bin/batch.mod
 
 # Build every test/*.asm into test/bin/<name> -- same bare-name
 # convention as progs/, deliberately never mixed into bin/ itself (see

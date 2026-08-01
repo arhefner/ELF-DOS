@@ -287,6 +287,62 @@ rsv_fail:
             endp
 
 ; ----------------------------------------------------------------
+; kernel_himem_reserve/kernel_himem_release: K_HIMEM_RESERVE/
+; K_HIMEM_RELEASE's own jump-table targets (2026-07-31) -- thin,
+; general-purpose passthroughs to _himem_reserve/_himem_release above,
+; exposed to ordinary programs for the first time. Unlike
+; kernel_glob_reserve (a fixed-size, idempotent, single-purpose
+; wrapper for exactly one caller), these are PURE MECHANISM, same
+; shape as the routines they wrap: no flag, caller-supplied size,
+; caller tracks its own reservation state. First real consumer:
+; lib/modload.asm's mod_load, which needs a page-aligned region of a
+; size that varies per module -- see that file's own header for why a
+; general-purpose reservation (not another single-purpose wrapper) is
+; the right shape here.
+; ----------------------------------------------------------------
+; kernel_himem_reserve
+; Args:    RC = bytes to reserve
+; Returns: DF = 0 on success, RD = this reservation's base address
+;          (mem_top + 1, recomputed fresh, matching _himem_reserve's
+;          own callers elsewhere in this file). DF = 1 if there isn't
+;          enough headroom (nothing changed).
+; Modifies: R8, RA, RB, RD, RF
+; ----------------------------------------------------------------
+            proc    kernel_himem_reserve
+
+            call    _himem_reserve
+            lbdf    khr_fail
+
+            mov     rf, mem_top
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            inc     rd                  ; RD = mem_top + 1
+            clc
+            rtn
+
+khr_fail:
+            stc
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; kernel_himem_release
+; Args:    RC = bytes to release (must match a caller's own prior
+;          successful kernel_himem_reserve call)
+; Returns: nothing
+; Modifies: R8, RA, RB, RF
+; ----------------------------------------------------------------
+            proc    kernel_himem_release
+
+            call    _himem_release
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; _is_nul_device: does the string at RF spell "NUL" (case-insensitive,
 ; e.g. "NUL"/"nul"/"Nul"), exactly, with nothing else following?
 ; Matches DOS's own reserved-device-name convention -- used by

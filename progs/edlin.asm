@@ -1,7 +1,19 @@
 ;
 ; edlin.asm - line editor for ELF-DOS
 ;
-; Usage: EDLIN <filename>
+; Usage: EDLIN [filename]
+;
+; The filename is optional -- a bare "EDLIN" opens with a genuinely
+; empty buffer (2026-07-31: this used to print a usage error and
+; exit; real edlin doesn't require a filename at all). W and E (see
+; their own shared header comment further down) both ALSO take an
+; optional filename of their own: given, they write there (and
+; establish it as the buffer's filename for later bare W/E calls);
+; omitted, they fall back to whatever filename is already
+; established. A buffer that's never had one -- opened empty and
+; never through a W/E naming one explicitly -- needs an explicit name
+; on the first W or E; using either with no name at that point is an
+; error.
 ;
 ; A minimal MS-DOS-edlin-style line editor. Loads the whole named file
 ; into RAM as a flat text buffer (lines separated by a single LF byte,
@@ -68,9 +80,11 @@
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
+#include    include/lineedit.inc
 
             extrn   env_getenv
             extrn   env_parse_uint
+            extrn   read_line_ex
 
 ED_MAX_LINES:   equ     512         ; line-offset table capacity
 ED_RDBUF_LEN:   equ     512         ; ed_getbyte's own read-ahead
@@ -79,12 +93,47 @@ ED_RDBUF_LEN:   equ     512         ; ed_getbyte's own read-ahead
                                     ; (one sector), the same size
                                     ; COPY_CHUNK_LEN settled on for the
                                     ; identical per-call-overhead reason
-ED_PAGE_LINES:  equ     23          ; L command's own page size
-                                    ; default (same "-1 for the
-                                    ; prompt" reasoning as more.asm's
-                                    ; own MORE_PAGE_LINES); overridden
-                                    ; by ROWS-1 if ROWS is set, see
-                                    ; start's own env-reading block
+ED_PAGE_LINES:  equ     23          ; how many lines print before a
+                                    ; pause; overridden by ROWS-1 if
+                                    ; ROWS is set, see start's own env-
+                                    ; reading block -- this ONLY
+                                    ; controls pause frequency, not L's
+                                    ; own default starting line (see
+                                    ; ED_DEFAULT_LOOKBACK below).
+                                    ; REVERTED (2026-07-31, user's own
+                                    ; direct correction after testing
+                                    ; the plain-ROWS version): a full
+                                    ; screen's worth with NOTHING held
+                                    ; back is wrong even with the pause
+                                    ; itself silent -- printing the
+                                    ; terminal's own next line of
+                                    ; output (the "*" prompt after
+                                    ; Ctrl-C, or the next page) once
+                                    ; the screen is already completely
+                                    ; full forces the TERMINAL to auto-
+                                    ; scroll, which pushes whatever was
+                                    ; on the top row off-screen. Holding
+                                    ; back one line keeps the bottom
+                                    ; row blank, so that scroll never
+                                    ; needs to happen and the top of
+                                    ; the page stays visible. Nothing
+                                    ; to do with the old "-- More --"
+                                    ; visible-prompt text at all -- nice
+                                    ; try, wrong reason.
+ED_DEFAULT_LOOKBACK: equ 11         ; L with no explicit range starts
+                                    ; this many lines before cur_line,
+                                    ; matching real edlin's own fixed
+                                    ; behavior -- a FIXED constant,
+                                    ; deliberately NOT derived from
+                                    ; ed_page_lines (2026-07-31,
+                                    ; corrected on the user's own
+                                    ; direct instruction: the original
+                                    ; implementation used page_lines/2
+                                    ; here, so a ROWS-driven pause-
+                                    ; frequency change also silently
+                                    ; changed the default lookback --
+                                    ; the two are unrelated settings
+                                    ; and must not be coupled)
 
             org     PROG_BASE
 
@@ -98,10 +147,16 @@ ED_PAGE_LINES:  equ     23          ; L command's own page size
 start:
             ; RA = argv pointer, RC = argc (RC.0 alone is enough --
             ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
-            ; program's own name; argv[1] is the filename argument.
+            ; program's own name; argv[1], if present, is the filename
+            ; argument. BUG FIX (2026-07-31, hardware-reported): a
+            ; bare "EDLIN" (no filename) used to print a usage error
+            ; and exit -- real edlin instead opens with an empty
+            ; buffer, letting W establish a filename later (see its
+            ; own header comment).
             glo     rc
             smi     2
-            lbnf    usage               ; argc < 2: no filename given
+            lbnf    ed_no_filename      ; argc < 2: start empty, no
+                                        ; filename set yet
 
             mov     rb, ra
             inc     rb
@@ -120,7 +175,20 @@ start:
             inc     rb
             glo     rf
             str     rb
+            lbr     ed_have_filename
 
+ed_no_filename:
+            mov     rf, ed_filename_ptr
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf                  ; ed_filename_ptr = 0 (NULL --
+                                        ; ed_open_file below skips the
+                                        ; whole open attempt when it
+                                        ; sees this; E will refuse to
+                                        ; save until W sets a real name)
+
+ed_have_filename:
             ; ed_buf_start = mem_base, ed_buf_end = mem_top, both from
             ; LOADER_ARGS (word0/word1, big-endian -- see
             ; kernel/loader.asm's own _prog_finish_load, which writes
@@ -176,11 +244,13 @@ start:
             ; --- read ROWS from the environment for the L command's
             ; own paging (see ed_cmd_l/ed_list_loop below); falls back
             ; to ED_PAGE_LINES if ROWS is unset, non-numeric, or too
-            ; small (<2, leaving no room after subtracting 1 for the
-            ; "-- More --" prompt). Read once, here -- RA/RC (entry
-            ; argv/argc) are already fully consumed by this point, and
-            ; nothing below needs anything env_getenv/env_parse_uint
-            ; might clobber. ---
+            ; small (<2, leaving no room after subtracting 1 -- see
+            ; ED_PAGE_LINES's own comment for why one line is always
+            ; held back, REVERTED 2026-07-31 after briefly removing
+            ; this same "-1" and finding it wrong). Read once, here --
+            ; RA/RC (entry argv/argc) are already fully consumed by
+            ; this point, and nothing below needs anything
+            ; env_getenv/env_parse_uint might clobber. ---
             mov     rf, ed_rows_name
             call    env_getenv          ; RF = value or 0
             ghi     rf
@@ -207,7 +277,20 @@ ed_rows_ok:
             str     rb                  ; ed_page_lines = RD.lo
 
 ed_open_file:
-            ; --- open and load the file, if it exists ---
+            ; --- open and load the file, if a filename was given at
+            ; all (see start:'s own ed_no_filename path -- a NULL
+            ; ed_filename_ptr means "start with a genuinely empty
+            ; buffer", not "try to open a file named nothing") ---
+            mov     rf, ed_filename_ptr
+            ldn     rf
+            lbnz    ed_open_file_real   ; high byte nonzero: have a name
+            inc     rf
+            ldn     rf
+            lbz     ed_cmdloop          ; both bytes zero: no filename
+                                        ; at all -- empty buffer, no
+                                        ; open attempted
+
+ed_open_file_real:
             mov     rf, ed_filename_ptr
             lda     rf
             phi     ra
@@ -237,12 +320,6 @@ ed_load_err:
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Read error.",13,10,0
-            ldi     1
-            rtn
-
-usage:
-            call    K_INMSG
-            db      "Usage: EDLIN <filename>",13,10,0
             ldi     1
             rtn
 
@@ -588,16 +665,44 @@ ed_cur_line_has_bytes:
             ldn     rf
             plo     rd                  ; RD = ed_text_len
 
+            ; BUG FIX (2026-07-31, hardware-reported): a plain sm/smb
+            ; here (subtrahend=start_offset, minuend=text_len) yields
+            ; DF=1 for text_len >= start_offset, not the strict ">"
+            ; this function's own contract needs -- when they're
+            ; EQUAL (an empty trailing line, the exact case this
+            ; function exists to detect), the old code wrongly
+            ; reported "has bytes", causing a spurious blank line to
+            ; be appended every time a file ending in a real trailing
+            ; newline was loaded. Fixed by also requiring the
+            ; computed difference to be nonzero.
             glo     r8
             str     r2
             glo     rd
             sm
+            plo     r9
             ghi     r8
             str     r2
             ghi     rd
             smb
-            rtn                         ; DF=1 iff ed_text_len > start
-                                        ; offset (has content)
+            phi     r9                  ; R9 = text_len - start_offset,
+                                        ; DF=1 iff text_len >= start_offset
+            lbnf    echb_empty          ; DF=0: text_len < start_offset --
+                                        ; shouldn't normally happen, but
+                                        ; treat defensively as empty
+
+            ghi     r9
+            lbnz    echb_has_bytes
+            glo     r9
+            lbnz    echb_has_bytes      ; difference == 0: text_len ==
+                                        ; start_offset -- empty line
+
+echb_empty:
+            clc
+            rtn
+
+echb_has_bytes:
+            stc
+            rtn
 
 ;==================================================================
 ; Shared line-info / block-move helpers
@@ -938,7 +1043,10 @@ ed_cmdloop:
             plo     rc
             ldi     0
             phi     rc
-            call    K_INPUTL
+            ldi     LE_MODE_REDIR       ; K_READ-based, redirect-aware
+                                        ; -- this call site's own DF
+                                        ; check below depends on it
+            call    read_line_ex
             lbdf    ed_eof_quit         ; DF=1: redirected input is
                                         ; exhausted (e.g. `<NUL`, or a
                                         ; real script that's run out)
@@ -1040,6 +1148,11 @@ ed_after_confirm:
             ani     $DF
             xri     'M'
             lbz     ed_cmd_m
+
+            ldn     rf
+            ani     $DF
+            xri     'W'
+            lbz     ed_cmd_w
 
 ed_unknown_cmd:
             call    K_INMSG
@@ -1260,12 +1373,44 @@ epl_plus:
             ghi     rd
             phi     r9
             glo     rd
-            plo     r9                  ; R9 = base
+            plo     r9                  ; R9 = base (staged for the
+                                        ; add below)
+
+            ; ALSO stash to memory: R9 does NOT survive the
+            ; ed_parse_uint call immediately below -- real bug,
+            ; hardware-found 2026-07-31. ed_parse_uint's own digit
+            ; loop uses R9.0 as its own internal scratch (see that
+            ; routine's own body: "plo r9 ; stash the digit value"),
+            ; silently clobbering whatever the caller had stored
+            ; there. Symptom: "+5" from any current line landed on
+            ; line 10 (2*5, not cur_line+5) -- R9.0 ended up holding
+            ; the offset's own last digit instead of the base's real
+            ; low byte. Reloaded fresh from memory right after the
+            ; call returns instead of trusting the register across
+            ; it (this project's own standing gotcha #10 discipline:
+            ; don't trust a register across a call whose body you
+            ; haven't checked).
+            mov     r8, ed_lineref_base
+            ghi     r9
+            str     r8
+            inc     r8
+            glo     r9
+            str     r8
+
             call    ed_parse_uint       ; RD = offset digits, if any
-            lbnf    epl_plus_add
+            lbnf    epl_plus_reload
             ldi     0
             phi     rd
             plo     rd                  ; no digits after '+': offset=0
+epl_plus_reload:
+            mov     r8, ed_lineref_base
+            lda     r8
+            phi     r9
+            ldn     r8
+            plo     r9                  ; R9 = base (reloaded from
+                                        ; memory, undoing whatever
+                                        ; ed_parse_uint left behind)
+
 epl_plus_add:
             glo     r9
             str     r2
@@ -1285,12 +1430,32 @@ epl_minus:
             ghi     rd
             phi     r9
             glo     rd
-            plo     r9                  ; R9 = base
+            plo     r9                  ; R9 = base (staged for the
+                                        ; subtract below)
+
+            ; ALSO stash to memory -- same R9-across-ed_parse_uint
+            ; hazard as epl_plus above (see its own comment for the
+            ; full explanation)
+            mov     r8, ed_lineref_base
+            ghi     r9
+            str     r8
+            inc     r8
+            glo     r9
+            str     r8
+
             call    ed_parse_uint       ; RD = offset digits, if any
-            lbnf    epl_minus_sub
+            lbnf    epl_minus_reload
             ldi     0
             phi     rd
             plo     rd                  ; no digits after '-': offset=0
+epl_minus_reload:
+            mov     r8, ed_lineref_base
+            lda     r8
+            phi     r9
+            ldn     r8
+            plo     r9                  ; R9 = base (reloaded from
+                                        ; memory)
+
 epl_minus_sub:
             ; R8 = base - offset (R9 - RD); computed into R8 since RD
             ; itself supplies operands to both halves of the subtract
@@ -1435,7 +1600,18 @@ ed_bare_number:
             plo     rc
             ldi     0
             phi     rc
-            call    K_INPUTL
+            ldi     LE_MODE_REDIR       ; DF deliberately ignored here,
+                                        ; matching the original
+                                        ; K_INPUTL usage -- an EOF at
+                                        ; this exact prompt already
+                                        ; falls through to "leave the
+                                        ; line unchanged" below, and
+                                        ; ed_cmdloop's own DF check
+                                        ; catches the real EOF on its
+                                        ; very next read (see this
+                                        ; file's own header/CLAUDE.md
+                                        ; for the full reasoning)
+            call    read_line_ex
             call    K_INMSG
             db      13,10,0
 
@@ -1540,13 +1716,13 @@ ed_cmd_l:
             ldn     rf
             lbnz    ed_lp_n1_given      ; explicit range: shared path
 
-            ; default first = cur_line - (page_lines/2), clamped >= 1
-            mov     r8, ed_page_lines
-            ldn     r8                  ; D = page_lines (always < 256)
-            shr                         ; D = page_lines / 2
-            plo     r9
+            ; default first = cur_line - ED_DEFAULT_LOOKBACK (a fixed
+            ; constant, deliberately NOT ed_page_lines/2 -- see that
+            ; equ's own comment for why), clamped >= 1
             ldi     0
-            phi     r9                  ; R9 = half-page offset
+            phi     r9
+            ldi     ED_DEFAULT_LOOKBACK
+            plo     r9                  ; R9 = fixed lookback offset
 
             mov     r8, ed_cur_line
             lda     r8
@@ -1563,10 +1739,10 @@ ed_cmd_l:
             str     r2
             ghi     rd
             smb
-            phi     r8                  ; R8 = cur_line - half-page
+            phi     r8                  ; R8 = cur_line - lookback
                                         ; (may have wrapped/underflowed)
             lbnf    ed_l_clamp_to_1     ; DF=0: borrow -- cur_line was
-                                        ; less than the half-page offset
+                                        ; less than the lookback offset
             ghi     r8
             lbnz    ed_lp_have_default
             glo     r8
@@ -1776,6 +1952,27 @@ ed_list_start:
                                         ; ed_list_loop directly via its
                                         ; own back-edge below)
 
+            ; stash the STARTING index (0-based) so ed_list_finish can
+            ; tell "at least one line was actually shown" from "the
+            ; range was empty from the start" -- only the former
+            ; should update ed_cur_line (2026-07-31, hardware-reported:
+            ; L/P never updated ed_cur_line at all, which is also the
+            ; real cause behind "+n"/"-n" line-refs on a later command
+            ; appearing to compute from the wrong base -- they were
+            ; correct all along, just relative to a STALE cur_line
+            ; that the previous L/P never advanced)
+            mov     rf, ed_list_i
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ed_list_start_i
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
 ed_list_loop:
             mov     rf, ed_list_i
             lda     rf
@@ -1796,7 +1993,7 @@ ed_list_loop:
             str     r2
             ghi     rd
             smb
-            lbdf    ed_cmdloop          ; list_i >= list_last: done
+            lbdf    ed_list_finish      ; list_i >= list_last: done
 
             mov     rf, ed_list_i
             lda     rf
@@ -1836,11 +2033,13 @@ ed_list_loop:
             glo     rd
             str     rf
 
-            ; --- pause every ed_page_lines lines. Reuses the exact
-            ; K_READ/K_TTY prompt idiom the S command's own O.K.?
-            ; prompt already established above (memory, not a
-            ; register, across K_TTY/K_INMSG -- only R9 is confirmed
-            ; to survive those, gotcha #8). ---
+            ; --- pause every ed_page_lines lines, fully silent (no
+            ; "-- More --" text, no key echo) -- redesigned 2026-07-31
+            ; per hardware testing/explicit request, replacing the
+            ; more.asm-style visible prompt this was originally
+            ; modeled on. Any key EXCEPT Ctrl-C ($03) continues at the
+            ; same line; Ctrl-C stops the listing early via the same
+            ; ed_list_finish exit reaching the end normally uses. ---
             mov     rf, ed_list_page_count
             ldn     rf
             adi     1
@@ -1855,33 +2054,70 @@ ed_list_loop:
                                         ; iff count >= threshold
             lbnf    ed_list_loop        ; not yet a full page
 
-            call    K_INMSG
-            db      "-- More --",0
-
-            call    K_READ              ; D = character read (blocking)
-            plo     rc                  ; short-lived stash, not
-                                        ; across a call -- just to
-                                        ; survive the "mov rf,
-                                        ; ed_list_answer" D-clobber
-            mov     rf, ed_list_answer
-            glo     rc
-            str     rf                  ; ed_list_answer = character
-
-            call    K_TTY               ; echo it back to the console
-            call    K_INMSG
-            db      13,10,0
-
             mov     rf, ed_list_page_count
             ldi     0
             str     rf                  ; reset the page counter
 
-            mov     rf, ed_list_answer
-            ldn     rf
-            ani     $DF                 ; uppercase-fold
-            xri     'Q'
-            lbz     ed_cmdloop          ; quit the listing early
+            call    K_READ              ; D = key pressed (blocking) --
+                                        ; no prompt printed, not echoed
+            xri     3                   ; Ctrl-C?
+            lbz     ed_list_finish      ; stop early -- same exit as
+                                        ; reaching the end of the range
 
             lbr     ed_list_loop
+
+;------------------------------------------------------------------
+; ed_list_finish: shared exit for L/P, reached either by listing the
+; whole requested range or by an early Ctrl-C during a pause. Sets
+; ed_cur_line to the last line actually displayed -- but only if at
+; least one line was (an empty range must leave cur_line untouched).
+;------------------------------------------------------------------
+ed_list_finish:
+            mov     rf, ed_list_i
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = list_i (0-based "next"
+                                        ; index -- equals the 1-based
+                                        ; line number of whatever was
+                                        ; last actually shown, if
+                                        ; anything was)
+
+            mov     rf, ed_list_start_i
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = starting index (0-based)
+
+            ; want: skip the update iff list_i <= start_i (strict "<="
+            ; test) -- staging list_i (RD) as subtrahend and loading
+            ; start_i (R8) last as minuend gives D = start_i - list_i;
+            ; DF=1 (no borrow) means start_i >= list_i, i.e. list_i <=
+            ; start_i (nothing shown, skip). Caught during review,
+            ; before ever assembling: a first draft staged the wrong
+            ; operand here and reproduced the EXACT off-by-one bug
+            ; class this whole session's fixes were for (list_i ==
+            ; start_i, the common "nothing shown" case, would have
+            ; been misread as "something was shown").
+            glo     rd
+            str     r2
+            glo     r8
+            sm
+            ghi     rd
+            str     r2
+            ghi     r8
+            smb
+            lbdf    ed_cmdloop          ; DF=1: list_i <= start_i --
+                                        ; nothing was ever shown, leave
+                                        ; ed_cur_line untouched
+
+            mov     rf, ed_cur_line
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     ed_cmdloop
 
 ;==================================================================
 ; A - append (insert at end of file)
@@ -1953,7 +2189,8 @@ ed_i_loop:
             plo     rc
             ldi     0
             phi     rc
-            call    K_INPUTL
+            ldi     LE_MODE_REDIR
+            call    read_line_ex
             lbdf    ed_i_done           ; DF=1: redirected input
                                         ; exhausted mid-insert -- treat
                                         ; it the same as the "."
@@ -3007,35 +3244,47 @@ ed_r_range_ready:
             phi     rd
             ldn     rf
             plo     rd
+            ; BUG FIX (2026-07-31, hardware-reported): all three checks
+            ; in this proc used to stage the wrong operand as
+            ; subtrahend, so "lbdf" fired on ">=" instead of the
+            ; strict ">" each comment claimed -- first==line_count or
+            ; first==last were wrongly treated as "empty range,
+            ; nothing to do". Fixed by swapping which value is staged
+            ; (str r2) vs. loaded last (the true minuend right before
+            ; sm), and switching lbdf->lbnf to match: DF=0 (borrow)
+            ; now correctly means the swapped minuend < the swapped
+            ; subtrahend, i.e. the original strict ">" condition.
             mov     rf, ed_line_count
             lda     rf
             phi     r8
             ldn     rf
-            plo     r8
-            glo     r8
-            str     r2
+            plo     r8                  ; R8 = line_count
             glo     rd
-            sm
-            ghi     r8
             str     r2
+            glo     r8
+            sm
             ghi     rd
+            str     r2
+            ghi     r8
             smb
-            lbdf    ed_r_report         ; DF=1: first > line_count
+            lbnf    ed_r_report         ; DF=0: line_count < first,
+                                        ; i.e. first > line_count
 
             mov     rf, ed_r_last
             lda     rf
             phi     r8
             ldn     rf
-            plo     r8
-            glo     r8
-            str     r2
+            plo     r8                  ; R8 = last
             glo     rd
-            sm
-            ghi     r8
             str     r2
+            glo     r8
+            sm
             ghi     rd
+            str     r2
+            ghi     r8
             smb
-            lbdf    ed_r_report         ; DF=1: first > last
+            lbnf    ed_r_report         ; DF=0: last < first,
+                                        ; i.e. first > last
 
             mov     rf, ed_r_line_idx
             ghi     rd
@@ -3060,16 +3309,25 @@ ed_r_loop:
             lda     rf
             phi     r8
             ldn     rf
-            plo     r8
-            glo     r8
-            str     r2
+            plo     r8                  ; R8 = last
             glo     rd
-            sm
-            ghi     r8
             str     r2
+            glo     r8
+            sm
             ghi     rd
+            str     r2
+            ghi     r8
             smb
-            lbdf    ed_r_report         ; DF=1: line_idx > last -- done
+            lbnf    ed_r_report         ; DF=0: last < line_idx,
+                                        ; i.e. line_idx > last -- done
+                                        ; (same swap-and-lbnf fix as
+                                        ; the two checks above, same
+                                        ; hardware-reported bug: this
+                                        ; was the specific site that
+                                        ; skipped the range's own last
+                                        ; line, since line_idx==last
+                                        ; used to be wrongly treated
+                                        ; as "past the end")
 
             call    ed_r_process_line
             lbdf    ed_r_toolong
@@ -4995,11 +5253,156 @@ ed_d_cur_is_count:
             rtn
 
 ;==================================================================
-; E - save and exit
+; W/E - write buffer (or first # lines) to a filename; E also exits
 ;==================================================================
 
+; [#]W [filename] / [#]E [filename] -- both share this one
+; implementation (2026-07-31, redesigned on the user's own explicit
+; instruction). Real edlin's own W/A (page write/append) pair existed
+; to flush/reload PAGES of a buffer too large to fit in memory at
+; once -- this project's own top-of-file header comment already
+; explains why that's not needed here (the whole file always fits in
+; RAM); W survives anyway as a general "write [the first N lines of]
+; the buffer to a filename" that doesn't end the session, with E
+; being the same operation plus exit.
+;
+; The filename is now OPTIONAL on both:
+;   - given: write there. If this was E, exit afterward.
+;   - omitted: fall back to ed_filename_ptr (the file EDLIN was
+;     opened with, or the target of the last successful W/E that DID
+;     name one explicitly) -- this is what lets a bare "E" keep
+;     working exactly as before once a name has been established.
+;   - omitted AND ed_filename_ptr is ALSO unset (a buffer that was
+;     opened empty, via a bare "EDLIN", and has never been through a
+;     W/E with an explicit filename): an error, since there is
+;     nothing to fall back to.
+; The optional leading [#] (line count, unrelated to the filename)
+; is unchanged: write only the first # lines, or the whole buffer if
+; omitted -- applies identically regardless of where the filename
+; itself came from.
+;
+; On any successful write, ed_filename_ptr is set to the target just
+; written (a harmless no-op when that target WAS ed_filename_ptr
+; already) -- so once a name is established, either explicitly or via
+; the file EDLIN opened, every later bare W/E keeps using it.
+;
+; E's own pre-existing "exit even on a write/open failure" behavior
+; is preserved (matches DOS's own urgency about a failed save); W
+; continues to just report the error and return to the prompt,
+; unchanged from its own original design. A malformed range or a
+; genuinely missing filename (no fallback available either) always
+; returns to the prompt for both -- trivially recoverable mistakes
+; that shouldn't cost the whole edit session.
+ed_cmd_w:
+            mov     rb, ed_wsave_is_e
+            ldi     0
+            str     rb                  ; not E
+            lbr     ed_wsave_common
+
 ed_cmd_e:
+            mov     rb, ed_wsave_is_e
+            ldi     1
+            str     rb                  ; is E
+
+ed_wsave_common:
+            inc     rf                  ; consume 'W' or 'E'
+            call    f_ltrim             ; skip spaces before an
+                                        ; optional filename
+            ldn     rf
+            lbz     ed_wsave_fallback   ; nothing here: fall back to
+                                        ; ed_filename_ptr
+
+            mov     rb, ed_w_filename_ptr
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; stash the EXPLICIT filename
+                                        ; pointer -- everything below
+                                        ; uses RF freely as scratch
+            lbr     ed_wsave_have_target
+
+ed_wsave_fallback:
             mov     rf, ed_filename_ptr
+            ldn     rf
+            lbnz    ed_wsave_copy_fallback  ; high byte nonzero: have one
+            inc     rf
+            ldn     rf
+            lbz     ed_wsave_no_name    ; both bytes zero: genuinely
+                                        ; nothing to fall back to
+
+ed_wsave_copy_fallback:
+            mov     rb, ed_w_filename_ptr
+            mov     rf, ed_filename_ptr
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb                  ; ed_w_filename_ptr =
+                                        ; ed_filename_ptr -- so the
+                                        ; rest of this routine treats
+                                        ; "explicit" and "fallback"
+                                        ; identically from here on
+
+ed_wsave_have_target:
+            ; count = n1 if given (validated 1..line_count), else
+            ; line_count (write everything) -- ed_have_n1/ed_n1 were
+            ; already set (or not) by ed_cmdloop's own leading-range
+            ; parse, well before dispatch reached here
+            mov     rf, ed_have_n1
+            ldn     rf
+            lbz     ed_wsave_all
+
+            mov     rf, ed_n1
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = n1
+            ghi     rd
+            lbnz    ed_wsave_n1_ok
+            glo     rd
+            lbz     ed_wsave_rangeerr   ; n1 == 0: invalid
+ed_wsave_n1_ok:
+            mov     rf, ed_line_count
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = line_count
+            glo     rd
+            str     r2
+            glo     r8
+            sm
+            ghi     rd
+            str     r2
+            ghi     r8
+            smb
+            lbnf    ed_wsave_rangeerr   ; DF=0: line_count < n1
+            mov     rf, ed_w_count
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     ed_wsave_have_count
+
+ed_wsave_all:
+            mov     rf, ed_line_count
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ed_w_count
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+ed_wsave_have_count:
+            ; --- open the target file (reusing ed_fcb/ed_iobuf --
+            ; safe: nothing else has either open at this point in the
+            ; command loop) ---
+            mov     rf, ed_w_filename_ptr
             lda     rf
             phi     ra
             ldn     rf
@@ -5008,10 +5411,8 @@ ed_cmd_e:
             mov     rd, ed_fcb
             mov     ra, ed_iobuf
             ldi     1                   ; mode = write/truncate
-            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
-                                        ; ed_fcb is a fixed address,
-                                        ; nothing to capture)
-            lbdf    ed_save_open_err
+            call    K_FILE_OPEN
+            lbdf    ed_wsave_openerr
 
             mov     rf, ed_save_i
             ldi     0
@@ -5019,13 +5420,13 @@ ed_cmd_e:
             inc     rf
             str     rf
 
-ed_save_loop:
+ed_wsave_loop:
             mov     rf, ed_save_i
             lda     rf
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, ed_line_count
+            mov     rf, ed_w_count
             lda     rf
             phi     r8
             ldn     rf
@@ -5039,7 +5440,12 @@ ed_save_loop:
             str     r2
             ghi     rd
             smb
-            lbdf    ed_save_done
+            lbdf    ed_wsave_done       ; DF=1: save_i >= count -- done
+                                        ; (0-based counter against a
+                                        ; COUNT -- >= is the correct
+                                        ; terminator here, NOT the
+                                        ; 1-based-line-vs-last shape
+                                        ; ed_cmd_r's own bug was in)
 
             mov     rf, ed_save_i
             lda     rf
@@ -5061,7 +5467,7 @@ ed_save_loop:
             mov     rf, r8
             mov     rd, ed_fcb
             call    K_FILE_WRITE
-            lbdf    ed_save_werr
+            lbdf    ed_wsave_werr
 
             mov     rf, ed_crlf
             ldi     0
@@ -5070,7 +5476,7 @@ ed_save_loop:
             plo     rc
             mov     rd, ed_fcb
             call    K_FILE_WRITE
-            lbdf    ed_save_werr
+            lbdf    ed_wsave_werr
 
             mov     rf, ed_save_i
             lda     rf
@@ -5084,28 +5490,65 @@ ed_save_loop:
             inc     rf
             glo     rd
             str     rf
+            lbr     ed_wsave_loop
 
-            lbr     ed_save_loop
-
-ed_save_done:
+ed_wsave_done:
             mov     rd, ed_fcb
             call    K_FILE_CLOSE
-            ldi     0
+
+            ; update ed_filename_ptr to the target just written -- see
+            ; this section's own header comment for why
+            mov     rf, ed_w_filename_ptr
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, ed_filename_ptr
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, ed_wsave_is_e
+            ldn     rf
+            lbz     ed_cmdloop          ; W: return to the prompt
+            ldi     0                   ; E: exit with success
             rtn
 
-ed_save_werr:
+ed_wsave_werr:
             mov     rd, ed_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Write error.",13,10,0
+            mov     rf, ed_wsave_is_e
+            ldn     rf
+            lbz     ed_cmdloop
             ldi     1
             rtn
 
-ed_save_open_err:
+ed_wsave_openerr:
             call    K_INMSG
             db      "Cannot create file.",13,10,0
+            mov     rf, ed_wsave_is_e
+            ldn     rf
+            lbz     ed_cmdloop
             ldi     1
             rtn
+
+ed_wsave_rangeerr:
+            call    K_INMSG
+            db      "Line number out of range.",13,10,0
+            lbr     ed_cmdloop
+
+ed_wsave_no_name:
+            ; always returns to the prompt regardless of W/E -- a
+            ; missing filename with no fallback is trivially
+            ; recoverable (just retype the command with a name) and
+            ; shouldn't cost the whole edit session
+            call    K_INMSG
+            db      "No filename.",13,10,0
+            lbr     ed_cmdloop
 
 ;==================================================================
 ; S - search
@@ -5704,6 +6147,11 @@ ed_cur_line:    dw      0
 ed_buf_start:   dw      0
 ed_buf_end:     dw      0
 ed_filename_ptr: dw     0
+ed_w_filename_ptr: dw   0
+ed_w_count:      dw     0
+ed_wsave_is_e:   db     0          ; 0 = the current W/E call was W
+                                    ; (return to the prompt when done),
+                                    ; nonzero = it was E (exit when done)
 ed_fcb:         ds      FCB_LEN
 ed_iobuf:       ds      FCB_IOBUF_LEN
 
@@ -5716,6 +6164,12 @@ ed_getbyte_ioerr: db    0           ; set nonzero only when ed_getbyte's
                                     ; DF=1 return was a real K_FILE_READ
                                     ; error, not true end-of-file
 ed_input_buf:   ds      128
+ed_lineref_base: dw    0           ; ed_parse_lineref's own epl_plus/
+                                    ; epl_minus: memory stash for the
+                                    ; base value across the call to
+                                    ; ed_parse_uint (which clobbers R9
+                                    ; internally -- see their own
+                                    ; header comments)
 ed_have_n1:     db      0
 ed_n1:          dw      0
 ed_have_n2:     db      0
@@ -5744,6 +6198,11 @@ ed_s_answer:    db      0           ; S's own "O.K.?" Y/N answer,
                                     ; register) across K_TTY/K_INMSG
 ed_list_i:      dw      0
 ed_list_last:   dw      0
+ed_list_start_i: dw     0          ; ed_list_i's own starting value,
+                                    ; snapshotted once per L/P call so
+                                    ; ed_list_finish can tell "at least
+                                    ; one line was shown" from "the
+                                    ; range was empty"
 ed_t_filename_ptr: dw   0           ; T's own transfer-source filename
 ed_t_line_len:  dw      0           ; T's own per-line accumulation
                                     ; length into ed_input_buf
@@ -5768,7 +6227,6 @@ ed_line_scratch:   ds      128         ; a SEPARATE buffer from
 
 ed_page_lines:  db      ED_PAGE_LINES   ; overridden if ROWS is set
 ed_list_page_count: db  0
-ed_list_answer: db      0
 ed_rows_name:   db      "ROWS",0
 ed_num_buf:     ds      8
 ed_key:         db      0

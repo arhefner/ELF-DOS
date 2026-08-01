@@ -303,6 +303,31 @@ gi_fail:
             endp
 
 ; ----------------------------------------------------------------
+; glob_get_dir: return the prefix directory cluster glob_init resolved
+; for this context (2026-08-02) -- exposed for a caller (progs/dir.asm's
+; own "Directory of <path>" header for a glob-matched listing) that
+; needs to describe the directory a pattern matches within, without
+; reaching into the context block's own otherwise-private layout
+; directly (see this file's own header on GLOB_CTX_LEN: "never
+; referenced by name outside it").
+; Args:    RD = pointer to a context block already initialized by
+;          glob_init
+; Returns: RD = the resolved prefix directory cluster
+; Modifies: RD, R8
+; ----------------------------------------------------------------
+            proc    glob_get_dir
+
+            mov     r8, rd
+            add16   r8, GLOB_CTX_PARENT
+            lda     r8
+            phi     rd
+            ldn     r8
+            plo     rd
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; glob_next: return the next directory entry (within the directory
 ; and pattern established by glob_init) matching the wildcard
 ; pattern, or DF=1 once exhausted.

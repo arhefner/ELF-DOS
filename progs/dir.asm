@@ -87,6 +87,7 @@
             extrn   is_glob
             extrn   glob_init
             extrn   glob_next
+            extrn   glob_get_dir
             extrn   vol_label_get       ; lib/vollabel.asm -- 2026-07-30,
                                         ; the "Volume in drive X is..."
                                         ; header below
@@ -138,49 +139,63 @@ start:
             str     rf
 
             ; --- "Volume in drive X is LABEL" / "has no label" header,
-            ; matching real MS-DOS DIR (2026-07-30). A second
-            ; K_GETCURDIR call, purely for its own D=cur_drive return
-            ; value -- a provably safe no-op status check (cur_drive's
-            ; BPB is already active from the first call above), chosen
-            ; over touching that first call site's own carefully-
-            ; reasoned RA/RC-survival comment. ---
-            call    K_GETCURDIR
-            adi     'C'                 ; D = 'C'+cur_drive
-            plo     r9                  ; stash -- "mov rf,
-                                        ; dir_vol_letter" right below
-                                        ; clobbers D (gotcha #4)
-            mov     rf, dir_vol_letter
-            glo     r9
-            str     rf
+            ; matching real MS-DOS DIR (2026-07-30). Factored into
+            ; dir_print_volume_header, below the argc-based branching
+            ; further down (2026-08-02), so dir_multi_arg's own per-
+            ; argument loop can print one per literal directory
+            ; argument too, not just once here for the whole command.
+            ;
+            ; Which drive THIS call describes: argv[1]'s own resolved
+            ; drive if present (argc==2 only -- same scope as
+            ; dir_print_header's own drive-letter override, for the
+            ; identical reason: dir_multi_arg has no single coherent
+            ; "the" drive being listed at the top level), else
+            ; cur_drive. Before this fix, this header always described
+            ; cur_drive even when the path being listed named a
+            ; different one -- the exact bug the "Directory of <path>"
+            ; header already had and was fixed for, just one call
+            ; earlier in this same routine.
+            ;
+            ; argc >= 3 (dir_multi_arg) skips this call ENTIRELY
+            ; (2026-08-02, hardware-found bug): dma_literal now prints
+            ; its own volume header per literal directory argument, so
+            ; a single top-level one here is always redundant for that
+            ; case, and a literal duplicate line whenever the FIRST
+            ; argument's own drive happens to match cur_drive (e.g.
+            ; "dir c:/cfg f:/cfg" while C: is already active).
+            glo     rc
+            smi     3
+            lbdf    dir_vol_after       ; argc >= 3: dir_multi_arg
+                                        ; handles its own header(s)
 
-            mov     rd, dir_vol_buf
-            call    vol_label_get       ; DF = 0/1
-            lbdf    dir_vol_none
+            glo     rc
+            xri     2
+            lbnz    dir_vol_bare_args   ; argc < 2: bare listing,
+                                        ; always cur_drive
 
-            call    K_INMSG
-            db      "Volume in drive ",0
-            mov     rf, dir_vol_letter
-            ldn     rf
-            call    K_TYPE
-            call    K_INMSG
-            db      " is ",0
-            mov     rf, dir_vol_buf
-            call    K_MSG
-            call    K_INMSG
-            db      13,10,0
-            lbr     dir_vol_done
+            mov     rb, ra
+            add16   rb, 2               ; RB = &argv[1]
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1]'s text pointer
 
-dir_vol_none:
-            call    K_INMSG
-            db      "Volume in drive ",0
-            mov     rf, dir_vol_letter
-            ldn     rf
-            call    K_TYPE
-            call    K_INMSG
-            db      " has no label.",13,10,0
+            mov     rb, dir_curdir_clust
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = cur_dir cluster (base)
+            lbr     dir_vol_header_call
 
-dir_vol_done:
-            ; reload RA/RC fresh -- both were clobbered by the calls above
+dir_vol_bare_args:
+            mov     rf, 0               ; RF = 0: dir_print_volume_
+                                        ; header always uses cur_drive
+
+dir_vol_header_call:
+            call    dir_print_volume_header
+
+dir_vol_after:
+            ; reload RA/RC fresh -- both were clobbered by the call above
             mov     rf, dir_argv
             lda     rf
             phi     ra
@@ -236,6 +251,37 @@ dir_vol_done:
             call    glob_init
             lbdf    not_found           ; bad prefix path -- same
                                         ; message as any other bad path
+
+            ; "Directory of <path>" header (2026-08-02) -- a glob-
+            ; matched listing ("dir c:/*.dat") used to show no header
+            ; at all, reported after the argc==2 literal-path case
+            ; (dir_single_open_target) was fixed. One header for the
+            ; WHOLE glob, printed once here before the match loop
+            ; begins -- matching real MS-DOS's own "dir *.txt" output
+            ; -- using glob_init's own already-resolved prefix
+            ; directory (glob_get_dir), not each individual match's
+            ; own cluster.
+            mov     rd, dir_glob_ctx
+            call    glob_get_dir        ; RD = prefix directory cluster
+                                        ; (glob_get_dir's own "Modifies:
+                                        ; RD, R8" -- RF survives it, but
+                                        ; NOT the glob_init call above,
+                                        ; which clobbers everything, so
+                                        ; RF is reloaded fresh below
+                                        ; rather than trusted to still
+                                        ; hold the pattern text)
+
+            mov     rf, dir_single_arg
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            mov     rf, rb              ; RF = the raw pattern text
+                                        ; (with its own drive prefix if
+                                        ; any) -- but glob_get_dir's
+                                        ; own RD return must not be
+                                        ; clobbered by this reload
+            call    dir_print_header
 
             mov     rf, dir_any_error
             ldi     0
@@ -293,15 +339,279 @@ dir_single_literal:
             plo     rd                  ; RD = cur_dir cluster (base
                                         ; for a relative path -- see the
                                         ; stash in start: above)
-            call    K_PATH_RESOLVE      ; RD = parent cluster, RF = final
-                                        ; component, DF = 0/1
-            lbdf    not_found           ; bad intermediate component
+            call    dir_resolve_and_classify
+            lbdf    not_found
+
+            xri     DIR_CLASS_DIR
+            lbnz    dsl_file            ; a file: one-line summary,
+                                        ; unchanged from before
+
+            ; a directory -- RD already holds the target cluster (from
+            ; dir_resolve_and_classify's own return). Print the
+            ; "Directory of <path>" header (the volume-label header
+            ; for this argc==2 case already printed once, up in
+            ; start:, before this branch was ever reached), then list
+            ; its contents (2026-08-02, factored into dir_list_entries
+            ; below so dir_multi_arg's own per-argument loop can reuse
+            ; it too).
+            mov     rb, dir_single_arg
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = the raw path text
+                                        ; (doesn't touch RD)
+            call    dir_print_header    ; RD unchanged going in,
+                                        ; restored on return too
+
+            call    dir_list_entries
+
+            ldi     0                   ; exit code 0 = success
+            rtn
+
+dsl_file:
+            call    print_dir_entry
+            ldi     0                   ; exit code 0 = success
+            rtn
+
+; dir_print_volume_header: "Volume in drive X is LABEL" / "has no
+; label" (2026-08-02) -- factored out of start: so dir_multi_arg's own
+; per-argument loop can print one per literal directory argument, not
+; just once for the whole command. vol_label_get/_vol_scan (lib/
+; vollabel.asm) always operate on whichever drive's BPB is CURRENTLY
+; ACTIVE (via BPB_DATA_PTR) -- they take no drive argument of their
+; own, by design (see that file's own header comment: "which drive
+; should be active is a caller concern"). K_PATH_RESOLVE is called
+; here PURELY for its own unconditional drive-switch side effect and
+; its RC.0 return (the resolved drive index) -- its own doc comment:
+; "an explicit 'X:' prefix... absent, the target drive is cur_drive",
+; exactly the fallback rule wanted here, so there's no need to
+; separately hand-parse the path text the way dir_check_drive_prefix
+; below does for a different caller. RD/RF and DF from this call are
+; otherwise ignored; whatever real resolution the caller needs happens
+; separately, before or after this call.
+; Args:    RF = path text pointer, or 0 to always describe cur_drive
+;          (the bare-listing case)
+;          RD = base cluster for a relative path (only consulted if
+;          RF isn't 0)
+; Returns: nothing
+; Modifies: everything
+;------------------------------------------------------------------
+dir_print_volume_header:
+            ghi     rf
+            lbnz    dpvh_have_path
+            glo     rf
+            lbz     dpvh_use_curdrive   ; RF == 0: always cur_drive
+
+dpvh_have_path:
+            call    K_PATH_RESOLVE      ; side effect + RC.0 = resolved
+                                        ; drive index
+            glo     rc
+            adi     'C'                 ; D = 'C' + resolved drive index
+            plo     r9                  ; R9.0 = the letter to print
+            lbr     dpvh_letter_ready
+
+dpvh_use_curdrive:
+            call    K_GETCURDIR
+            adi     'C'                 ; D = 'C'+cur_drive
+            plo     r9                  ; R9.0 = the letter to print
+
+dpvh_letter_ready:
+            mov     rf, dir_vol_letter
+            glo     r9
+            str     rf
+
+            mov     rd, dir_vol_buf
+            call    vol_label_get       ; DF = 0/1
+            lbdf    dpvh_none
+
+            call    K_INMSG
+            db      "Volume in drive ",0
+            mov     rf, dir_vol_letter
+            ldn     rf
+            call    K_TYPE
+            call    K_INMSG
+            db      " is ",0
+            mov     rf, dir_vol_buf
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+            rtn
+
+dpvh_none:
+            call    K_INMSG
+            db      "Volume in drive ",0
+            mov     rf, dir_vol_letter
+            ldn     rf
+            call    K_TYPE
+            call    K_INMSG
+            db      " has no label.",13,10,0
+            rtn
+
+; dir_check_drive_prefix: does the given path/pattern text start with
+; a valid drive letter (C-F, either case) followed by ':'? (2026-08-02)
+; Args:    RF = text pointer
+; Returns: DF = 0, D = drive index (0-3) if a valid prefix is present;
+;          DF = 1 otherwise (relative path, or a letter outside C-F)
+; Modifies: RF (advanced by 1), D
+;------------------------------------------------------------------
+dir_check_drive_prefix:
+            ldn     rf
+            lbz     dcp_no              ; empty string: no prefix
+            ani     $DF                 ; uppercase-fold (safe: only
+                                        ; letters are affected -- same
+                                        ; reasoning as the shell's own
+                                        ; drive-letter check)
+            plo     r9                  ; R9.0 = folded first char
+
+            inc     rf
+            ldn     rf                  ; D = second char
+            xri     ':'
+            lbnz    dcp_no              ; no colon right after: no prefix
+
+            glo     r9
+            smi     'C'                 ; D = letter - 'C', DF=1 (no
+                                        ; borrow) iff letter >= 'C'
+            lbnf    dcp_no              ; letter < 'C': out of range
+            plo     r9                  ; R9.0 = tentative drive index
+            smi     DRIVE_COUNT         ; DF=1 (no borrow) iff
+                                        ; index >= DRIVE_COUNT
+            lbdf    dcp_no              ; out of range (D/E/F exist,
+                                        ; nothing past F does)
+
+            glo     r9                  ; D = drive index (return value)
+            clc
+            rtn
+
+dcp_no:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; dir_print_header: "Directory of <path>" (2026-08-01/02), matching
+; real MS-DOS's own blank-line/Directory-of/blank-line layout. Shared
+; by all three of DIR's own listing shapes (bare, single literal path,
+; glob match) -- previously each either duplicated this inline or
+; (for the path-argument and glob cases) omitted it entirely, both
+; reported after real hardware testing.
+;
+; The drive letter printed comes from RF's own text when it carries an
+; explicit "X:" prefix (dir_check_drive_prefix above), NOT from
+; K_GETCURDIR/cur_drive -- the user's own suggestion (2026-08-02),
+; since DIR already has the raw path/pattern text in hand and doesn't
+; need to guess: an explicit prefix argument switches the ACTIVE BPB/
+; FAT cache via K_PATH_RESOLVE/glob_init, but never touches cur_drive
+; itself, so deriving the letter from cur_drive would be wrong whenever
+; the two differ. No prefix (a relative path) or RF=0 (the bare-
+; listing case, no path text at all) both fall back to
+; path_print_from_cluster's own default (cur_drive), exactly as before.
+; Args:    RD = target cluster to describe
+;          RF = path/pattern text pointer, or 0 if none is available
+;          (the bare-listing case)
+; Returns: RD = the same cluster it was given (restored before return,
+;          so callers can rely on it without their own separate stash)
+; Modifies: everything
+;------------------------------------------------------------------
+dir_print_header:
+            mov     rb, dir_header_pathptr
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; stash RF FIRST, before it's
+                                        ; reused for anything else
+
+            mov     rb, dir_header_clust
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb                  ; stash RD
+
+            mov     rf, dir_header_pathptr
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = the path text pointer
+            ghi     r9
+            lbnz    dph_have_path
+            glo     r9
+            lbz     dph_no_override     ; pointer == 0: no path text at
+                                        ; all, always use cur_drive
+
+dph_have_path:
+            mov     rf, r9
+            call    dir_check_drive_prefix
+            lbdf    dph_no_override     ; no valid prefix: use cur_drive
+
+            plo     r9                  ; R9.0 = drive index (stash
+                                        ; before the mov below clobbers D)
+            mov     rf, dir_header_override
+            glo     r9
+            str     rf
+            lbr     dph_have_override
+
+dph_no_override:
+            mov     rf, dir_header_override
+            ldi     $FF
+            str     rf
+
+dph_have_override:
+            call    K_INMSG
+            db      13,10,"Directory of ",0
+
+            mov     rf, dir_header_clust
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+
+            mov     rf, dir_header_override
+            ldn     rf                  ; D = drive override ($FF or
+                                        ; 0-3) -- path_print_from_
+                                        ; cluster's own new argument
+            call    path_print_from_cluster
+
+            call    K_INMSG
+            db      13,10,13,10,0
+
+            mov     rf, dir_header_clust
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD restored for the caller
+            rtn
+
+; dir_resolve_and_classify: resolve a path to either a directory (with
+; its target cluster) or a file (with dir_result already holding the
+; matched entry), or report not-found (2026-08-02) -- factored out of
+; what used to be dir_single_literal's own inline body, so
+; dir_multi_arg's own per-argument loop (below) can reuse the
+; identical classification logic for its own literal (non-glob)
+; argument case, showing a full listing for a directory argument
+; instead of just a one-line summary.
+; Args:    RF = path text, RD = base cluster (used for a relative
+;          path with no leading '/' or "X:" prefix)
+; Returns: DF = 0, D = DIR_CLASS_DIR, RD = target cluster (an empty
+;              final path component, or a matched directory entry)
+;          DF = 0, D = DIR_CLASS_FILE, dir_result already holds the
+;              matched entry (ready for print_dir_entry)
+;          DF = 1 -- not found (bad intermediate component, or no
+;              matching entry in the resolved parent directory)
+; Modifies: everything
+;------------------------------------------------------------------
+DIR_CLASS_DIR:  equ     0
+DIR_CLASS_FILE: equ     1
+
+dir_resolve_and_classify:
+            call    K_PATH_RESOLVE      ; RD = parent cluster, RF =
+                                        ; final component, DF = 0/1
+            lbdf    drc_not_found       ; bad intermediate component
 
             ; an empty final component means the path itself named
             ; the target directory ("/", "cfg/", ...) -- the resolved
             ; parent cluster IS the target already
             ldn     rf
-            lbz     dir_open_target
+            lbz     drc_is_dir
 
             ; save the final-component pointer in memory (not a
             ; register): K_DIR_READ uses R9/RA/RB/RC/RD/RF internally
@@ -312,16 +622,16 @@ dir_single_literal:
             str     rb
             inc     rb
             glo     rf
-            str     rb                  ; arg_ptr = final component pointer
+            str     rb                  ; arg_ptr = final component
 
             ; RD is still the resolved parent cluster from
             ; K_PATH_RESOLVE (untouched by the arg_ptr store above)
             call    K_DIR_OPEN
 
-dir_find:
+drc_find:
             mov     rf, dir_result
             call    K_DIR_READ
-            lbdf    not_found           ; end of directory: no match
+            lbdf    drc_not_found       ; end of directory: no match
 
             ; compare entry name against the saved argument
             mov     rf, arg_ptr
@@ -331,33 +641,78 @@ dir_find:
             plo     rd                  ; RD = argument pointer
             mov     rf, dir_result      ; RF = entry name
             call    f_strcmp
-            lbnz    dir_find            ; no match: keep looking
+            lbnz    drc_find            ; no match: keep looking
 
-            ; a matching FILE (not a directory) just shows its own
-            ; entry line and exits -- dir_result is already filled by
-            ; the K_DIR_READ match above, no extra lookup needed
+            ; a matching file just reports DIR_CLASS_FILE -- dir_result
+            ; is already filled by the K_DIR_READ match above, ready
+            ; for the caller's own print_dir_entry
             mov     rf, dir_result
             add16   rf, DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_DIR
-            lbz     dir_single_file
+            lbz     drc_is_file
 
-            ; RD = the matched entry's first cluster -- falls through
-            ; to dir_open_target below, same as the "empty final
-            ; component" shortcuts above
+            ; RD = the matched entry's first cluster
             mov     rf, dir_result
             add16   rf, DIRENT_CLUST
             lda     rf                  ; D = cluster high byte
             phi     rd
             ldn     rf                  ; D = cluster low byte
             plo     rd
-            lbr     dir_open_target
+
+drc_is_dir:
+            ldi     DIR_CLASS_DIR
+            clc
+            rtn
+
+drc_is_file:
+            ldi     DIR_CLASS_FILE
+            clc
+            rtn
+
+drc_not_found:
+            stc
+            rtn
+
+; dir_list_entries: open the given directory cluster and print every
+; non-hidden entry (2026-08-02) -- factored out of what used to be the
+; tail end of the whole program (the old dir_open_target/dir_loop) so
+; dir_multi_arg's own per-argument loop can invoke it once per literal
+; directory argument, not just once total.
+; Args:    RD = directory cluster to list
+; Returns: nothing
+; Modifies: everything
+;------------------------------------------------------------------
+dir_list_entries:
+            call    K_DIR_OPEN
+
+dle_loop:
+            mov     rf, dir_result      ; RF = result buffer
+            call    K_DIR_READ
+            lbdf    dle_done            ; DF=1 = end of directory
+
+            ; skip hidden entries (2026-07-22) -- no override flag for
+            ; now (dir has no flag-parsing machinery today); an
+            ; explicit single-file/multi-arg reference or STAT still
+            ; shows a hidden entry, matching DOS's "hidden only
+            ; affects casual listing" convention
+            mov     rf, dir_result
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_HIDDEN
+            lbnz    dle_loop            ; hidden: skip, read the next
+
+            call    print_dir_entry
+            lbr     dle_loop
+
+dle_done:
+            rtn
 
 ; dir_bare_listing: argc < 2 (no path given) -- reload RD from the
 ; cluster stashed at the very top of start:, before any of the
 ; volume-label header's own calls (a second K_GETCURDIR, vol_label_get)
 ; had a chance to clobber it. A real hardware-found bug (2026-07-30):
-; dir_open_target expects RD to already hold the target cluster on
+; dir_list_entries expects RD to already hold the target cluster on
 ; entry, and this bare-listing path used to just fall straight into it
 ; with none of the header code in between -- back when RD still
 ; genuinely held the FIRST K_GETCURDIR's own result, untouched. Once
@@ -366,61 +721,19 @@ dir_find:
 ; instead, silently opening a garbage cluster (dir_curdir_clust/RA/RC
 ; were already being reloaded fresh after the header, RD was not).
 dir_bare_listing:
-            ; "Directory of <path>" header (2026-07-30), matching real
-            ; MS-DOS's own blank-line/Directory-of/blank-line layout --
-            ; only for the bare (no-argument) listing, since
-            ; path_print_from_cluster assumes the cluster it's given
-            ; belongs to the CURRENTLY ACTIVE drive, true here (cur_dir
-            ; on the active drive) but not guaranteed for an arbitrary
-            ; resolved path argument on a different drive
-            call    K_INMSG
-            db      13,10,"Directory of ",0
-
             mov     rf, dir_curdir_clust
             lda     rf
             phi     rd
             ldn     rf
-            plo     rd
-            call    path_print_from_cluster
+            plo     rd                  ; RD = cur_dir cluster
+            mov     rf, 0               ; RF = 0: no path text at all
+                                        ; -- dir_print_header falls
+                                        ; back to cur_drive
+            call    dir_print_header    ; RD unchanged going in,
+                                        ; restored on return too
 
-            call    K_INMSG
-            db      13,10,13,10,0
+            call    dir_list_entries
 
-            mov     rf, dir_curdir_clust
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; reload RD -- clobbered by
-                                        ; path_print_from_cluster above
-
-dir_open_target:
-            call    K_DIR_OPEN
-
-dir_loop:
-            mov     rf, dir_result      ; RF = result buffer
-            call    K_DIR_READ
-            lbdf    dir_done            ; DF=1 = end of directory
-
-            ; skip hidden entries in the bare listing (2026-07-22) --
-            ; no override flag for now (dir has no flag-parsing
-            ; machinery today); an explicit reference via dir_single_file/
-            ; dir_multi_arg or STAT still shows a hidden entry, matching
-            ; DOS's "hidden only affects casual listing" convention
-            mov     rf, dir_result
-            add16   rf, DIRENT_ATTR
-            ldn     rf                  ; D = attribute byte
-            ani     ATTR_HIDDEN
-            lbnz    dir_loop            ; hidden: skip, read the next
-
-            call    print_dir_entry
-            lbr     dir_loop
-
-dir_done:
-            ldi     0                   ; exit code 0 = success
-            rtn
-
-dir_single_file:
-            call    print_dir_entry
             ldi     0                   ; exit code 0 = success
             rtn
 
@@ -513,6 +826,58 @@ dma_loop:
             lbdf    dma_bad_path        ; bad prefix path: this argv
                                         ; entry's own error
 
+            ; both headers, matching "as if you'd run DIR on just this
+            ; one argument" (2026-08-02, user's own follow-up report):
+            ; a glob PATTERN argument within a multi-argument command
+            ; used to show no header at all, unlike the IDENTICAL
+            ; pattern given as the sole argument (dir_single_glob_loop
+            ; above already gets both, and this mirrors it exactly).
+            ; Printed once here, before the match loop, regardless of
+            ; how many matches turn up -- same as dir_single_glob_loop's
+            ; own precedent. Volume label needs the BASE cluster
+            ; (dir_curdir_clust); "Directory of" needs glob_init's own
+            ; already-resolved prefix directory (glob_get_dir) -- the
+            ; two are DIFFERENT clusters, so the prefix directory is
+            ; stashed across the volume-header call (both routines are
+            ; "Modifies: everything"), same technique dma_literal's
+            ; own directory case already established.
+            mov     rd, dir_glob_ctx
+            call    glob_get_dir        ; RD = prefix directory cluster
+            mov     rf, dma_clust_stash
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            mov     rf, rb              ; RF = the raw pattern text
+            mov     rb, dir_curdir_clust
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = cur_dir cluster (base)
+            call    dir_print_volume_header
+
+            mov     rf, dma_clust_stash
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = prefix directory cluster
+                                        ; (restored)
+
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            mov     rf, rb              ; RF = the raw pattern text
+            call    dir_print_header
+
             mov     rf, dir_glob_found
             ldi     0
             str     rf
@@ -538,7 +903,7 @@ dma_glob_loop:
 dma_glob_done:
             mov     rf, dir_glob_found
             ldn     rf
-            lbnz    dma_next            ; had at least one match: done
+            lbnz    dma_glob_had_matches
 
             ; zero matches: nullglob-off fallback to the literal,
             ; unexpanded text
@@ -549,6 +914,15 @@ dma_glob_done:
             plo     rd
             mov     rf, rd
             call    dir_stat_and_print
+            lbr     dma_next
+
+dma_glob_had_matches:
+            ; a blank line after this glob pattern's own listing,
+            ; matching dma_literal's own identical addition -- same
+            ; reasoning: this is a path where multiple full listings
+            ; can print back-to-back in one command
+            call    K_INMSG
+            db      13,10,0
             lbr     dma_next
 
 dma_bad_path:
@@ -570,13 +944,96 @@ dma_bad_path:
             lbr     dma_next
 
 dma_literal:
+            ; resolve+classify this literal (non-glob) argument
+            ; (2026-08-02, the user's own follow-up request): a
+            ; directory now gets the FULL "equivalent of running DIR
+            ; on it directly" treatment (both headers + a full
+            ; listing), not just a one-line summary -- matching real
+            ; MS-DOS's own multi-argument DIR behavior. A file
+            ; argument (or a bad path) keeps the existing one-line-
+            ; summary/error behavior, unchanged. A glob match that
+            ; happens to be a directory (dma_glob_loop above)
+            ; deliberately still gets one summary line -- this file's
+            ; own established "a wildcard never recurses into what it
+            ; matches" design, left untouched.
             mov     rf, dir_cur_path
             lda     rf
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, rd
-            call    dir_stat_and_print
+            mov     rf, rd              ; RF = the path text
+            mov     rb, dir_curdir_clust
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = cur_dir cluster (base)
+
+            call    dir_resolve_and_classify
+            lbdf    dma_bad_path        ; not found: same error path
+                                        ; as before
+
+            xri     DIR_CLASS_DIR
+            lbnz    dma_literal_file    ; a file: existing one-line
+                                        ; summary, unchanged
+
+            ; a directory -- stash the resolved target cluster before
+            ; the header calls below (each "Modifies: everything")
+            mov     rf, dma_clust_stash
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            ; volume-label header for THIS argument's own drive --
+            ; needs the BASE cluster (dir_curdir_clust), not the
+            ; target cluster just stashed above
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            mov     rf, rb              ; RF = the path text
+            mov     rb, dir_curdir_clust
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = cur_dir cluster (base)
+            call    dir_print_volume_header
+
+            ; "Directory of <path>" header -- needs the TARGET cluster
+            mov     rf, dma_clust_stash
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = resolved target cluster
+                                        ; (restored)
+
+            mov     rf, dir_cur_path
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            mov     rf, rb              ; RF = the path text
+            call    dir_print_header    ; also restores RD on return
+
+            call    dir_list_entries
+
+            ; a blank line between this directory's own listing and
+            ; whatever comes next (2026-08-02, hardware-found gap) --
+            ; only needed here: this is the one path where multiple
+            ; full listings can print back-to-back in a single
+            ; command. Unconditional (even for the LAST argument) --
+            ; harmless there, matching real MS-DOS's own tendency to
+            ; end a multi-directory listing with a trailing blank line
+            ; too.
+            call    K_INMSG
+            db      13,10,0
+
+            lbr     dma_next
+
+dma_literal_file:
+            call    print_dir_entry
 
 dma_next:
             mov     rf, dir_i
@@ -1050,8 +1507,19 @@ dir_argc:       db      0
 dir_i:          db      0
 dir_any_error:  db      0
 dir_cur_path:   dw      0
+dma_clust_stash: dw     0          ; dma_literal's own resolved
+                                    ; target-cluster stash (2026-08-02)
+                                    ; across the header-printing calls
 dir_curdir_clust: dw    0
 dir_single_arg: dw      0
+dir_header_clust: dw    0          ; dir_print_header's own in/out
+                                    ; cluster stash (2026-08-02)
+dir_header_pathptr: dw  0          ; dir_print_header's own path-text
+                                    ; argument stash
+dir_header_override: db 0          ; dir_print_header's own resolved
+                                    ; drive-letter override ($FF or
+                                    ; 0-3), passed to
+                                    ; path_print_from_cluster
 dir_glob_found: db      0
 dir_glob_ctx:   ds      GLOB_CTX_LEN
 dir_vol_letter: db      0

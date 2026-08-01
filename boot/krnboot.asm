@@ -3,17 +3,17 @@
 ;
 ; This is the kernel bootstrap, occupying disk sectors 1-3
 ; (KRNBOOT_SECTORS = 3, as of the multi-sector expansion below).
-; The MBR loads all 3 sectors to $4600 and enters at $4606.
+; The MBR loads all 3 sectors to $4400 and enters at $4406.
 ;
 ; KERN_BASE ($0100, where the kernel proper loads to) has stayed put;
 ; it's THIS bootstrap's own load address (KERN_LOAD, in mbr.asm) that
 ; has moved as the kernel grew -- $3000 originally, then $3800, then
-; $4600 (see mbr.asm's header comment for the full story). Growing
-; this bootstrap from 1 sector to 3 does not move KERN_LOAD itself --
-; it's still the same $4600 starting address, just now MBR reads 3
+; $4600, then $4200, then $4400 (see mbr.asm's header comment for the
+; full story). Growing this bootstrap from 1 sector to 3 does not move
+; KERN_LOAD itself -- it's still the same starting address, just now MBR reads 3
 ; consecutive sectors into it instead of 1.
 ;
-; It reads the kernel sector count from its own header at $4604,
+; It reads the kernel sector count from its own header at $4404,
 ; then loads the kernel proper (sectors 4..N, shifted from 2..N now
 ; that this bootstrap itself spans 3 sectors instead of 1) sequentially
 ; into RAM starting at $0100, and jumps to the kernel entry at $0106.
@@ -27,12 +27,12 @@
 ; the load loop overwriting itself mid-flight, before reaching that
 ; point.)
 ;
-; Header layout (6 bytes at $4600-$4605):
-;   $4600-$4602  'KRN'  3-byte magic signature
-;   $4603        $01    kernel major version
-;   $4604-$4605  word   number of sectors to load (big-endian)
+; Header layout (6 bytes at $4400-$4405):
+;   $4400-$4402  'KRN'  3-byte magic signature
+;   $4403        $01    kernel major version
+;   $4404-$4405  word   number of sectors to load (big-endian)
 ;                       patched by the 'sys' install utility
-;   $4606        ...    entry point (code starts here)
+;   $4406        ...    entry point (code starts here)
 ;
 ; The 'sys' utility computes the sector count as:
 ;   (file_size_in_bytes - KRNBOOT_SECTORS*512) / 512
@@ -80,20 +80,20 @@
 #define     KERN_BASE   $0100           ; kernel proper loads here
 #define     KERN_ENTRY  $0106           ; kernel proper entry point
 #define     SECTOR_SIZE $0200           ; 512 bytes per sector
-#define     CNT_ADDR    $4604           ; address of sector count in header
+#define     CNT_ADDR    $4404           ; address of sector count in header
 
-            org         $4600
+            org         $4400
 
 ;--------------------------------------------------------------
-; 6-byte header ($4600-$4605)
-; MBR enters at $4606, so these bytes are never executed.
+; 6-byte header ($4400-$4405)
+; MBR enters at $4406, so these bytes are never executed.
 ;--------------------------------------------------------------
             db          'K','R','N'     ; 3-byte magic signature
             db          1               ; kernel major version
             dw          0               ; sector count -- patched by sys
 
 ;--------------------------------------------------------------
-; Bootstrap entry point - $4606
+; Bootstrap entry point - $4406
 ; On entry: SCRT initialized, stack at top of RAM
 ;--------------------------------------------------------------
 boot_main:
@@ -101,7 +101,7 @@ boot_main:
             ldi         CNT_ADDR.1
             phi         rf
             ldi         CNT_ADDR.0
-            plo         rf              ; RF = $4604
+            plo         rf              ; RF = $4404
             lda         rf              ; D = high byte of sector count
             phi         rc
             lda         rf              ; D = low byte of sector count
@@ -865,7 +865,7 @@ boot_scratch:       ds      512
 ; KERN_LOAD moves, or krnboot.bin comes out the wrong size (silently,
 ; with no assembler error).
 ;--------------------------------------------------------------
-            org         $4BFF
+            org         $49FF
             db          0
 
             end         boot_main
