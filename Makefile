@@ -212,6 +212,9 @@ lib/pathstr.prg: lib/pathstr.asm include/opcodes.def include/bios.inc include/ke
 lib/ymodem.prg: lib/ymodem.asm include/opcodes.def include/bios.inc include/kernel_api.inc
 	cd lib && $(ASM) $(ASMFLAGS) ymodem.asm
 
+lib/lineedit.prg: lib/lineedit.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/lineedit.inc
+	cd lib && $(ASM) $(ASMFLAGS) lineedit.asm
+
 bin/dir: progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg | bin
 	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg
 	rm -f bin/dir.lkb
@@ -284,8 +287,8 @@ bin/more: progs/more.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/more progs/more.prg lib/env.prg
 	rm -f bin/more.lkb
 
-bin/edlin: progs/edlin.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg
+bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg | bin
+	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg
 	rm -f bin/edlin.lkb
 
 bin/shell: progs/shell.prg lib/env.prg | bin
