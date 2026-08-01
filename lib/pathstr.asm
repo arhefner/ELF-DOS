@@ -40,9 +40,23 @@ PS_MAX_DEPTH:   equ     16
 
 ;------------------------------------------------------------------
 ; path_print_from_cluster: print "X:/some/path" (no trailing
-; newline, no leading text) for the given directory cluster, on
-; whichever drive is currently active.
+; newline, no leading text) for the given directory cluster.
 ; Args:    RD = directory cluster (0 = root)
+;          D  = drive-letter override: $FF means "derive it from
+;          K_GETCURDIR/cur_drive" (the original, still-default
+;          behavior -- what every caller used before this argument
+;          existed); 0-3 means "use this drive index directly, matching
+;          cur_drive's own C=0..F=3 convention" (2026-08-02, added
+;          after real hardware use of progs/dir.asm's own path-
+;          argument case: an explicit "X:/foo" argument switches the
+;          ACTIVE BPB/FAT cache to X via K_PATH_RESOLVE, but never
+;          touches cur_drive itself -- deriving the header's drive
+;          letter from cur_drive would print the WRONG letter whenever
+;          the two differ. The override only changes which letter gets
+;          printed; the actual directory walk below still always
+;          operates against whichever drive is CURRENTLY ACTIVE
+;          (unaffected by this argument), so the override must be the
+;          real, already-resolved target drive -- never a guess).
 ; Returns: DF = 0 on success (path printed); DF = 1 on error (nothing
 ;          printed -- directory structure error, or a cycle/too-deep
 ;          path)
@@ -50,8 +64,13 @@ PS_MAX_DEPTH:   equ     16
 ;------------------------------------------------------------------
             proc    path_print_from_cluster
 
-            ; save the caller's cluster argument FIRST -- K_GETCURDIR
-            ; right below also returns a cluster in RD (its own
+            plo     r9                  ; stash D (the drive-letter
+                                        ; override argument) FIRST --
+                                        ; every mov below clobbers D
+                                        ; (gotcha #4)
+
+            ; save the caller's cluster argument next -- K_GETCURDIR
+            ; further below also returns a cluster in RD (its own
             ; cur_dir, not necessarily the same one the caller passed
             ; us), which would silently overwrite it. A real bug
             ; caught during review, before this ever reached DIR: for
@@ -66,6 +85,13 @@ PS_MAX_DEPTH:   equ     16
             glo     rd
             str     rf                  ; clust = caller's cluster
 
+            glo     r9
+            xri     $FF
+            lbnz    ppfc_drive_ready    ; not $FF: R9.0 already holds
+                                        ; the caller's explicit drive
+                                        ; index -- use it directly,
+                                        ; skip K_GETCURDIR entirely
+
             call    K_GETCURDIR         ; D = cur_drive (0-3) -- the
                                         ; RD it also returns is
                                         ; discarded; clust (above) is
@@ -73,9 +99,12 @@ PS_MAX_DEPTH:   equ     16
             plo     r9                  ; R9.0 = cur_drive (stashed
                                         ; immediately -- the mov below
                                         ; clobbers D, gotcha #4)
+
+ppfc_drive_ready:
             mov     rf, drive
             glo     r9
-            str     rf                  ; drive = cur_drive
+            str     rf                  ; drive = whichever we ended
+                                        ; up with (override or cur_drive)
 
             mov     rf, clust
             lda     rf

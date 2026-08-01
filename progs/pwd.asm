@@ -30,6 +30,12 @@
 ;------------------------------------------------------------------
 start:
             call    K_GETCURDIR         ; RD = current directory cluster
+            ldi     $FF                 ; D = no drive-letter override
+                                        ; (2026-08-02) -- PWD always
+                                        ; describes cur_dir on the
+                                        ; active drive, so the original
+                                        ; K_GETCURDIR/cur_drive-derived
+                                        ; letter is always correct here
             call    path_print_from_cluster
             lbdf    pwd_err
 
