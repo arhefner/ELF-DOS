@@ -6,27 +6,27 @@
 ; project's own established convention for exactly this situation --
 ; see include/vollabel.inc/include/ymodem.inc for precedent.
 ;
-; PHASE 1 (2026-07-30, test-machine-only, NOT for release): the module
-; always loads to this same fixed, compile-time address. See
-; kernel/batch_mod.asm's own header comment for the full reasoning and
-; kernel/batch.asm's batch_mod_load for the runtime bounds check that
-; refuses to load it if the current machine doesn't actually have this
-; much RAM free above BATCHMOD_BASE right now.
+; PHASE 1 (2026-07-30) loaded the module to a fixed, compile-time
+; address ($D000) -- test-machine-only, since a fixed high address has
+; no way to adapt to a smaller/different system. PHASE 2 (2026-07-31)
+; replaced this with genuine relocation via lib/modload.asm's
+; mod_load, which finds a page-aligned home via K_HIMEM_RESERVE at
+; runtime instead -- see kernel/batch_mod.asm's own header comment and
+; the project's own design plan for the full mechanism. The old
+; BATCHMOD_BASE/BATCHMOD_MEMTOP_CLAMP constants no longer have any
+; real use anywhere in this project (removed, not left as dead code) --
+; kernel/batch.asm's own batch_mod_load/batch_mod_unclamp now just
+; forward to mod_load/mod_release, which handle both the load address
+; and the headroom bounds-check internally.
 ;
 
-BATCHMOD_BASE:          equ     $D000
-
-; mem_top is clamped to this (BATCHMOD_BASE-1) for the duration a
-; batch is active, then restored -- see kernel/batch.asm's own
-; batch_mod_load/batch_mod_unclamp.
-BATCHMOD_MEMTOP_CLAMP:  equ     BATCHMOD_BASE-1
-
 ; Fixed-offset entry table, right after the module's own 6-byte
-; header (3-byte magic + version + 2 reserved, mirroring EDF's own
-; header shape) -- each offset holds an LBR to the real body, which
-; can move around within the module on a rebuild without needing the
-; kernel's own dispatcher (which calls these fixed offsets directly,
-; never the bodies themselves) to change at all.
+; header (3-byte magic + version + 2-byte code_size, mirroring EDF's
+; own header shape, see include/modformat.inc) -- each offset holds an
+; LBR to the real body, which can move around within the module on a
+; rebuild without needing the kernel's own dispatcher (which calls
+; these fixed offsets, relative to the module's own runtime base
+; address, never the bodies themselves) to change at all.
 MOD_START_OFF:      equ     6
 MOD_READLINE_OFF:   equ     9
 MOD_GOTO_OFF:       equ     12

@@ -60,7 +60,9 @@ KOBJ =  kernel/kernel.prg  \
         kernel/loader.prg  \
         kernel/batch.prg   \
         kernel/redir.prg   \
-        kernel/glob.prg
+        kernel/glob.prg    \
+        lib/modload.prg    \
+        lib/icall.prg
 
 # ---- Common include dependencies ----
 INCS =  include/bios.inc    \
@@ -140,11 +142,11 @@ kernel/glob.prg: kernel/glob.asm $(INCS)
 # script runs). See kernel/batch_mod.asm's own header comment for the
 # full design. TEST-MACHINE-ONLY for now -- fixed load address, not
 # yet relocatable.
-kernel/batch_mod.prg: kernel/batch_mod.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/batchmod.inc
+kernel/batch_mod.prg: kernel/batch_mod.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/batchmod.inc include/modformat.inc
 	cd kernel && $(ASM) $(ASMFLAGS) batch_mod.asm
 
 bin/batch.mod: kernel/batch_mod.prg | bin
-	$(LINK) $(LFLAGS) -o bin/batch.mod kernel/batch_mod.prg
+	$(LINK) $(LFLAGS) -m -o bin/batch.mod kernel/batch_mod.prg
 	rm -f bin/batch.lkb
 
 # Programs are single-file: each progs/X.asm assembles and links on
@@ -214,6 +216,12 @@ lib/ymodem.prg: lib/ymodem.asm include/opcodes.def include/bios.inc include/kern
 
 lib/lineedit.prg: lib/lineedit.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/lineedit.inc
 	cd lib && $(ASM) $(ASMFLAGS) lineedit.asm
+
+lib/icall.prg: lib/icall.asm include/opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) icall.asm
+
+lib/modload.prg: lib/modload.asm include/opcodes.def include/bios.inc include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) modload.asm
 
 bin/dir: progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg | bin
 	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg

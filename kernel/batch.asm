@@ -2,16 +2,21 @@
 ; batch.asm - kernel-resident batch-script dispatcher, plus %0-%9
 ; batch-argument substitution (unaffected by the split below)
 ;
-; REDESIGNED 2026-07-30 (loadable batch module, phase 1): the actual
-; line-reading/GOTO-scanning logic (what used to live directly in this
-; file as batch_start/batch_readline/batch_goto) moved out into
+; REDESIGNED 2026-07-30 (loadable batch module, phase 1), THEN AGAIN
+; 2026-07-31 (phase 2, genuine relocation): the actual line-reading/
+; GOTO-scanning logic (what used to live directly in this file as
+; batch_start/batch_readline/batch_goto) moved out into
 ; kernel/batch_mod.asm, a standalone, separately-built module that
-; lands on disk as /bin/batch.mod and is loaded fresh into RAM at a
-; FIXED address (BATCHMOD_BASE, $D000, include/batchmod.inc) every
-; single time K_BATCH_START runs. See kernel/batch_mod.asm's own
-; header comment for the full design and PHASE 1 vs PHASE 2 scoping
-; (this only works on a machine with enough real RAM above
-; BATCHMOD_BASE -- test-machine-only for now, not for release).
+; lands on disk as /bin/batch.mod and is loaded fresh into RAM every
+; single time K_BATCH_START runs -- now via lib/modload.asm's
+; mod_load, which finds a page-aligned home for it wherever
+; K_HIMEM_RESERVE can, instead of Phase 1's fixed BATCHMOD_BASE
+; ($D000). Since the module's own base address is only known at
+; runtime, this file reaches its entry points via lib/icall.asm's
+; indirect call rather than a plain LBR to a compile-time constant.
+; See kernel/batch_mod.asm's own header comment, lib/modload.asm's own
+; header comment, and the project's own design plan for the full
+; mechanism.
 ;
 ; What THIS file still owns, unchanged by the split: the K_BATCH_*
 ; jump-table entry points keep the exact same names/addresses/
@@ -44,50 +49,47 @@
 #include    include/kernel.inc
 #include    include/batchmod.inc
 
-            extrn   file_stat
-            extrn   file_open
-            extrn   file_read
-            extrn   file_close
-
-; cross-file references into kernel/loader.asm: prog_fcb/prog_iobuf,
-; reused here rather than declaring a second, dedicated FCB+iobuf pair
-; -- batch_mod_load's own file_stat/file_open/file_read/file_close
-; sequence always runs strictly BEFORE prog_run would next use these
-; for loading an ordinary program (K_BATCH_START is called either at
-; boot, before run_loop has ever called prog_run at all, or from
-; progs/shell.asm's own is_batch:, itself only reachable while the
-; shell is running -- and prog_run's own _prog_finish_load already
-; closes prog_fcb's handle before ever jumping into the shell's own
-; entry point, so it's provably idle both times). Saves 544 bytes of
-; kernel-resident data (FCB_LEN+SECTOR_SIZE) versus a second pair.
-; prog_iobuf doubles as file_stat's own DIRENT_LEN-sized result buffer
-; too (512 bytes is plenty of room for a 139-byte result) -- read
-; before file_open ever needs the same buffer for its real purpose,
-; same "borrow an idle buffer for a strictly-earlier, non-overlapping
-; use" pattern already established elsewhere in this project (e.g.
-; dir_create/dir_remove's own borrowing of dir_buf).
-            extrn   prog_fcb
-            extrn   prog_iobuf
+; cross-file references into lib/modload.asm and lib/icall.asm --
+; batch_mod_load/batch_mod_unclamp below are now thin wrappers around
+; these, replacing the old file_stat/file_open/file_read/file_close/
+; prog_fcb/prog_iobuf-based Phase 1 loading logic entirely (no longer
+; referenced anywhere in this file).
+            extrn   mod_load
+            extrn   mod_release
+            extrn   icall
 
 ; cross-file references into kernel/redir.asm -- the same shared
-; himem-adjacent primitives kernel/glob.asm already reuses too.
-; _himem_reserve/_himem_release themselves are only used by
-; kernel_batch_args_reserve/_release below (unchanged) -- the module's
-; own memory is NOT taken from that shared pool at all (its address is
-; a fixed constant, not a dynamic reservation), but the bounds-check
-; arithmetic in batch_mod_load below deliberately mirrors
-; _himem_reserve's own SEX-protected SM/SMB comparison idiom exactly,
-; reusing its scratch word too, since this is the same class of
-; mem_top-adjacent computation this project has been burned on before.
+; himem-adjacent primitive kernel/glob.asm already reuses too.
+; Only used by kernel_batch_args_reserve/_release below (unchanged) --
+; the module's own memory now goes through mod_load/mod_release (which
+; call K_HIMEM_RESERVE/K_HIMEM_RELEASE internally), not this file's own
+; direct _himem_reserve/_himem_release calls the way Phase 1 did.
             extrn   _himem_reserve
             extrn   _himem_release
             extrn   mem_top
-            extrn   himem_scratch
+
+; cross-file references into kernel/loader.asm -- mod_load's own
+; caller-supplied-FCB/iobuf convention (see its own header comment)
+; reuses these exactly the way the old Phase 1 loader did: provably
+; idle at every point batch_mod_load can be called from (no program
+; load is ever in flight while a batch is starting/reading a line).
+; BUG FIX (2026-08-01, hardware-found boot hang): batch_mod_load below
+; originally called mod_load with ONLY RF set, never RD/RA at all --
+; mod_load's very first real action, K_FILE_OPEN, therefore ran
+; against whatever garbage happened to be sitting in RD/RA at that
+; point in boot, not a real FCB/iobuf pair. A targeted diagnostic
+; ([K1]/[B1] printed, [M1] -- placed right before mod_load's own
+; fixup loop, well after the file-open/header-read/reserve steps --
+; never did) pinpointed the corruption to mod_load's very first
+; operation, exactly matching this gap.
+            extrn   prog_fcb
+            extrn   prog_iobuf
 
 ; same-file cross-proc data references (required even within the same
 ; file -- see CLAUDE.md gotcha #6)
             extrn   batch_mod_active
-            extrn   batch_mod_saved_memtop
+            extrn   batch_mod_base
+            extrn   batch_mod_reserve_size
             extrn   batch_args_reserved
             extrn   batch_args_empty
 
@@ -116,8 +118,8 @@
             mov     rd, batch_mod_active
             ldn     rd
             lbnz    bst_reject          ; already active: reject
-                                        ; WITHOUT ever touching
-                                        ; BATCHMOD_BASE -- a batch is
+                                        ; WITHOUT ever touching the
+                                        ; module -- a batch is
                                         ; genuinely still running there
 
             ; stash the caller's own path argument -- batch_mod_load
@@ -131,25 +133,45 @@
             str     rd
 
             call    batch_mod_load      ; DF=0/1 -- (re)loads the
-                                        ; module fresh into
-                                        ; BATCHMOD_BASE, clamping
-                                        ; mem_top; on DF=1 nothing was
-                                        ; changed at all
+                                        ; module fresh, wherever
+                                        ; mod_load finds room; on DF=1
+                                        ; nothing was changed at all
             lbdf    bst_reject
 
-            ; module is now resident -- call its own batch_start entry
-            ; (via the fixed header offset table) with the caller's
-            ; original path argument
+            ; module is now resident -- compute the icall target
+            ; (batch_mod_base + MOD_START_OFF) FIRST, using RF as
+            ; scratch to read batch_mod_base from memory, THEN restore
+            ; the caller's own path argument into RF LAST, right
+            ; before the call -- reversing this order would let the
+            ; target computation clobber the path argument, since both
+            ; need RF at different points
+            mov     rf, batch_mod_base
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            ; RB += MOD_START_OFF (6 repeated INCs, not ADD16 -- 6
+            ; bytes vs 8 for a constant this small, and INC never
+            ; touches D/DF; matches this project's own established
+            ; preference)
+            inc     rb
+            inc     rb
+            inc     rb
+            inc     rb
+            inc     rb
+            inc     rb                  ; RB = batch_mod_base+MOD_START_OFF
+
             mov     rf, bst_path
             lda     rf
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, rd              ; RF = path (restored)
-            call    BATCHMOD_BASE+MOD_START_OFF
+            mov     rf, rd              ; RF = path (restored, LAST)
+
+            call    icall
             lbdf    bst_mod_open_failed ; the .bat file itself
                                         ; couldn't be opened -- unwind
-                                        ; the mem_top clamp; nothing
+                                        ; the reservation; nothing
                                         ; was ever marked active
 
             mov     rf, batch_mod_active
@@ -178,217 +200,77 @@ bst_path:      dw      0           ; local to this proc only -- see
             endp
 
 ; ----------------------------------------------------------------
-; batch_mod_load: (re)load the batch module fresh from /bin/batch.mod
-; into BATCHMOD_BASE, clamping mem_top to protect it for the duration
-; a batch is active. Does NOT call into the module -- batch_start
-; above does that once this returns DF=0.
-;
-; Refuses cleanly (mem_top left COMPLETELY UNCHANGED) rather than
-; clamping to a smaller value and proceeding anyway, if the module
-; wouldn't entirely fit at or below the CURRENT mem_top -- anything at
-; or above BATCHMOD_BASE right now, under the OLD mem_top, is
-; legitimately claimed by something else (a redirect/glob/%N
-; reservation active for the very command line that's invoking this
-; .bat file) and must not be overwritten.
-;
+; batch_mod_load: (re)load the batch module fresh from /bin/batch.mod,
+; wherever lib/modload.asm's mod_load can find room. Does NOT call
+; into the module -- batch_start above does that once this returns
+; DF=0. Thin wrapper (2026-07-31, Phase 2) -- all the size validation,
+; magic checking, and headroom bookkeeping that used to live directly
+; in this proc now lives in mod_load itself, shared with any other
+; caller that wants a relocatable module loaded.
 ; Args:    none
-; Returns: DF = 0 on success (module loaded and validated,
-;          BATCHMOD_BASE onward now holds its real content, mem_top
-;          clamped to BATCHMOD_MEMTOP_CLAMP, the real prior value
-;          saved in batch_mod_saved_memtop); DF = 1 on any failure
-;          (module file missing, wrong size read back, bad magic, or
-;          not enough RAM currently free above BATCHMOD_BASE).
+; Returns: DF = 0 on success: batch_mod_base/batch_mod_reserve_size
+;          are populated (the module's real load address, and the
+;          reservation size batch_mod_unclamp must pass back later).
+;          DF = 1 on any failure (mod_load already guarantees nothing
+;          was left reserved or open in that case).
 ; Modifies: everything
 ; ----------------------------------------------------------------
             proc    batch_mod_load
 
-            ; prog_iobuf temporarily doubles as file_stat's own
-            ; DIRENT_LEN-sized result buffer here -- see this proc's
-            ; own header comment on why that's safe (strictly before
-            ; file_open below ever needs the same buffer for its real
-            ; purpose)
             mov     rf, batchmod_path
-            mov     rd, prog_iobuf
-            call    file_stat
-            lbdf    bml_fail            ; /bin/batch.mod itself is
-                                        ; missing
-
-            ; real_size = DIRENT_SIZE (4 bytes, big-endian). Only the
-            ; low 16 bits matter -- a batch module is nowhere near
-            ; 64K -- but the high word must be EXACTLY zero for a real
-            ; module; checked explicitly rather than assumed, so a
-            ; wildly-wrong file on this path is rejected cleanly
-            ; instead of silently truncated.
-            mov     rf, prog_iobuf
-            add16   rf, DIRENT_SIZE
-            ldn     rf
-            lbnz    bml_fail
-            inc     rf
-            ldn     rf
-            lbnz    bml_fail
-            inc     rf
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = real_size (low word)
-
-            mov     rf, batchmod_size
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; batchmod_size = real_size --
-                                        ; stashed to memory, needed
-                                        ; again below after several
-                                        ; more calls
-
-            ; needed_top = (BATCHMOD_BASE-1) + real_size -- immediate-
-            ; constant add16 (not register-register), gotcha #18
-            ; doesn't apply
-            mov     rd, r8
-            add16   rd, BATCHMOD_MEMTOP_CLAMP  ; RD = needed_top
-
-            mov     rf, mem_top
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = mem_top (current, real)
-
-            ; refuse unless mem_top >= needed_top -- SEX-protected SM,
-            ; mirroring _himem_reserve's own hardware-proven idiom
-            ; exactly (kernel/redir.asm): subtrahend (needed_top)
-            ; staged first via str, minuend (mem_top) loaded right
-            ; before sm/smb. DF=0 (borrow) means mem_top < needed_top.
-            mov     ra, himem_scratch
-            sex     ra
-            glo     rd
-            str     ra
-            glo     r9
-            sm
-            ghi     rd
-            str     ra
-            ghi     r9
-            smb
-            sex     r2                  ; restore X = R2 -- everything
-                                        ; else in this codebase assumes
-                                        ; X is always R2
-            lbnf    bml_fail            ; DF=0: mem_top < needed_top --
-                                        ; not enough room, refuse,
-                                        ; nothing changed yet
-
-            ; safe to proceed -- save the REAL current mem_top before
-            ; touching it
-            mov     rf, batch_mod_saved_memtop
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf
-
-            mov     rf, mem_top
-            ldi     high BATCHMOD_MEMTOP_CLAMP
-            str     rf
-            inc     rf
-            ldi     low BATCHMOD_MEMTOP_CLAMP
-            str     rf
-
-            ; open + read the module's real bytes into BATCHMOD_BASE --
-            ; prog_iobuf now reused for its own REAL purpose (file_open's
-            ; RA argument), safe since batchmod_size was already
-            ; stashed to memory well before this point and nothing
-            ; still needs prog_iobuf's earlier stat-scratch content
-            mov     rf, batchmod_path
-            mov     rd, prog_fcb
+            mov     rd, prog_fcb        ; BUG FIX (2026-08-01): mod_load
+                                        ; requires a caller-supplied
+                                        ; FCB/iobuf (RD/RA) -- this call
+                                        ; site never set them before,
+                                        ; see the extrn block above for
+                                        ; the full incident
             mov     ra, prog_iobuf
-            ldi     0                   ; mode = read
-            call    file_open
-            lbdf    bml_unclamp_fail    ; open failing right after a
-                                        ; successful stat shouldn't
-                                        ; normally happen, but there's
-                                        ; no sane response if it does
+            call    mod_load            ; DF=0/1, RD=base, RC=reserve
+                                        ; size (see lib/modload.asm)
+            lbdf    bml_fail
 
-            mov     rd, prog_fcb
-            mov     rf, BATCHMOD_BASE
-            mov     rb, batchmod_size
-            lda     rb
-            phi     rc
-            ldn     rb
-            plo     rc                  ; RC = real_size
-            call    file_read           ; RC = bytes actually read,
-                                        ; DF = 0/1
-            lbdf    bml_close_unclamp_fail
+            mov     rf, batch_mod_base
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
 
-            ; confirm the FULL file was read -- a short read means
-            ; something is wrong (truncated/corrupt module, or it
-            ; somehow changed size between the stat and the read)
-            mov     rb, batchmod_size
-            lda     rb
-            str     r2
+            mov     rf, batch_mod_reserve_size
             ghi     rc
-            xor
-            lbnz    bml_close_unclamp_fail
-            ldn     rb
-            str     r2
+            str     rf
+            inc     rf
             glo     rc
-            xor
-            lbnz    bml_close_unclamp_fail
-
-            mov     rd, prog_fcb
-            call    file_close
-
-            ; validate the magic -- catches loading a garbage/wrong
-            ; file cheaply, before ever calling into it
-            mov     rf, BATCHMOD_BASE
-            ldn     rf
-            xri     'B'
-            lbnz    bml_unclamp_fail
-            inc     rf
-            ldn     rf
-            xri     'M'
-            lbnz    bml_unclamp_fail
-            inc     rf
-            ldn     rf
-            xri     'D'
-            lbnz    bml_unclamp_fail
+            str     rf
 
             clc
             rtn
-
-bml_close_unclamp_fail:
-            mov     rd, prog_fcb
-            call    file_close
-
-bml_unclamp_fail:
-            call    batch_mod_unclamp
 
 bml_fail:
             stc
             rtn
 
 batchmod_path:      db      "/bin/batch.mod",0
-batchmod_size:      dw      0
 
             endp
 
 ; ----------------------------------------------------------------
-; batch_mod_unclamp: restore mem_top from batch_mod_saved_memtop.
+; batch_mod_unclamp: reverse batch_mod_load's reservation via
+; mod_release. Kept as its own proc/name (2026-07-31, Phase 2 -- was
+; "restore mem_top from a saved absolute value" in Phase 1) since
+; every existing caller already calls it at exactly the right moments.
 ; Args:    none
 ; Returns: nothing
-; Modifies: RD, RF
+; Modifies: whatever mod_release/K_HIMEM_RELEASE modifies
 ; ----------------------------------------------------------------
             proc    batch_mod_unclamp
 
-            mov     rf, batch_mod_saved_memtop
+            mov     rf, batch_mod_reserve_size
             lda     rf
-            phi     rd
+            phi     rc
             ldn     rf
-            plo     rd
-            mov     rf, mem_top
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            plo     rc
+            call    mod_release
             rtn
 
             endp
@@ -439,10 +321,17 @@ batchmod_size:      dw      0
 
             mov     rd, batch_mod_active
             ldn     rd
-            lbz     brl_disp_inactive   ; no batch active: DF=1,
-                                        ; BATCHMOD_BASE never touched
+            lbz     brl_disp_inactive   ; no batch active: DF=1, the
+                                        ; module is never touched
 
-            call    BATCHMOD_BASE+MOD_READLINE_OFF
+            mov     rf, batch_mod_base
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            add16   rb, MOD_READLINE_OFF
+
+            call    icall
             lbdf    brl_disp_ended
 
             clc                         ; DF=0: real line, LINE_BUF
@@ -463,9 +352,7 @@ brl_disp_inactive:
 ; ----------------------------------------------------------------
 ; batch_goto: K_BATCH_GOTO's jump-table target. Same fast-path shape
 ; as batch_readline above.
-; Args:    RF = pointer to a null-terminated label name, no leading
-;          ':' -- untouched by the "is a batch active" check below,
-;          so it survives correctly into the module call either way
+; Args:    RF = pointer to a null-terminated label name, no leading ':'
 ; Returns: DF = 0/1 -- see kernel_api.inc's own K_BATCH_GOTO doc
 ; Modifies: everything
 ; ----------------------------------------------------------------
@@ -475,7 +362,32 @@ brl_disp_inactive:
             ldn     rd
             lbz     bg_disp_inactive
 
-            call    BATCHMOD_BASE+MOD_GOTO_OFF
+            ; stash the caller's own label-name argument FIRST -- RF
+            ; is about to be used as scratch to compute the icall
+            ; target (same ordering concern as batch_start's own
+            ; dispatch tail above)
+            mov     rd, bg_label_arg
+            ghi     rf
+            str     rd
+            inc     rd
+            glo     rf
+            str     rd
+
+            mov     rf, batch_mod_base
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+            add16   rb, MOD_GOTO_OFF
+
+            mov     rf, bg_label_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd              ; RF = label name (restored, LAST)
+
+            call    icall
             lbdf    bg_disp_ended
 
             clc
@@ -489,6 +401,8 @@ bg_disp_ended:
 bg_disp_inactive:
             stc
             rtn
+
+bg_label_arg:  dw      0           ; local to this proc only
 
             endp
 
@@ -675,9 +589,10 @@ bar_done:
             endp
 
 ;------------------------------------------------------------------
-; Batch-dispatch scratch data (new, 2026-07-30) -- the "is a batch
-; active" flag and the saved mem_top value, both cross-proc within
-; this file (see CLAUDE.md gotcha #6).
+; Batch-dispatch scratch data (2026-07-30, extended 2026-07-31 for
+; Phase 2 relocation) -- the "is a batch active" flag and the module's
+; own runtime location, both cross-proc within this file (see
+; CLAUDE.md gotcha #6).
 ;------------------------------------------------------------------
             proc    _batch_dispatch_data
 
@@ -685,16 +600,20 @@ batch_mod_active:       db      0   ; 0 = no batch active (the module
                                     ; is never touched); nonzero = a
                                     ; batch is active, the module is
                                     ; currently resident at
-                                    ; BATCHMOD_BASE, and mem_top is
-                                    ; currently clamped
-batch_mod_saved_memtop: dw      0   ; the real mem_top value from just
-                                    ; before batch_mod_load's own
-                                    ; clamp -- restored verbatim by
-                                    ; batch_mod_unclamp, whatever it
-                                    ; was (never assumed)
+                                    ; batch_mod_base
+batch_mod_base:         dw      0   ; the module's actual (page-
+                                    ; aligned) load address, as
+                                    ; returned by mod_load -- only
+                                    ; meaningful while batch_mod_active
+                                    ; is set
+batch_mod_reserve_size: dw      0   ; the himem reservation size
+                                    ; mod_load returned, which must be
+                                    ; passed back to mod_release
+                                    ; unchanged (see lib/modload.asm)
 
                 public  batch_mod_active
-                public  batch_mod_saved_memtop
+                public  batch_mod_base
+                public  batch_mod_reserve_size
 
             endp
 

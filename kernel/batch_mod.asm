@@ -1,6 +1,6 @@
 ;
-; batch_mod.asm - loadable batch-script module (phase 1: fixed load
-; address, no relocation)
+; batch_mod.asm - loadable batch-script module (phase 2: genuinely
+; relocatable, loads wherever lib/modload.asm's mod_load can find room)
 ;
 ; NOT part of kernel.bin -- assembled and linked entirely separately,
 ; landing on disk as /bin/batch.mod. Loaded into RAM by the kernel's
@@ -9,18 +9,20 @@
 ; a .bat script needs to run, freshly on every single K_BATCH_START --
 ; this file is never itself resident in the permanent kernel image.
 ;
-; PHASE 1 DESIGN (test-machine-only, NOT for release): this module
-; always loads to the same fixed, compile-time address, BATCHMOD_BASE
-; ($D000, see include/batchmod.inc). Because that address is baked in
-; at assemble time -- exactly like any ordinary progs/*.asm's own
-; "org PROG_BASE" -- every internal branch and data reference here is
-; a plain absolute address, resolved normally by the assembler/linker.
-; No relocation fixups, no RB-relative addressing, nothing novel.
-; PHASE 2 (not started) will make this genuinely relocatable so it can
-; adapt to whatever RAM a real target system actually has; until then,
-; this only works on a machine with enough RAM above BATCHMOD_BASE (the
-; kernel-side loader checks this before ever touching $D000 -- see
-; kernel/batch.asm's own batch_mod_load).
+; PHASE 2 DESIGN (2026-07-31, supersedes the original fixed-$D000
+; Phase 1): built `org $0000` and linked with Link/02's own "-m"
+; module output mode (see the project's own design plan and
+; lib/modload.asm's header for the full mechanism) -- every internal
+; branch/call/data reference here is expressed relative to address 0,
+; and gets fixed up once at LOAD time by lib/modload.asm's mod_load,
+; not baked in at build time the way Phase 1's fixed BATCHMOD_BASE
+; was. This is what makes the module adapt to whatever RAM a real
+; target system actually has, rather than only working on a machine
+; with room free above a hardcoded address. The kernel-side dispatcher
+; (kernel/batch.asm) now calls mod_load/mod_release instead of doing
+; its own fixed-address bounds check, and reaches this module's own
+; entry points via lib/icall.asm's indirect call (module_base is only
+; known at runtime) instead of a plain LBR to a compile-time constant.
 ;
 ; What moved here from kernel/batch.asm (2026-07-30): batch_start,
 ; batch_readline, batch_goto, and their own private data (batch_fcb,
@@ -62,25 +64,72 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 #include    include/batchmod.inc
+#include    include/modformat.inc
 
 BATCH_GOTO_LABEL_LEN: equ 32   ; generous headroom for a label name
 
-            org     BATCHMOD_BASE
+; Restructured into real proc/endp blocks (2026-07-31, Phase 2) --
+; Phase 1 was flat (progs-style), which worked fine for a fixed
+; compile-time address, but Link/02's own relocation/fixup machinery
+; (both the pre-existing -r short-branch relaxation and the new -m
+; module output mode this Phase depends on) only ever tracks
+; references that cross a proc boundary -- a flat file's own internal
+; branches/calls are fully resolved by Asm/02 itself at assemble time,
+; with nothing left for Link/02 to fix up at load time. Confirmed
+; directly: an early build of this exact restructuring, still flat,
+; linked with "-m" and reported zero fixups for the whole module --
+; not because there was nothing to relocate, but because nothing was
+; ever being tracked as relocatable in the first place. Every routine
+; here is now its own proc; the shared data lives in its own data
+; proc, matching kernel/*.asm's own established convention (and
+; CLAUDE.md gotcha #20's warning against bare top-level content mixed
+; with proc/endp blocks in the same file).
+            extrn   batch_start
+            extrn   batch_readline
+            extrn   batch_goto
+            extrn   batch_fcb
+            extrn   batch_iobuf
+            extrn   batch_scratch
+            extrn   brl_count
+            extrn   batch_goto_label
+
+            org     0
+
+            proc    _batchmod_header
 
 batchmod_header:
-            db      'B','M','D'         ; batch-module magic (distinct
-                                        ; from 'EDF' -- never runnable
-                                        ; as an ordinary program)
-            db      1                   ; module version
-            dw      0                   ; reserved
+            db      MOD_MAGIC0, MOD_MAGIC1, MOD_MAGIC2  ; distinct from
+                                        ; both 'EDF' (never runnable as
+                                        ; an ordinary program) and
+                                        ; Phase 1's own 'BMD' (the
+                                        ; on-disk FORMAT changed --
+                                        ; Phase 1 has no code_size
+                                        ; field and no trailing fixup
+                                        ; table, so a loader for one
+                                        ; format must never
+                                        ; misinterpret the other)
+            db      MOD_VERSION
+            dw      0                   ; code_size -- patched directly
+                                        ; into the output file by
+                                        ; Link/02's own "-m" mode (see
+                                        ; include/modformat.inc); this
+                                        ; source-level placeholder is
+                                        ; never the real value
 
-; Fixed-offset entry table (BATCHMOD_BASE+MOD_START_OFF/READLINE_OFF/
-; GOTO_OFF, include/batchmod.inc) -- insulates the kernel-side
+; Fixed-offset entry table (module_base+MOD_START_OFF/READLINE_OFF/
+; GOTO_OFF, include/batchmod.inc, unchanged from Phase 1 -- the header
+; is still exactly MOD_HEADER_LEN=6 bytes) -- insulates the kernel-side
 ; dispatcher's own fixed-offset calls from this module's real internal
-; layout shifting on a rebuild. See this file's own header comment.
-                lbr     batch_start         ; BATCHMOD_BASE + $06
-                lbr     batch_readline      ; BATCHMOD_BASE + $09
-                lbr     batch_goto          ; BATCHMOD_BASE + $0C
+; layout shifting on a rebuild. Each entry is an ordinary LBR, fixed up
+; like any other internal reference at load time -- the dispatcher
+; reaches these via lib/icall.asm (module_base + MOD_*_OFF, computed at
+; runtime), not a direct call, since it can't know module_base at its
+; own compile time. See this file's own header comment.
+                lbr     batch_start         ; module_base + $06
+                lbr     batch_readline      ; module_base + $09
+                lbr     batch_goto          ; module_base + $0C
+
+            endp
 
 ;------------------------------------------------------------------
 ; batch_start: open a batch script for reading. Nesting is NOT
@@ -91,7 +140,8 @@ batchmod_header:
 ; Returns: DF = 0 on success, DF = 1 if the open itself failed.
 ; Modifies: whatever K_FILE_OPEN modifies
 ;------------------------------------------------------------------
-batch_start:
+            proc    batch_start
+
             mov     rd, batch_fcb       ; RD = our own FCB (RF, the
                                         ; incoming path argument, is
                                         ; untouched by this -- K_FILE_
@@ -116,6 +166,8 @@ bst_reject:
             stc
             rtn
 
+            endp
+
 ;------------------------------------------------------------------
 ; batch_readline: fetch the next line of the active batch script.
 ; Args:    none (uses batch_fcb)
@@ -126,7 +178,8 @@ bst_reject:
 ;          everything else that needs to happen on real batch-end).
 ; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
 ;------------------------------------------------------------------
-batch_readline:
+            proc    batch_readline
+
             mov     rf, brl_count
             ldi     0
             str     rf                  ; brl_count = characters written to
@@ -238,6 +291,8 @@ brl_ioerr:
             stc
             rtn
 
+            endp
+
 ;------------------------------------------------------------------
 ; batch_goto: reposition the active batch script to just after a
 ; labeled line -- see kernel_api.inc's own K_BATCH_GOTO doc comment
@@ -247,7 +302,8 @@ brl_ioerr:
 ; Modifies: everything (calls batch_readline repeatedly, which itself
 ;           has a broad footprint)
 ;------------------------------------------------------------------
-batch_goto:
+            proc    batch_goto
+
             ; copy the label into this module's own resident memory
             ; FIRST, before anything below (K_FILE_SEEK, then
             ; batch_readline's own scan loop) can touch the caller's
@@ -347,9 +403,13 @@ bg_notfound:
             stc                         ; DF = 1
             rtn
 
+            endp
+
 ;------------------------------------------------------------------
 ; Module-private data
 ;------------------------------------------------------------------
+            proc    _batchmod_data
+
 batch_fcb:      ds      FCB_LEN
 batch_iobuf:    ds      FCB_IOBUF_LEN
 batch_scratch:  db      0           ; 1-byte read scratch for
@@ -362,5 +422,13 @@ batch_goto_label: ds    BATCH_GOTO_LABEL_LEN   ; batch_goto's own copy
                                     ; of the target label name, taken
                                     ; before its scan loop starts
                                     ; overwriting LINE_BUF
+
+                public  batch_fcb
+                public  batch_iobuf
+                public  batch_scratch
+                public  brl_count
+                public  batch_goto_label
+
+            endp
 
             end     batchmod_header

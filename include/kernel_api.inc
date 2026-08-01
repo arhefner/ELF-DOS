@@ -61,7 +61,7 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $4200       ; user programs load here (see kernel.inc;
+PROG_BASE:      equ     $4400       ; user programs load here (see kernel.inc;
                                     ; == KERN_LOAD in boot/mbr.asm by design --
                                     ; krnboot's own sector is dead once boot
                                     ; completes, so program loads reuse it)
@@ -606,6 +606,27 @@ K_FILE_SETATTR:     equ     $0179       ; -> file_setattr
 ;          target is "." or "..", or an I/O error writing the sector)
 K_FILE_TOUCH:       equ     $018E       ; -> file_touch
 
+; K_HIMEM_RESERVE/K_HIMEM_RELEASE (2026-07-31): general-purpose himem
+; reservation, exposed to ordinary programs for the first time. Thin
+; passthroughs to the kernel's own already-proven _himem_reserve/
+; _himem_release (kernel/redir.asm, used internally for years by I/O
+; redirection, glob expansion, and batch-args substitution) -- PURE
+; MECHANISM, unlike K_GLOB_RESERVE just above: no flag, no
+; idempotency, caller-supplied size, caller tracks its own reservation
+; state. First real consumer: lib/modload.asm's mod_load, which needs
+; a page-aligned region whose size varies per module.
+; K_HIMEM_RESERVE:
+;   Args:    RC = bytes to reserve
+;   Returns: DF = 0 on success, RD = this reservation's base address
+;            (mem_top + 1). DF = 1 if there isn't enough headroom
+;            (nothing changed).
+K_HIMEM_RESERVE:    equ     $0191       ; -> kernel_himem_reserve
+; K_HIMEM_RELEASE:
+;   Args:    RC = bytes to release (must match a caller's own prior
+;            successful K_HIMEM_RESERVE call)
+;   Returns: nothing
+K_HIMEM_RELEASE:    equ     $0194       ; -> kernel_himem_release
+
 ; GLOB_BUF_LEN: size of the reservation K_GLOB_RESERVE makes --
 ; progs/shell.asm's own glob-expansion pass budgets its writes against
 ; this so it never overruns the reserved region.
@@ -681,7 +702,7 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $0191 (this comment was stale at
+; next free jump-table slot address: $0197 (this comment was stale at
 ; $0179 before 2026-07-27 -- several entries had been appended above
 ; without updating it; kernel/kernel.asm's own trailing comment, right
 ; after the jump table itself, is the actual source of truth)

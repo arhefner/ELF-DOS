@@ -52,6 +52,8 @@
             extrn   file_stat
             extrn   file_setattr
             extrn   file_touch
+            extrn   kernel_himem_reserve
+            extrn   kernel_himem_release
             extrn   batch_start
             extrn   batch_readline
             extrn   batch_goto
@@ -287,7 +289,14 @@ k_dir_restore_state: lbr     dir_restore_state   ; $018B
 ; time to the current time, touching nothing else (2026-07-30) -- see
 ; kernel/file.asm's file_touch for the full design.
 k_file_touch:   lbr     file_touch          ; $018E
-                ; next free jump-table address: $0191
+
+; K_HIMEM_RESERVE/K_HIMEM_RELEASE: general-purpose himem reservation,
+; exposed to ordinary programs for the first time (2026-07-31) -- see
+; kernel/redir.asm's own kernel_himem_reserve/kernel_himem_release for
+; the full design. First real consumer: lib/modload.asm.
+k_himem_reserve: lbr    kernel_himem_reserve ; $0191
+k_himem_release: lbr    kernel_himem_release ; $0194
+                ; next free jump-table address: $0197
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
