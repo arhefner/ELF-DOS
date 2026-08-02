@@ -5568,12 +5568,20 @@ fwrite_copy_done:
             plo     r9                  ; R9 = this FCB's own I/O buffer
             mov     rf, r9
             call    f_idewrite
-            lbdf    fwrite_ioerr_cleanup2
-
+            ; consolidated (2026-08-01 size-reduction pass), same
+            ; reasoning as the f_ideread block above: the success
+            ; continuation right below and the old
+            ; fwrite_ioerr_cleanup2 label used to each carry their own
+            ; identical "pop rc/pop rb/pop ra/pop r7" -- POP never
+            ; touches DF, so f_idewrite's real DF result survives
+            ; these four pops unaffected regardless of which side of
+            ; the branch runs them. Popping once, unconditionally,
+            ; before the DF check collapses the duplicate.
             pop     rc
             pop     rb
             pop     ra
             pop     r7                  ; restore chunk (see BUG FIX note)
+            lbdf    fwrite_ioerr
 
             ; FCB_BOFF += chunk
             mov     rf, rb
@@ -5904,15 +5912,6 @@ fwrite_done:
             call    fwrite_calc_written
             clc                         ; DF = 0, success
             rtn
-
-fwrite_ioerr_cleanup2:
-            ; used only by the write-back block, which pushes one
-            ; extra register (R7 = chunk, see its BUG FIX note) that
-            ; the sector-cache-load block above doesn't
-            pop     rc
-            pop     rb
-            pop     ra
-            pop     r7
 
 fwrite_ioerr:
             call    fwrite_calc_written
