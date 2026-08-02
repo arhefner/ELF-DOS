@@ -40,32 +40,46 @@
 ; preemptive, made right after adding file creation/append/LFN-writing
 ; support pushed the kernel from $2245 to $2a27 in one session.
 ;
-; The move to $3E00 (2026-07-10) is different in kind: it's not a
-; growth response, it's reclaiming dead space. PROG_BASE used to sit
-; exactly one 512-byte sector above KERN_LOAD (boot/mbr.asm) --
-; krnboot's own load address -- leaving krnboot's sector ($3E00-$3FFF)
-; permanently unused by anything once boot completes (krnboot's own
-; header comment confirms this: "this code is only needed once and is
-; never called again after the jump to $0106"). Nothing in the kernel
-; or any program ever jumps back into that sector, so PROG_BASE can
-; simply BE KERN_LOAD now -- the first program load of any session
-; (the initial /bin/shell load in kernel_init's run_loop) overwrites
-; krnboot's dead bytes with real program code, for free. This also
-; collapses what used to be two separately-tracked boundaries (the
-; PROG_BASE margin and the KERN_LOAD margin) into a single address --
-; one fewer thing to check after future kernel growth, not just fewer
-; wasted bytes. If KERN_LOAD ever moves again (see boot/mbr.asm), this
-; must move with it, and vice versa; they are the same address by
-; design now, not by coincidence.
+; The move to $3E00 (2026-07-10) was different in kind: not a growth
+; response, but reclaiming dead space. PROG_BASE used to sit exactly
+; one 512-byte sector above KERN_LOAD (boot/mbr.asm) -- krnboot's own
+; load address -- leaving krnboot's sector permanently unused by
+; anything once boot completes (krnboot's own header comment confirms
+; this: "this code is only needed once and is never called again
+; after the jump to $0106"). Nothing in the kernel or any program ever
+; jumps back into that sector, so PROG_BASE became KERN_LOAD itself --
+; the first program load of any session overwrites krnboot's dead
+; bytes with real program code, for free. At the time, this was
+; treated as making them "the same address by design, not just
+; coincidence" -- collapsing two separately-tracked boundaries into
+; one.
 ;
-; Check the kernel's actual "Highest address" from a build against
-; this any time the kernel grows substantially, and move both PROG_BASE
-; and KERN_LOAD together (keeping kernel_api.inc's copy of PROG_BASE
-; and boot/mbr.asm's/boot/krnboot.asm's copies of KERN_LOAD/KERN_ENTRY
-; all in sync) well before it gets close. Note this trades directly
-; against RAM available to programs (mem_base..mem_top).
-PROG_BASE:      equ     $4400       ; user programs load here; == KERN_LOAD
-                                    ; (boot/mbr.asm) by design, see above
+; DECOUPLED AGAIN 2026-08-01: PROG_BASE and KERN_LOAD (boot/mbr.asm)
+; are ordinary, independently-defined constants -- an `equ` here and
+; a `#define` there -- with no assembler/linker mechanism actually
+; forcing them equal; "== KERN_LOAD" was always just a design choice,
+; not a requirement. Confirmed directly: kernel/loader.asm's own use
+; of PROG_BASE is fully symbolic (`high PROG_BASE`/`low PROG_BASE`,
+; no hardcoded literals to chase), and the krnboot-reclaim benefit
+; above doesn't depend on exact equality either -- any program larger
+; than the gap between the two addresses still spills into and
+; overwrites krnboot's dead sector exactly as before. Moved PROG_BASE
+; down to $4300 while leaving KERN_LOAD at $4400 completely untouched
+; (no boot/mbr.asm or boot/krnboot.asm changes, no MBR reinstall)
+; specifically to hand more RAM to programs (mem_base..mem_top) on
+; constrained systems (32K RAM machines were the explicit motivation)
+; -- the user's own call after a live tradeoff discussion: this
+; shrinks the KERNEL's own growth margin (PROG_BASE - Highest address,
+; 519->263 bytes at the time of this move) in exchange for program
+; RAM, so it works AGAINST headroom for a future kernel-side feature,
+; not for it. Check both margins independently from here on:
+; kernel's own "Highest address" against PROG_BASE (this file), and
+; the kernel's sector-rounded on-disk size against KERN_LOAD
+; (boot/mbr.asm) -- they are two separate checks again, not one.
+PROG_BASE:      equ     $4300       ; user programs load here -- a
+                                    ; separate address from KERN_LOAD
+                                    ; (boot/mbr.asm, still $4400) as
+                                    ; of 2026-08-01, see above
 
 ; $0080-$00FF: the ROM's small boot-time stack lives here (see
 ; boot/mbr.asm) but is dead once the kernel sets up its own stack at
