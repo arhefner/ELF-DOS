@@ -911,13 +911,16 @@ rmsg_scandone:
             ldn     ra
             plo     rd                  ; RD = the FCB pointer
             call    file_write
-
-            pop     ra
-            pop     rc
-            pop     rf
-            rtn
+            lbr     rmsg_popret
 
 rmsg_discard:
+            lbr     rmsg_popret
+
+            ; shared pop+return tail (2026-08-01 size-reduction pass),
+            ; same reasoning as _redir_type's own rty_popret above --
+            ; neither the success path nor rmsg_discard needs anything
+            ; to survive from its own branch point into this tail.
+rmsg_popret:
             pop     ra
             pop     rc
             pop     rf
