@@ -193,7 +193,15 @@ start:
             ldn     rf
             plo     rd                  ; RD = mem_base
             mov     rf, LOADER_ARGS
-            add16   rf, 2
+            inc     rf                  ; +2 via two INCs (2026-08-01
+                                        ; size-reduction pass): cheaper
+                                        ; than ADD16 reg,2's 8-byte
+                                        ; macro expansion, and DF isn't
+                                        ; needed from it here (the very
+                                        ; next instruction is "lda rf",
+                                        ; which reloads D from memory
+                                        ; regardless)
+            inc     rf
             lda     rf
             phi     r8
             ldn     rf
@@ -967,7 +975,13 @@ ls_store_ptr:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 2
+            inc     rd                  ; +2 via two INCs (2026-08-01
+                                        ; size-reduction pass, same
+                                        ; reasoning as the LOADER_ARGS
+                                        ; +2 above -- the next real use
+                                        ; of RD is a fresh ghi/str, so
+                                        ; DF isn't needed from here)
+            inc     rd
             mov     rf, ls_next_ptrslot
             ghi     rd
             str     rf
@@ -993,7 +1007,7 @@ ls_store_ptr:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 1
+            inc     rd                  ; +1 (2026-08-01 size-reduction pass: INC is 1 byte, no D-clobber, vs ADD16's 8-byte macro -- DF not needed here)
             mov     rf, ls_count
             ghi     rd
             str     rf
@@ -1403,7 +1417,7 @@ ls_sort_inner_go:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = m
-            sub16   rd, 1               ; RD = m-1
+            dec     rd                  ; RD = m-1
             shl16   rd                  ; RD = (m-1)*2
             mov     rf, ls_ptrs
             add16   rf, rd              ; RF = &ls_ptrs[m-1]
@@ -1459,7 +1473,7 @@ ls_sort_inner_go:
             phi     rd
             ldn     rf
             plo     rd
-            sub16   rd, 1
+            dec     rd                  ; -1 (2026-08-01 size-reduction pass: DEC is 1 byte vs SUB16's 8-byte macro -- DF not needed here)
             mov     rf, ls_sort_m
             ghi     rd
             str     rf
@@ -1494,7 +1508,7 @@ ls_sort_inner_place:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 1
+            inc     rd                  ; +1 (2026-08-01 size-reduction pass: INC is 1 byte, no D-clobber, vs ADD16's 8-byte macro -- DF not needed here)
             mov     rf, ls_sort_i
             ghi     rd
             str     rf
@@ -1582,7 +1596,7 @@ ls_trycols_loop:
             ldn     rf
             plo     rc                  ; RC = candidate
             add16   rd, rc
-            sub16   rd, 1               ; RD = ls_count+candidate-1
+            dec     rd                  ; RD = ls_count+candidate-1
             call    ls_div              ; RD = RD / RC (RC preserved)
             mov     rb, ls_numrows
             ghi     rd
@@ -1732,7 +1746,7 @@ ls_colrow_next:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 1
+            inc     rd                  ; +1 (2026-08-01 size-reduction pass: INC is 1 byte, no D-clobber, vs ADD16's 8-byte macro -- DF not needed here)
             mov     rf, ls_colrow
             ghi     rd
             str     rf
@@ -1804,7 +1818,7 @@ ls_colrow_done:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 1
+            inc     rd                  ; +1 (2026-08-01 size-reduction pass: INC is 1 byte, no D-clobber, vs ADD16's 8-byte macro -- DF not needed here)
             mov     rf, ls_colbase_i
             ghi     rd
             str     rf
@@ -1855,7 +1869,7 @@ ls_trycols_done:
             phi     rd
             ldn     rf
             plo     rd
-            sub16   rd, 1
+            dec     rd                  ; -1 (2026-08-01 size-reduction pass: DEC is 1 byte vs SUB16's 8-byte macro -- DF not needed here)
             mov     rf, ls_trycols
             ghi     rd
             str     rf
@@ -2081,7 +2095,7 @@ ls_col_next:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 1
+            inc     rd                  ; +1 (2026-08-01 size-reduction pass: INC is 1 byte, no D-clobber, vs ADD16's 8-byte macro -- DF not needed here)
             mov     rf, ls_col
             ghi     rd
             str     rf
@@ -2100,7 +2114,7 @@ ls_row_end:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 1
+            inc     rd                  ; +1 (2026-08-01 size-reduction pass: INC is 1 byte, no D-clobber, vs ADD16's 8-byte macro -- DF not needed here)
             mov     rf, ls_row
             ghi     rd
             str     rf
@@ -2403,7 +2417,7 @@ ls_long_count_done:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 1
+            inc     rd                  ; +1 (2026-08-01 size-reduction pass: INC is 1 byte, no D-clobber, vs ADD16's 8-byte macro -- DF not needed here)
             mov     rf, ls_row
             ghi     rd
             str     rf
@@ -2487,7 +2501,7 @@ ls_div_loop:
             lbnf    ls_div_done         ; RD < RC: done
 
             sub16   rd, rc
-            add16   r9, 1
+            inc     r9                  ; +1 (2026-08-01 size-reduction pass, same reasoning)
             lbr     ls_div_loop
 
 ls_div_done:
@@ -3315,8 +3329,13 @@ lfh_rp_plain:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = whole
-            add16   rd, 1               ; immediate-form add16,
-                                        ; gotcha #18-safe
+            inc     rd                  ; +1 (2026-08-01 size-reduction
+                                        ; pass: INC is a native 1-byte
+                                        ; 16-bit register increment --
+                                        ; strictly cheaper than ADD16
+                                        ; reg,1's 8-byte macro, and
+                                        ; touches no memory at all, so
+                                        ; gotcha #18 doesn't even apply)
             mov     rf, ls_human_whole
             ghi     rd
             str     rf
