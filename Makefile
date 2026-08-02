@@ -291,6 +291,10 @@ test/bin/big64test: test/big64test.prg lib/fmt32.prg | test/bin
 	$(LINK) $(LFLAGS) -o test/bin/big64test test/big64test.prg lib/fmt32.prg
 	rm -f test/bin/big64test.lkb
 
+test/bin/corrupt: test/corrupt.prg lib/ymodem.prg lib/fmt32.prg | test/bin
+	$(LINK) $(LFLAGS) -o test/bin/corrupt test/corrupt.prg lib/ymodem.prg lib/fmt32.prg
+	rm -f test/bin/corrupt.lkb
+
 bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg | bin
 	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg
 	rm -f bin/ls.lkb
