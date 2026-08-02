@@ -272,17 +272,16 @@ brl_eof:
             ldn     rf
             lbnz    brl_term
 
-            mov     rd, batch_fcb
-            call    K_FILE_CLOSE
-            mov     rf, batch_fcb
-            ldi     0
-            str     rf                  ; FCB_FLAGS = 0
-            stc                         ; DF = 1: no line
-            rtn
-
 brl_ioerr:
             ; a real I/O error mid-batch: treat the same as EOF --
-            ; close, clear state, report "no line"
+            ; close, clear state, report "no line". Reached both from
+            ; a genuine K_FILE_READ error (via the lbdf above) and by
+            ; falling straight through from brl_eof's own zero-count
+            ; case immediately above (2026-08-01 size-reduction pass:
+            ; both used to carry this exact 7-instruction tail
+            ; verbatim -- hoisted into one shared copy, reached by
+            ; fallthrough from one caller and an explicit lbdf from
+            ; the other, with no behavior change).
             mov     rd, batch_fcb
             call    K_FILE_CLOSE
             mov     rf, batch_fcb
