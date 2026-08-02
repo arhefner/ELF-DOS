@@ -1217,17 +1217,29 @@ kim_restore:
             ldn     rf
             plo     r7                  ; stash the result -- the pops
                                         ; below clobber D
+            lbr     rrd_popret
+
+rrd_eof:
+            ldi     0
+            plo     r7                  ; stash "0" the same way the
+                                        ; success path stashes its real
+                                        ; byte, so both can share one
+                                        ; physical pop+return tail
+                                        ; (2026-08-01 size-reduction
+                                        ; pass) -- rrd_console below is
+                                        ; NOT folded in here, since its
+                                        ; own tail ends in a jump to
+                                        ; f_read rather than a plain
+                                        ; return with R7's value in D
+            lbr     rrd_popret
+
+            ; shared pop+return tail: both the success path and
+            ; rrd_eof stash their D value into R7 before arriving here
+rrd_popret:
             pop     ra
             pop     rc
             pop     rf
             glo     r7
-            rtn
-
-rrd_eof:
-            pop     ra
-            pop     rc
-            pop     rf
-            ldi     0
             rtn
 
 rrd_console:
