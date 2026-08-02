@@ -5421,11 +5421,22 @@ fwrite_have_more:
             plo     r9                  ; R9 = this FCB's own I/O buffer
             mov     rf, r9
             call    f_ideread
-            lbdf    fwrite_ioerr_cleanup
-
+            ; consolidated (2026-08-01 size-reduction pass): the
+            ; success continuation right below and the old
+            ; fwrite_ioerr_cleanup label used to each carry their own
+            ; identical "pop rc/pop rb/pop ra" -- POP's own macro
+            ; expansion (IRX/LDXA/PLO/LDX/PHI) never touches DF, so
+            ; f_ideread's real DF result survives these three pops
+            ; completely unaffected regardless of which side of the
+            ; branch they run on. Popping once, unconditionally, right
+            ; here -- before checking DF at all -- is behaviorally
+            ; identical to the old duplicated-both-ways form, and lets
+            ; the failure case lbdf straight to fwrite_ioerr with no
+            ; separate cleanup label needed.
             pop     rc
             pop     rb
             pop     ra
+            lbdf    fwrite_ioerr
             mov     rf, rb              ; RF -> FCB_FLAGS
             ldn     rf
             ori     FCB_F_IOVALID
@@ -5893,12 +5904,6 @@ fwrite_done:
             call    fwrite_calc_written
             clc                         ; DF = 0, success
             rtn
-
-fwrite_ioerr_cleanup:
-            pop     rc
-            pop     rb
-            pop     ra
-            lbr     fwrite_ioerr
 
 fwrite_ioerr_cleanup2:
             ; used only by the write-back block, which pushes one
