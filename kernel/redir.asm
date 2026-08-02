@@ -821,13 +821,22 @@ rt_release_done:
                                         ; via RA scratch, leaving RF/RC
                                         ; untouched)
             call    file_write
-
-            pop     ra
-            pop     rc
-            pop     rf
-            rtn
+            lbr     rty_popret
 
 rty_discard:
+            lbr     rty_popret
+
+            ; shared pop+return tail (2026-08-01 size-reduction pass):
+            ; the success path (after file_write) and rty_discard used
+            ; to each carry their own identical "pop ra/pop rc/pop rf/
+            ; rtn" -- neither one needs D or any other register to
+            ; survive from its own branch point into this tail (the
+            ; success path's file_write result is unexamined by every
+            ; caller, matching this proc's own header; rty_discard sets
+            ; nothing at all before jumping here), so hoisting the
+            ; duplicate into one physical copy, reached via lbr from
+            ; both, changes no observable behavior.
+rty_popret:
             pop     ra
             pop     rc
             pop     rf
