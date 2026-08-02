@@ -255,6 +255,10 @@ bin/stat: progs/stat.prg lib/fmt32.prg | bin
 	$(LINK) $(LFLAGS) -o bin/stat progs/stat.prg lib/fmt32.prg
 	rm -f bin/stat.lkb
 
+bin/chkdsk: progs/chkdsk.prg lib/fmt32.prg | bin
+	$(LINK) $(LFLAGS) -o bin/chkdsk progs/chkdsk.prg lib/fmt32.prg
+	rm -f bin/chkdsk.lkb
+
 bin/printenv: progs/printenv.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/printenv progs/printenv.prg lib/env.prg
 	rm -f bin/printenv.lkb
