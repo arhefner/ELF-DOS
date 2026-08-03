@@ -122,11 +122,25 @@ start:
             lbnf    usage
 have_argc:
             call    crp_argv1           ; RF = argv[1] (mode string)
-            mov     r9, rf              ; stash across the read_bpb/
-                                        ; getcurdir calls below
+            mov     rb, crp_mode_ptr    ; RB = dest pointer -- RF must keep
+                                        ; holding the value being stored
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb
 
-            call    crp_read_bpb
-
+            ; K_GETCURDIR must run BEFORE crp_read_bpb, not after --
+            ; K_GETCURDIR internally calls _switch_drive(cur_drive),
+            ; which is what actually guarantees the active BPB matches
+            ; cur_drive. Nothing else does this automatically between
+            ; commands, so calling crp_read_bpb first (the original,
+            ; buggy order) could read whatever drive's BPB was last
+            ; left active (e.g. wherever /bin/corrupt itself was
+            ; loaded from) while crp_parent below still correctly named
+            ; cur_drive's own directory -- a mismatched combination
+            ; that scans the wrong sectors and reports every real file
+            ; as not found.
             call    K_GETCURDIR         ; RD = active drive's cur dir
                                         ; cluster (0 = root)
             mov     rf, crp_parent
@@ -135,6 +149,15 @@ have_argc:
             inc     rf
             glo     rd
             str     rf
+
+            call    crp_read_bpb        ; now reads the BPB K_GETCURDIR
+                                        ; just activated
+
+            mov     rf, crp_mode_ptr    ; reload the mode string pointer
+            lda     rf                  ; fresh -- R9 does not survive
+            phi     r9                  ; either K_GETCURDIR or
+            ldn     rf                  ; crp_read_bpb above (both use
+            plo     r9                  ; R9 as their own scratch)
 
             mov     rf, r9              ; RF = mode string again
             mov     rd, crp_mode_size
@@ -1556,6 +1579,15 @@ crp_mode_trunc:     db      "TRUNC",0
 crp_mode_badsector: db      "BADSECTOR",0
 
 crp_parent:             ds  2
+crp_mode_ptr:           ds  2       ; argv[1] (mode string) pointer, stashed
+                                    ; here (not a register) across the
+                                    ; crp_read_bpb/K_GETCURDIR calls below --
+                                    ; K_GETCURDIR internally calls
+                                    ; _switch_drive, whose documented
+                                    ; clobber list includes R9
+                                    ; (kernel/kernel.asm), so a register
+                                    ; stash silently fed garbage into every
+                                    ; mode-word comparison below it.
 crp_target:             ds  11
 crp_saved:              ds  11
 crp_found_lba:          ds  3
