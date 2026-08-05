@@ -800,7 +800,8 @@ crp_read_bpb:
 ; (itself a userland mirror of kernel/dir.asm's _cluster_to_lba).
 ; Args:    RD = cluster number (>= 2)
 ; Returns: R7/R8 set for K_SECREAD/K_SECWRITE
-; Modifies: R7, R8, RA, RC, RD, RF (and D)
+; Modifies: R7, R8, RC, RD, RF (and D) -- NOT RA (stale in an earlier
+; draft; the real body below never touches it)
 ;------------------------------------------------------------------
 crp_cluster_to_lba:
             dec     rd
@@ -1147,8 +1148,29 @@ cf_name_cmp:
             glo     r7
             lbnz    cf_name_cmp
 
-            ; match -- record this entry's own location
-            mov     rf, crp_dpb_lba
+            ; match -- record this entry's own location. THE BUG (found
+            ; 2026-08-04 from real hardware reports: SIZE/LOST/XLINK/
+            ; DUPNAME's writes were verifiably correct via an
+            ; immediate readback, yet invisible to CHKDSK, and later
+            ; showed up as a genuine duplicate directory entry under
+            ; fsck): this used to copy crp_dpb_lba here directly -- but
+            ; crp_dpb_lba is the "which sector to read NEXT" pointer,
+            ; already advanced past whatever sector crp_secbuf holds
+            ; by the time crp_read_next_dir_sector returns (see its
+            ; own crp_last_read_lba comment). For any match found
+            ; without a further crp_read_next_dir_sector call in
+            ; between (true whenever the match isn't the very first
+            ; entry examined after crossing into a new sector) this
+            ; silently recorded the NEXT sector's address instead of
+            ; the one the match was actually found in. Every write via
+            ; crp_write_found_sector then landed one sector past the
+            ; real entry -- a sector that, right after a fresh format,
+            ; was still empty, so the write created a brand-new,
+            ; previously-unused duplicate of the whole 512-byte
+            ; sector's worth of entries rather than editing the real
+            ; one. Fixed by using crp_last_read_lba (the sector
+            ; crp_secbuf was ACTUALLY just read from) instead.
+            mov     rf, crp_last_read_lba
             mov     r8, crp_found_lba
             lda     rf
             str     r8
@@ -1331,10 +1353,27 @@ cidw_subdir_init:
             ; LSB-first for correct carry propagation. Reading and
             ; adding in the SAME (MSB-first, sequential-read) order,
             ; as this exact block's first draft did, silently adds
-            ; each byte to the WRONG bit-significance position (found
-            ; by re-deriving this against progs/chkdsk.asm's own
-            ; already-proven chk_cluster_to_lba tail, which stages
-            ; into RA.1/RC.1/D for exactly this reason).
+            ; each byte to the WRONG bit-significance position.
+            ; Staged in RD.1/RB.1, NOT RA.1/RC.1 (the shape this was
+            ; originally hand-traced from, progs/chkdsk.asm's own
+            ; chk_cluster_to_lba tail) -- RA/RC there are dead scratch
+            ; by this point (chkdsk only ever reads its one argument
+            ; at program startup), but in THIS program RA/RC are the
+            ; live argv/argc registers, needed for every later
+            ; crp_argv1/2/3 call. Using them as scratch here silently
+            ; corrupted RA.1 (and RC.1) on every crp_find call,
+            ; breaking any argv fetch AFTER the first crp_find in a
+            ; subdirectory -- exactly what broke XLINK/DUPNAME's
+            ; second name lookup, and could have silently fed a wrong
+            ; value to any OTHER mode's own post-crp_find argv3 fetch
+            ; (SIZE's newsize, TRUNC/BADSECTOR's hops) without ever
+            ; erroring, since a numeric parse of garbage just produces
+            ; some number rather than a visible failure. RD/RB are
+            ; both genuinely dead here: RD only ever held the cluster
+            ; number crp_cluster_to_lba itself already destroyed
+            ; (dec rd, dec rd, at its own top) with nothing after this
+            ; block reading it again, and RB is free the moment its
+            ; own value is copied into R9 a few lines above.
             mov     r9, BPB_DATA_PTR
             lda     r9
             phi     rb
@@ -1343,9 +1382,9 @@ cidw_subdir_init:
             mov     r9, rb
             add16   r9, BPBBLK_DATA_LBA
             lda     r9                  ; D = DATA_LBA bits 23-16
-            phi     ra
+            phi     rd
             lda     r9                  ; D = DATA_LBA bits 15-8
-            phi     rc
+            phi     rb
             ldn     r9                  ; D = DATA_LBA bits 7-0
 
             str     r2
@@ -1353,13 +1392,13 @@ cidw_subdir_init:
             add
             plo     r7
 
-            ghi     rc
+            ghi     rb
             str     r2
             ghi     r7
             adc
             phi     r7
 
-            ghi     ra
+            ghi     rd
             str     r2
             glo     r8
             adc
@@ -1408,6 +1447,24 @@ crp_read_next_dir_sector:
             mov     rf, crp_secbuf
             call    K_SECREAD
             lbdf    crnds2_eof
+
+            ; snapshot the sector actually just read -- crp_dpb_lba
+            ; itself is about to be advanced to the NEXT sector
+            ; (crp_lba_inc, below) before this routine returns, so it
+            ; no longer describes crp_secbuf's own content by the time
+            ; a caller further up (crp_find's match code) needs to
+            ; know where the entry it just found in crp_secbuf really
+            ; lives
+            mov     rf, crp_dpb_lba
+            mov     r8, crp_last_read_lba
+            lda     rf
+            str     r8
+            inc     r8
+            lda     rf
+            str     r8
+            inc     r8
+            ldn     rf
+            str     r8
 
             mov     r7, crp_dpb_root_sector_idx
             lda     r7
@@ -1472,7 +1529,9 @@ crnds2_check_eoc:
             ; DATA_LBA is 3 bytes, big-endian -- stage all 3 into temp
             ; registers before adding, then add LSB-first for correct
             ; carry propagation (same fix, same reasoning, as
-            ; crp_init_dir_walk's own identical block above)
+            ; crp_init_dir_walk's own identical block above -- staged
+            ; in RD.1/RB.1, NOT RA.1/RC.1, since RA/RC hold this
+            ; program's live argv/argc and must survive this call)
             mov     r9, BPB_DATA_PTR
             lda     r9
             phi     rb
@@ -1481,9 +1540,9 @@ crnds2_check_eoc:
             mov     r9, rb
             add16   r9, BPBBLK_DATA_LBA
             lda     r9                  ; D = DATA_LBA bits 23-16
-            phi     ra
+            phi     rd
             lda     r9                  ; D = DATA_LBA bits 15-8
-            phi     rc
+            phi     rb
             ldn     r9                  ; D = DATA_LBA bits 7-0
 
             str     r2
@@ -1491,13 +1550,13 @@ crnds2_check_eoc:
             add
             plo     r7
 
-            ghi     rc
+            ghi     rb
             str     r2
             ghi     r7
             adc
             phi     r7
 
-            ghi     ra
+            ghi     rd
             str     r2
             glo     r8
             adc
@@ -1526,6 +1585,20 @@ crnds2_read:
             mov     rf, crp_secbuf
             call    K_SECREAD
             lbdf    crnds2_eof
+
+            ; snapshot the sector actually just read -- see the
+            ; matching comment in the root-directory path above for
+            ; why (crp_dpb_lba is about to be advanced past it)
+            mov     rf, crp_dpb_lba
+            mov     r8, crp_last_read_lba
+            lda     rf
+            str     r8
+            inc     r8
+            lda     rf
+            str     r8
+            inc     r8
+            ldn     rf
+            str     r8
 
             mov     rf, crp_dpb_sector_in_cluster
             ldn     rf
@@ -1614,6 +1687,18 @@ crp_dpb_root_sectors:       ds  2
 crp_dpb_cluster:            ds  2
 crp_dpb_sector_in_cluster:  ds  1
 crp_dpb_lba:                ds  3
+crp_last_read_lba:          ds  3       ; the sector crp_secbuf was
+                                        ; ACTUALLY just read from --
+                                        ; crp_dpb_lba itself gets
+                                        ; advanced to the NEXT sector
+                                        ; (crp_lba_inc) immediately
+                                        ; after every read, before
+                                        ; crp_read_next_dir_sector
+                                        ; even returns, so it no
+                                        ; longer describes crp_secbuf's
+                                        ; own content by the time
+                                        ; crp_find's caller finds a
+                                        ; match within it
 
 crp_walk_current:       ds  2
 crp_walk_remaining:     ds  2
