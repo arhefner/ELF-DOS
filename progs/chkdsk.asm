@@ -826,9 +826,27 @@ mc_already_set:
 ; chk_walk_chain: walk a FAT16 cluster chain starting at the given
 ; cluster, marking every visited cluster in the "seen" bitmap
 ; (cross-link detection is a side effect of chk_mark_cluster) and
-; accumulating byte-capacity. Bounded by max_clust+1 hops -- a real
-; chain cannot legitimately need more, which defends against a
-; corrupt, self-looping chain hanging the scan forever.
+; accumulating byte-capacity. Bounded by max_clust hops -- valid
+; clusters run 2..max_clust inclusive, so a real, non-cyclic chain can
+; never legitimately need more than (max_clust-1) hops; using
+; max_clust itself (not max_clust+1) leaves one hop of slack while
+; still defending against a corrupt, self-looping chain hanging the
+; scan forever.
+;
+; BUG FIX (2026-08-02): this used to compute the bound as "max_clust +
+; 1" -- which silently OVERFLOWS to 0 in the 16-bit chk_wc_remaining
+; counter whenever max_clust is itself already $FFFF, the maximum
+; representable 16-bit value (a real, legitimate case: a near-maximal
+; FAT16 volume with spc=16 can genuinely reach max_clust=65535).
+; Confirmed on hardware (2026-08-02): every single chk_walk_chain call
+; hit "Cluster chain too long" with hops=0 -- the remaining-hops check
+; at the top of the loop saw 0 on its very first read, before a single
+; cluster was ever visited or marked "seen" -- on a volume fsck.fat had
+; just independently confirmed clean. Fixed by dropping the +1
+; entirely: max_clust alone is still provably >= the true maximum
+; possible chain length (max_clust-1), so no headroom is lost, and the
+; bound can never overflow since max_clust is already representable in
+; the same 16-bit width by construction.
 ;
 ; Args:    RD = start cluster
 ; Returns: DF = 0 if the chain ended normally (EOC), with results in
@@ -868,8 +886,11 @@ chk_walk_chain:
             lda     rf
             phi     r9
             ldn     rf
-            plo     r9                  ; R9 = max_clust
-            add16   r9, 1               ; R9 = max_clust + 1
+            plo     r9                  ; R9 = max_clust (used directly
+                                        ; as the bound -- see the BUG
+                                        ; FIX note above; no "+1", which
+                                        ; overflowed to 0 for a real
+                                        ; max_clust=$FFFF volume)
             mov     rf, chk_wc_remaining
             ghi     r9
             str     rf
@@ -2364,13 +2385,40 @@ cbis_notset:
 ; Returns: nothing
 ; Modifies: everything (R7-RD) -- treat as fully clobbering
 ;------------------------------------------------------------------
+; BUG FIX (2026-08-02): chk_fscan_cluster used to start at 2 (skipping
+; the two reserved clusters up front) while chk_fscan_entry_idx (the
+; byte-offset index into whichever FAT sector is currently loaded)
+; always starts/resets at 0 -- since the two counters only ever
+; increment together, by exactly 1 each, this left them permanently
+; offset by a constant +2 for the ENTIRE scan, not just near a
+; boundary: at every point, chk_fscan_cluster's own reported value was
+; 2 MORE than the real cluster whose FAT entry was actually being
+; decoded (algebraically: entry_idx = t mod 256, sector_idx = t div
+; 256, so sector_idx*256+entry_idx == t exactly, while cluster == t+2
+; -- confirmed via a mechanical simulation across the full 16-bit
+; range before trusting this). Confirmed on hardware (2026-08-02): a
+; drive with exactly one real entry (a single-cluster subdirectory at
+; cluster 3, correctly visited and marked "seen" by the tree walk)
+; still reported "Lost cluster: 2" (really decoding cluster 0's own
+; always-nonzero reserved FAT entry, mislabeled) and "Lost cluster: 5"
+; (really decoding cluster 3's own entry -- correctly allocated -- but
+; checking the "seen" bitmap under the WRONG label, 5, which was never
+; marked). Fixed by tracking cluster from 0 (perfectly in lockstep
+; with entry_idx, offset always 0) and explicitly skipping/never
+; reporting on the two reserved cluster numbers (0, 1) via a dedicated
+; check inside cfsl_entry_loop below, rather than trying to start the
+; two counters at a mismatched offset.
 chk_fat_scan_lost:
             mov     rf, chk_fscan_cluster
             ldi     0
             str     rf
             inc     rf
-            ldi     2
-            str     rf                  ; cluster = 2
+            str     rf                  ; cluster = 0 (tracked in
+                                        ; lockstep with entry_idx from
+                                        ; here on -- clusters 0/1 are
+                                        ; explicitly skipped below,
+                                        ; not by starting at a
+                                        ; mismatched offset)
 
             mov     r7, chk_fat_lba
             mov     r8, chk_dpb_lba
@@ -2441,6 +2489,20 @@ cfsl_entry_loop:
             sub16   r7, r9              ; DF=1 if max_clust >= cluster
             lbnf    cfsl_done
 
+            ; clusters 0 and 1 are reserved (not real allocatable
+            ; clusters) -- R9 still holds cluster fresh from above
+            ; (SUB16's register-register form only ever writes back
+            ; into its FIRST operand, confirmed against every other
+            ; use of this idiom in this file, so R9 is untouched by
+            ; the check just above). Skip decoding/reporting for them
+            ; entirely rather than special-casing an initial offset.
+            ghi     r9
+            lbnz    cfsl_decode         ; cluster >= 256: can't be < 2
+            glo     r9
+            smi     2
+            lbnf    cfsl_entry_done     ; cluster is 0 or 1: skip
+
+cfsl_decode:
             ; decode this entry (little-endian on disk)
             mov     r7, chk_fscan_entry_idx
             lda     r7
