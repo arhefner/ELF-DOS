@@ -422,6 +422,40 @@ batch_goto_label: ds    BATCH_GOTO_LABEL_LEN   ; batch_goto's own copy
                                     ; before its scan loop starts
                                     ; overwriting LINE_BUF
 
+; REAL BUG FOUND AND FIXED (2026-08-18, batch-hang investigation):
+; batch_goto_label, being the module's own LAST declared field and a
+; "ds" (uninitialized) region, was never counted in Link/02's own
+; "highest address" tracking -- that tracking only ever counts bytes
+; actually WRITTEN to memory[], and a trailing ds never writes
+; anything. Since Link/02's "-m" (module) mode computes code_size as
+; highest-lowest+1, this meant code_size silently stopped 32 bytes
+; (BATCH_GOTO_LABEL_LEN) short of the module's own real footprint --
+; confirmed by direct byte-decode of a rebuilt bin/batch.mod's own
+; 6-byte header (code_size=0x036b, exactly batch_goto_label's own
+; start address, not its end).
+;
+; This matters because mod_load's own reservation is code_size +
+; MOD_RESERVE_PAD (255, meant ONLY to cover page-alignment slack, per
+; its own header comment -- not to cover missing module data). The
+; actual usable space beyond code_size after page-alignment varies
+; from 0 to 255 bytes depending on mem_top's own low byte at the exact
+; moment of reservation (0 in the worst case, when mem_top+1's low
+; byte is 1). In that worst case, batch_goto_label's own 32-byte
+; buffer would land entirely OUTSIDE the reserved himem region,
+; silently corrupting whatever real RAM sits just above it -- and
+; since that worst case depends on mem_top's own value at that exact
+; moment (itself dependent on prior himem reservation/release history
+; this same boot session, not on this module's own code at all), it
+; could plausibly manifest differently across builds that changed
+; kernel size elsewhere for entirely unrelated reasons.
+;
+; Fixed by writing one explicit byte immediately after
+; batch_goto_label's own 32-byte span -- forcing Link/02 to see that
+; address as genuinely written, extending "highest address" (and thus
+; code_size) to correctly cover the buffer's full real extent. No
+; symbol needed; nothing ever reads this byte's own value.
+                db      0
+
                 public  batch_fcb
                 public  batch_iobuf
                 public  batch_scratch
