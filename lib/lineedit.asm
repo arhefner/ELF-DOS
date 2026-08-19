@@ -158,7 +158,19 @@
 ; at EOF or on a read error"); a live console read via K_READ, when
 ; NOT actually redirected, falls straight through to the real BIOS
 ; f_read and can never legitimately produce a NUL for a genuine
-; keystroke, so this is unambiguous. LE_MODE_FAST never signals EOF.
+; keystroke, so this is unambiguous. LE_MODE_FAST/LE_MODE_BITBANG
+; never signal EOF.
+;
+; LE_MODE_BITBANG (2026-08-05) added as a third plain branch, not a
+; function-pointer/indirect-call redesign -- extending this dispatch
+; to a new already-known, already-proven-convention BIOS routine
+; (f_bread, used identically to f_uread by progs/mr.asm/lib/ymodem.asm)
+; costs one more three-instruction branch, matching this project's
+; own established mr.asm/ms.asm/ymodem.asm "-u"/"-b" mode-number
+; precedent exactly. A genuinely dynamic, not-known-at-link-time
+; source (e.g. a future parallel-keyboard driver) would be the real
+; case for an indirect call -- not needed for any source that exists
+; today.
 ; Args:    none (reads le_mode)
 ; Returns: DF=0, D=the byte read; or DF=1 (LE_MODE_REDIR only) for
 ;          EOF -- every caller must check DF immediately after the
@@ -168,8 +180,16 @@
 le_getchar:
             mov     rd, le_mode
             ldn     rd
-            lbnz    lgc_mode1
+            lbz     lgc_mode0           ; mode 0: LE_MODE_FAST
+            xri     1
+            lbz     lgc_mode1           ; mode 1: LE_MODE_REDIR
 
+            ; mode 2: LE_MODE_BITBANG
+            call    f_bread
+            clc
+            rtn
+
+lgc_mode0:
             call    f_uread
             clc
             rtn

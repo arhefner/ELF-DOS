@@ -17,3 +17,14 @@ LE_MODE_REDIR:  equ     1       ; read_line_ex: K_READ (redirect-aware
                                 ; to K_READ's own latency-driven byte-
                                 ; drop risk on a fast live arrow-key
                                 ; sequence.
+LE_MODE_BITBANG: equ    2       ; read_line_ex: f_bread directly
+                                ; (2026-08-05) -- the onboard bit-
+                                ; banged serial port, same byte-drop-
+                                ; safe direct-BIOS-call reasoning as
+                                ; LE_MODE_FAST's own f_uread, just the
+                                ; other UART. Always DF=0, same as
+                                ; LE_MODE_FAST -- a live bit-banged
+                                ; keyboard has no EOF concept either.
+                                ; Matches progs/mr.asm's/lib/ymodem.
+                                ; asm's own already-proven "-b" mode
+                                ; convention exactly.
