@@ -455,7 +455,32 @@ DIRENT_WRTTIME: equ     135         ; last-write time (2 bytes, big-endian,
                                     ; packed FAT format -- see DE_WRTTIME)
 DIRENT_WRTDATE: equ     137         ; last-write date (2 bytes, big-endian,
                                     ; packed FAT format -- see DE_WRTDATE)
-DIRENT_LEN:     equ     139         ; total result buffer size
+DIRENT_SHORTNAME: equ   139         ; raw 8.3 short name, formatted NAME.EXT
+                                    ; (trailing spaces stripped, dot omitted
+                                    ; if no extension), null-terminated, up
+                                    ; to DIRENT_SHORTNAME_LEN bytes -- always
+                                    ; the real on-disk short name, regardless
+                                    ; of whether DIRENT_NAME used an LFN
+DIRENT_SHORTNAME_LEN: equ 13        ; 8+1+3+null, the longest possible 8.3
+DIRENT_EXEC:    equ     152         ; 1 byte, 0 or 1 -- executable flag
+                                    ; (DE_EXEC_BIT of the raw entry's
+                                    ; DE_EXEC byte), isolated/normalized,
+                                    ; not the raw byte -- see DE_EXEC
+DIRENT_LEN:     equ     153         ; total result buffer size
+
+; ----------------------------------------------------------------
+; Executable-flag storage (2026-08-05): byte offset 0x0C of a raw
+; directory entry (the FAT/VFAT "reserved for OS use" NTRes byte,
+; bytes 12-21 of DE_*, previously all documented as unused) rather
+; than a DE_ATTR bit -- some third-party disk-checking tools
+; aggressively zero any nonzero bit in DE_ATTR's own reserved
+; positions, but this byte is specifically reserved for exactly this
+; kind of OS-private use and is left alone. Bit 6 avoids a known
+; collision: Windows NT/2000/XP use bits 3-4 of this same byte for
+; base-name/extension lowercase display flags.
+; ----------------------------------------------------------------
+DE_EXEC:        equ     12          ; offset within a raw 32-byte entry
+DE_EXEC_BIT:    equ     $40         ; bit 6
 
 ; ----------------------------------------------------------------
 ; FAT16 file attribute bits

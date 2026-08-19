@@ -355,7 +355,23 @@ DIRENT_WRTTIME: equ     135         ; last-write time, 2 bytes, big-endian,
 DIRENT_WRTDATE: equ     137         ; last-write date, 2 bytes, big-endian,
                                     ; packed FAT format: bits 15-9=year-1980,
                                     ; 8-5=month, 4-0=day
-DIRENT_LEN:     equ     139         ; total result buffer size
+DIRENT_SHORTNAME: equ   139         ; raw 8.3 short name, formatted NAME.EXT
+                                    ; (trailing spaces stripped, dot omitted
+                                    ; if no extension), null-terminated, up
+                                    ; to DIRENT_SHORTNAME_LEN bytes -- always
+                                    ; the real on-disk short name, regardless
+                                    ; of whether DIRENT_NAME used an LFN
+DIRENT_SHORTNAME_LEN: equ 13        ; 8+1+3+null, the longest possible 8.3
+DIRENT_EXEC:    equ     152         ; 1 byte, 0 or 1 -- is the executable
+                                    ; flag set (byte offset 0x0C of the
+                                    ; raw entry, bit 6 -- see
+                                    ; K_FILE_GETLOC below to change it,
+                                    ; via a caller-done raw sector
+                                    ; patch, e.g. progs/attrib.asm's
+                                    ; own apo_apply_exec; this field is
+                                    ; already isolated to a plain 0/1,
+                                    ; not the raw byte)
+DIRENT_LEN:     equ     153         ; total result buffer size
 ATTR_DIR:       equ     $10         ; DIRENT_ATTR bit set for subdirectories
 ATTR_HIDDEN:    equ     $02         ; DIRENT_ATTR bit set for hidden
                                     ; entries (2026-07-22) -- restated
@@ -626,6 +642,42 @@ K_HIMEM_RESERVE:    equ     $0191       ; -> kernel_himem_reserve
 ;            successful K_HIMEM_RESERVE call)
 ;   Returns: nothing
 K_HIMEM_RELEASE:    equ     $0194       ; -> kernel_himem_release
+
+; K_FILE_GETLOC (2026-08-05): locate an existing directory entry's own
+; raw on-disk position -- reuses the kernel's own already-proven,
+; LFN-aware name matching (the exact same search K_STAT/
+; K_FILE_SETATTR use internally) but returns just the raw sector LBA
+; + byte offset instead of copying or patching anything. Lets a
+; caller do its own K_SECREAD-fetch / patch / K_SECWRITE-back for a
+; byte with no dedicated set/clear primitive of its own (e.g. ATTRIB's
+; "+X"/"-X", the executable flag at DE_EXEC/DE_EXEC_BIT below) without
+; reimplementing LFN-aware directory scanning in userland -- DANGEROUS
+; if misused for the same reason K_SECREAD/K_SECWRITE themselves are
+; (a wrong LBA or a botched patch can corrupt the entry).
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success: R8:R7 = 24-bit sector LBA (SAME
+;          convention as K_SECREAD/K_SECWRITE's own R7/R8 -- pass
+;          straight through), RD = byte offset of the entry within
+;          that sector (0-511, always a multiple of 32)
+;          DF = 1 on error (not found, bad path, target is "." or
+;          "..")
+K_FILE_GETLOC:      equ     $0197       ; -> file_getloc
+
+; DE_EXEC/DE_EXEC_BIT: the executable-flag's own raw on-disk location
+; within a 32-byte directory entry, restated from kernel.inc for
+; K_FILE_GETLOC callers that need to patch it directly (byte offset
+; 0x0C -- the FAT/VFAT "reserved for OS use" NTRes byte, chosen over a
+; DE_ATTR bit since some third-party disk-checking tools aggressively
+; zero any nonzero bit in DE_ATTR's own reserved positions). Bit 6
+; avoids a known collision: Windows NT/2000/XP use bits 3-4 of this
+; same byte for base-name/extension lowercase display flags. See
+; DIRENT_EXEC above for the already-isolated 0/1 form K_DIR_READ/
+; K_STAT return -- these two raw constants are only needed to WRITE
+; the flag, not to read it.
+DE_EXEC:            equ     12          ; offset within a raw 32-byte
+                                        ; entry (add to the byte
+                                        ; offset K_FILE_GETLOC returns)
+DE_EXEC_BIT:        equ     $40         ; bit 6
 
 ; GLOB_BUF_LEN: size of the reservation K_GLOB_RESERVE makes --
 ; progs/shell.asm's own glob-expansion pass budgets its writes against

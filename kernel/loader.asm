@@ -59,6 +59,9 @@
             extrn   prun_argv
             extrn   prun_argc
             extrn   saved_sp
+            extrn   prun_skip_exec
+            extrn   file_dirent
+            extrn   prun_attrib_name
 
 ; ----------------------------------------------------------------
 ; _prog_finish_load: shared tail for both prog_run and
@@ -279,6 +282,59 @@ pfl_bad_magic:
                                         ; nothing to capture)
             lbdf    prun_err            ; not found
 
+            ; executable-bit gate (2026-08-05): file_dirent still
+            ; holds the raw entry file_open's own internal
+            ; _scan_dir_for_name call just populated (confirmed by
+            ; direct inspection of file_open's own body -- nothing
+            ; between _scan_dir_for_name's call and file_open's own
+            ; return touches file_dirent again for a plain mode-0
+            ; open). prun_skip_exec, set by prog_run_shell's own
+            ; fallback path immediately before its one call here, lets
+            ; that one specific caller bypass the gate -- see
+            ; prun_skip_exec's own comment in _loader_data for why
+            ; that matters (protects the shell-reload path from ever
+            ; being unable to boot because of this feature).
+            ; ATTRIB is always exempt from this gate -- the one program
+            ; users need in order to SET an exec bit at all must always
+            ; be able to run, even before any exec bits have ever been
+            ; set on the card. DIRENT_SHORTNAME is the raw on-disk 8.3
+            ; short name, always uppercase regardless of how the file
+            ; was invoked -- a stable identifier that doesn't depend on
+            ; any LFN. Restored here (2026-08-18) after a bisection
+            ; round that pulled it out to test whether its own presence
+            ; (not just its byte-count effect) mattered -- inconclusive
+            ; pending a hardware result, but this needs to stay in for
+            ; ordinary use regardless while a separate, more targeted
+            ; test (a real Link/02 short-branch page-boundary bug,
+            ; found and fixed this same session) runs on its own.
+            mov     rf, file_dirent+DIRENT_SHORTNAME
+            mov     rd, prun_attrib_name
+            call    f_strcmp
+            lbz     prun_exec_checked   ; matches "ATTRIB": skip the
+                                        ; gate entirely
+
+            mov     rf, prun_skip_exec
+            ldn     rf
+            lbnz    prun_exec_skip
+
+            mov     rf, file_dirent+DIRENT_EXEC
+            ldn     rf
+            lbz     prun_err            ; exec bit not set: same
+                                        ; "Invalid program file." path
+                                        ; the bad-magic case below uses
+            lbr     prun_exec_checked
+
+prun_exec_skip:
+            mov     rf, prun_skip_exec
+            ldi     0
+            str     rf                  ; consume the one-shot skip so
+                                        ; it can't leak into a LATER,
+                                        ; unrelated prog_run call --
+                                        ; harmless no-op when reached
+                                        ; via the ATTRIB-name match
+                                        ; instead, since it's already 0
+
+prun_exec_checked:
             call    _prog_finish_load
             lbdf    prun_err
 
@@ -530,6 +586,20 @@ prun_err:
             rtn
 
 prsh_fallback:
+            ; skip prog_run's own executable-bit gate for this one
+            ; call, specifically -- see prun_skip_exec's own comment
+            ; in _loader_data. Without this, a stale shell_elba/eoff
+            ; cache (e.g. after a REN/DEL+recreate moved /bin/shell's
+            ; own directory entry) landing on a card where /bin/shell
+            ; itself never had its exec bit explicitly set could make
+            ; the WHOLE SYSTEM permanently unable to boot or run any
+            ; command -- run_loop reloads the shell via this exact
+            ; fallback every single command cycle if the fast path
+            ; ever stops validating.
+            mov     rf, prun_skip_exec
+            ldi     1
+            str     rf
+
             mov     rf, kshell_path
             call    prog_run            ; RA passed through as-is,
                                         ; same reasoning
@@ -559,6 +629,29 @@ prog_size:      dw      0           ; bytes actually loaded (for mem_base calc)
 prun_argv:      dw      0           ; prog_run's own argv-pointer stash
 prun_argc:      dw      0           ; prog_run's own argc stash
 saved_sp:       dw      0           ; kernel's R2 across _prog_exec_now's call
+prun_skip_exec: db      0           ; 2026-08-05: set to nonzero by
+                                    ; prog_run_shell's own fallback
+                                    ; path, immediately before its one
+                                    ; call to prog_run, so the exec-bit
+                                    ; gate below never blocks reloading
+                                    ; the shell itself -- see prog_run's
+                                    ; own comment for why this matters
+                                    ; (a stale shell_elba/eoff cache
+                                    ; combined with an unset exec bit
+                                    ; on /bin/shell would otherwise be
+                                    ; able to make the WHOLE SYSTEM
+                                    ; unable to boot/run anything, since
+                                    ; run_loop reloads the shell via
+                                    ; this exact call every cycle).
+                                    ; prog_run itself always resets this
+                                    ; back to 0 once consumed, so it can
+                                    ; never leak into a later, unrelated
+                                    ; call.
+prun_attrib_name: db    "ATTRIB",0  ; matched against the raw on-disk
+                                    ; 8.3 short name (always uppercase)
+                                    ; to exempt ATTRIB from the exec-bit
+                                    ; gate -- see this file's own
+                                    ; prog_run comment for why
 
                 public  prog_fcb
                 public  prog_iobuf
@@ -566,5 +659,7 @@ saved_sp:       dw      0           ; kernel's R2 across _prog_exec_now's call
                 public  prun_argv
                 public  prun_argc
                 public  saved_sp
+                public  prun_skip_exec
+                public  prun_attrib_name
 
             endp

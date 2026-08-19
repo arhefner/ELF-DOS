@@ -4628,6 +4628,76 @@ fsa_setmask:    db      0
 fsa_clearmask:  db      0
 
 ; ----------------------------------------------------------------
+; file_getloc: locate an existing directory entry's own raw on-disk
+; position and hand it back to the caller, WITHOUT copying or
+; patching anything itself. Reuses _find_dirent for the actual
+; search -- identical, already-proven LFN-aware name matching to
+; K_STAT/K_FILE_SETATTR -- so a caller like ATTRIB can do its own
+; K_SECREAD/K_SECWRITE-based raw patch for a byte the kernel has no
+; dedicated primitive for (2026-08-05, the executable flag) without
+; needing to reimplement LFN-aware matching in userland itself, a
+; much larger and riskier undertaking than this tiny locate-only
+; primitive (deliberately smaller than the file_setexec primitive
+; this replaced, which did the patch+writeback in the kernel too --
+; moving that half to the caller keeps the kernel side to just the
+; search, this project's own established "general primitive, minimal
+; footprint" precedent, same as K_STAT itself).
+;
+; Args:    RF = pointer to null-terminated path string
+; Returns: DF = 0 on success: R8:R7 = 24-bit sector LBA (R8.0 = bits
+;          23-16, R7.1 = bits 15-8, R7.0 = bits 7-0, R8.1 = 0 --
+;          EXACTLY K_SECREAD/K_SECWRITE's own convention), RD = byte
+;          offset of the entry within that sector (0-511, always a
+;          multiple of 32)
+;          DF = 1 on error (not found, bad path, target is "." or
+;          "..")
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    file_getloc
+
+            call    _find_dirent        ; DF = 0/1; dir_last_off/
+                                        ; dir_cur_lba describe the
+                                        ; match on success
+            lbdf    fgl_err
+
+            ; reject "." and ".." as the target -- same reasoning and
+            ; placement as file_setattr's own guard
+            mov     rf, fo_name
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    _is_dot_or_dotdot
+            lbdf    fgl_err
+
+            mov     rf, dir_cur_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8                  ; R8:R7 = sector LBA, K_SECREAD/
+                                        ; K_SECWRITE's own convention
+
+            mov     rf, dir_last_off
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = byte offset within
+                                        ; that sector
+
+            clc                         ; DF = 0, success
+            rtn
+
+fgl_err:
+            stc                         ; DF = 1, error
+            rtn
+
+; ----------------------------------------------------------------
 ; file_touch: update an existing directory entry's last-write date/time
 ; to the current time, touching nothing else (content, size, cluster
 ; chain, attribute byte all untouched). Works on either a file or a

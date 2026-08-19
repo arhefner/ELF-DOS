@@ -1,13 +1,18 @@
 ;
-; attrib.asm - show or change the hidden attribute on one or more files
+; attrib.asm - show or change the hidden/executable attribute on one or
+; more files
 ;
-; Usage: ATTRIB [+H|-H] <path...>
+; Usage: ATTRIB [+H|-H|+X|-X] <path...>
 ;
-; Bare "ATTRIB <path...>" (no +H/-H) shows each path's current hidden
-; state, one line per path: "H  <path>" (hidden) or "-  <path>" (not).
-; "ATTRIB +H <path...>" sets the hidden bit; "ATTRIB -H <path...>"
-; clears it -- silent on success for every argument, per this project's
-; "no news is good news" convention (matches DEL/COPY/MD/RD/REN).
+; Bare "ATTRIB <path...>" (no flag) shows each path's current hidden
+; and executable state, one line per path: two flag columns ("H"/"-"
+; then "X"/"-") followed by the path, e.g. "H-  foo.txt" (hidden, not
+; executable) or "-X  bar" (not hidden, executable). "ATTRIB +H/-H"
+; sets/clears the hidden bit; "ATTRIB +X/-X" (2026-08-05) sets/clears
+; the executable flag (byte offset 0x0C bit 6 of the raw directory
+; entry -- see kernel_api.inc's own DE_EXEC/DE_EXEC_BIT) -- both
+; silent on success for every argument, per this project's "no news
+; is good news" convention (matches DEL/COPY/MD/RD/REN).
 ; Multiple paths are handled independently: a failure on one prints
 ; its own "Not found: " and the rest still run (matching DEL's own
 ; precedent); the final exit code reflects whether ANY argument failed.
@@ -24,11 +29,18 @@
 ; unexpanded text (nullglob-off) -- it will then simply report "Not
 ; found" like any other missing literal path.
 ;
-; Built on the new K_FILE_SETATTR kernel primitive (a general set/
-; clear-mask attribute-byte rewrite) for apply mode and the existing
-; K_STAT for show mode. Deliberately scoped to just the hidden bit for
-; now -- K_FILE_SETATTR itself is general, so a future +R/-R or +S/-S
-; would only need more argument parsing here, no kernel change.
+; Built on the K_FILE_SETATTR kernel primitive (a general set/clear-
+; mask DE_ATTR rewrite) for the hidden bit, and the new (2026-08-05)
+; K_FILE_GETLOC for the executable flag -- unlike K_FILE_SETATTR,
+; K_FILE_GETLOC does NOT patch anything itself: it reuses the
+; kernel's own already-proven, LFN-aware name-matching search to hand
+; back just the raw sector LBA + byte offset, and THIS PROGRAM does
+; its own K_SECREAD/patch/K_SECWRITE round trip (see apo_apply_exec
+; below) -- deliberately kept out of the kernel, since only the
+; search genuinely needs kernel-internal state; the one-byte patch
+; doesn't. Plus the existing K_STAT for show mode. A future +R/-R or
+; +S/-S would only need more argument parsing here, no kernel change,
+; matching K_FILE_SETATTR's own "general primitive" design.
 ;
 ; "+H"/"-H" (case-insensitive -- "+h"/"-h" work identically, 2026-07-23)
 ; is matched as an exact 2-character-plus-NUL token in argv[1] (same
@@ -49,6 +61,10 @@
 
 ATTRIB_MODE_SHOW:  equ     0
 ATTRIB_MODE_APPLY: equ     1
+
+ATTRIB_TARGET_HIDDEN: equ  0       ; "+H"/"-H" -- K_FILE_SETATTR
+ATTRIB_TARGET_EXEC:   equ  1       ; "+X"/"-X" -- K_FILE_GETLOC + this
+                                    ; program's own raw sector patch
 
             org     PROG_BASE
 
@@ -101,7 +117,8 @@ maybe_h:
                                         ; mask, confirmed no other
                                         ; character aliases to it)
             xri     'H'
-            lbnz    mode_show           ; not "+H"/"-H" (case-insensitive)
+            lbnz    maybe_x             ; not "+H"/"-H" -- try "+X"/"-X"
+                                        ; before giving up to mode_show
 
             mov     rf, rd
             inc     rf
@@ -121,6 +138,9 @@ maybe_h:
             str     rf
             mov     rf, attrib_start_i
             ldi     2
+            str     rf
+            mov     rf, attrib_target
+            ldi     ATTRIB_TARGET_HIDDEN
             str     rf
 
             glo     r8                  ; D = the sign character (still
@@ -143,6 +163,59 @@ is_minus_h:
             str     rf
             mov     rf, attrib_clearmask
             ldi     ATTR_HIDDEN
+            str     rf
+            lbr     have_mode
+
+; --- "+X"/"-X" (2026-08-05): the executable flag, mirroring "+H"/"-H"'s
+; own argv-parsing shape exactly, but storing a single 0/1 value into
+; attrib_setmask (consumed by this program's own raw sector patch in
+; apo_apply_exec, not by a kernel primitive the way K_FILE_SETATTR's
+; DE_ATTR-based set/clear-mask pair is) ---
+maybe_x:
+            mov     rf, rd
+            inc     rf
+            ldn     rf                  ; D = argv[1][1]
+            ani     $DF                 ; fold lowercase (only 'X'/'x'
+                                        ; collapse to 'X' under this
+                                        ; mask, same reasoning as 'H'
+                                        ; above)
+            xri     'X'
+            lbnz    mode_show           ; not "+X"/"-X" either
+
+            mov     rf, rd
+            inc     rf
+            inc     rf
+            ldn     rf                  ; D = argv[1][2] -- must be NUL
+            lbnz    mode_show
+
+            ; confirmed exactly "+X" or "-X" -- requires a path after it
+            glo     rc
+            smi     3
+            lbnf    usage               ; flag given but argc < 3
+
+            mov     rf, attrib_mode
+            ldi     ATTRIB_MODE_APPLY
+            str     rf
+            mov     rf, attrib_start_i
+            ldi     2
+            str     rf
+            mov     rf, attrib_target
+            ldi     ATTRIB_TARGET_EXEC
+            str     rf
+
+            glo     r8                  ; D = the sign character
+            xri     '+'
+            lbnz    is_minus_x
+
+            mov     rf, attrib_setmask
+            ldi     1                   ; nonzero = set (apo_apply_
+                                        ; exec's own convention below)
+            str     rf
+            lbr     have_mode
+
+is_minus_x:
+            mov     rf, attrib_setmask
+            ldi     0                   ; 0 = clear
             str     rf
             lbr     have_mode
 
@@ -352,7 +425,11 @@ attrib_process_one:
             ldn     rf
             lbnz    apo_apply           ; mode == APPLY
 
-            ; ---- show mode: K_STAT + print "H  "/"-  " + path ----
+            ; ---- show mode: K_STAT + print "HX  "/"H-  "/"-X  "/"--  "
+            ; + path (2026-08-05: widened from a single hidden-only
+            ; "H"/"-" column to two columns, hidden then executable,
+            ; now that K_STAT's own result buffer carries DIRENT_EXEC
+            ; too) ----
             mov     rf, attrib_cur_path
             lda     rf
             phi     rd
@@ -367,13 +444,28 @@ attrib_process_one:
             add16   rf, DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
             ani     ATTR_HIDDEN
-            lbz     apo_show_notset
+            lbz     apo_show_h_notset
 
             call    K_INMSG
-            db      "H  ",0
+            db      "H",0
+            lbr     apo_show_x
+
+apo_show_h_notset:
+            call    K_INMSG
+            db      "-",0
+
+apo_show_x:
+            mov     rf, attrib_statbuf
+            add16   rf, DIRENT_EXEC
+            ldn     rf                  ; D = 0 or 1 (already isolated
+                                        ; by dir_read -- no mask needed)
+            lbz     apo_show_x_notset
+
+            call    K_INMSG
+            db      "X  ",0
             lbr     apo_show_path
 
-apo_show_notset:
+apo_show_x_notset:
             call    K_INMSG
             db      "-  ",0
 
@@ -390,6 +482,12 @@ apo_show_path:
             rtn
 
 apo_apply:
+            mov     rf, attrib_target
+            ldn     rf
+            lbnz    apo_apply_exec      ; target == EXEC -- K_FILE_GETLOC
+                                        ; + this program's own patch
+
+            ; ---- target == HIDDEN: K_FILE_SETATTR (unchanged) ----
             mov     rf, attrib_setmask
             ldn     rf
             plo     rc
@@ -406,6 +504,113 @@ apo_apply:
             plo     rd
             mov     rf, rd              ; RF = path
             call    K_FILE_SETATTR      ; DF = 0/1
+            lbr     apo_apply_check
+
+; ---- target == EXEC (2026-08-05): no dedicated set/clear kernel
+; primitive -- K_FILE_GETLOC locates the entry's own raw sector LBA +
+; byte offset (reusing the kernel's own already-proven, LFN-aware
+; name matching), then this program does its own K_SECREAD/patch/
+; K_SECWRITE round trip, mirroring test/corrupt.asm's/lib/vollabel.
+; asm's own already-proven raw-sector-I/O pattern -- deliberately NOT
+; a new kernel primitive, since the only thing that genuinely needs
+; kernel-internal state is the LFN-aware search, not the one-byte
+; patch itself. ----
+apo_apply_exec:
+            mov     rf, attrib_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd              ; RF = path
+            call    K_FILE_GETLOC       ; DF = 0/1; R8:R7 = sector LBA,
+                                        ; RD = byte offset within it
+            lbdf    apo_apply_check     ; not found: DF already 1,
+                                        ; falls through to apo_not_found
+
+            ; stash LBA + offset to memory before anything else can
+            ; clobber them -- K_SECREAD's own documented contract
+            ; clobbers R7/R8, and this program doesn't trust any
+            ; register across an unaudited call regardless
+            mov     rf, attrib_loc_lba
+            ghi     r8
+            str     rf
+            inc     rf
+            ghi     r7
+            str     rf
+            inc     rf
+            glo     r7
+            str     rf                  ; attrib_loc_lba = R8.hi,
+                                        ; R7.hi, R7.lo (R8.lo is always
+                                        ; 0 -- K_SECREAD/K_SECWRITE's
+                                        ; own convention, not stored)
+
+            mov     rf, attrib_loc_off
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; attrib_loc_off = byte offset
+
+            mov     rf, attrib_loc_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+
+            mov     rf, attrib_secbuf
+            call    K_SECREAD           ; DF = 0/1
+            lbdf    apo_apply_check     ; read error: report as failure
+
+            mov     rf, attrib_loc_off
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = byte offset
+
+            mov     rf, attrib_secbuf
+            add16   rf, rd
+            add16   rf, DE_EXEC         ; RF = the NTRes byte's own
+                                        ; address within attrib_secbuf
+
+            mov     rb, attrib_setmask
+            ldn     rb                  ; D = 0/1
+            lbz     apo_exec_clear
+
+            ; set the bit: old_byte | DE_EXEC_BIT
+            ldn     rf                  ; D = current raw NTRes byte
+            ori     DE_EXEC_BIT
+            lbr     apo_exec_write
+
+apo_exec_clear:
+            ; clear the bit: old_byte & $BF ($BF = ~DE_EXEC_BIT mod
+            ; 256, written as a plain literal rather than a "^"
+            ; expression -- "^" has its own, unrelated meaning in
+            ; Asm/02's own .prg fixup syntax)
+            ldn     rf                  ; D = current raw NTRes byte
+            ani     $BF
+
+apo_exec_write:
+            str     rf                  ; patch the NTRes byte in
+                                        ; attrib_secbuf
+
+            mov     rf, attrib_loc_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+
+            mov     rf, attrib_secbuf
+            call    K_SECWRITE          ; DF = 0/1
+
+apo_apply_check:
             lbnf    apo_ok              ; success: silent
 
 apo_not_found:
@@ -429,6 +634,7 @@ apo_ok:
             rtn
 
 attrib_mode:        db      0
+attrib_target:      db      0           ; ATTRIB_TARGET_HIDDEN/EXEC
 attrib_start_i:     db      0
 attrib_setmask:     db      0
 attrib_clearmask:   db      0
@@ -441,5 +647,12 @@ attrib_any_error:   db      0
 attrib_glob_found:  db      0
 attrib_statbuf:     ds      DIRENT_LEN
 attrib_glob_ctx:    ds      GLOB_CTX_LEN
+attrib_loc_lba:     ds      3           ; K_FILE_GETLOC's own LBA
+                                        ; result (2026-08-05, "+X"/"-X")
+attrib_loc_off:     dw      0           ; K_FILE_GETLOC's own byte-
+                                        ; offset result
+attrib_secbuf:      ds      512         ; raw sector scratch for the
+                                        ; K_SECREAD/patch/K_SECWRITE
+                                        ; round trip
 
             end     start

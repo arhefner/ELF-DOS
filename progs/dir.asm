@@ -105,6 +105,121 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
+            ; --- optional "-x" flag, anywhere on the line (2026-08-05):
+            ; show each entry's real raw 8.3 short name (DIRENT_
+            ; SHORTNAME) alongside its display name, matching real
+            ; Windows `dir /x`. Filtered out of argv via the same
+            ; whole-line, argv[0]-always-kept scan progs/copy.asm's own
+            ; "-y" flag already established (2026-07-26) -- builds a
+            ; filtered local copy (dir_argv_local), then overwrites
+            ; RA/RC THEMSELVES with it (rather than threading a second
+            ; pair of indirection variables through this file's own
+            ; many existing entry points, the way copy_argv/copy_argc
+            ; does for COPY), since every branch below already reads
+            ; RA/RC directly and this is the very first thing that
+            ; runs -- nothing before this point depends on the
+            ; original, unfiltered RA/RC. RA itself is read-only
+            ; throughout this scan, never mutated.
+            mov     rf, dir_show_short
+            ldi     0
+            str     rf
+
+            mov     rf, dir_xf_argc
+            glo     rc
+            str     rf                  ; dir_xf_argc = argc (as
+                                        ; received, before filtering)
+
+            ldi     0
+            plo     r9                  ; R9.0 = source index i
+            ldi     0
+            plo     r8                  ; R8.0 = surviving count so far
+
+            mov     rb, dir_argv_local  ; RB = filtered-array write
+                                        ; cursor
+
+dir_xf_loop:
+            mov     rf, dir_xf_argc
+            ldn     rf
+            str     r2
+            glo     r9
+            sm                          ; D = i - orig_argc
+            lbdf    dir_xf_done         ; i >= orig_argc: scanned every
+                                        ; real entry
+
+            ; RD = argv[i] (dereference the REAL table at RA + i*2 --
+            ; RA itself is only ever read here, never written)
+            glo     r9
+            plo     rd
+            ldi     0
+            phi     rd
+            shl16   rd                  ; RD = i*2
+            mov     rf, ra
+            add16   rf, rd              ; RF = &argv[i]
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = argv[i]'s string pointer
+
+            glo     r9
+            lbz     dir_xf_keep         ; i == 0: always keep (this
+                                        ; program's own name, never
+                                        ; checked as a flag)
+
+            mov     rf, rd
+            ldn     rf
+            xri     '-'
+            lbnz    dir_xf_keep
+
+            mov     rf, rd
+            inc     rf
+            ldn     rf
+            xri     'x'
+            lbnz    dir_xf_keep
+
+            mov     rf, rd
+            inc     rf
+            inc     rf
+            ldn     rf                  ; must be NUL for "-x" to be
+                                        ; exactly this whole token
+            lbnz    dir_xf_keep
+
+            ; exact "-x" match: record the flag, do NOT copy this
+            ; entry into the filtered array
+            mov     rf, dir_show_short
+            ldi     1
+            str     rf
+            lbr     dir_xf_next
+
+dir_xf_keep:
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+            inc     rb                  ; dir_argv_local[count] =
+                                        ; argv[i]
+            glo     r8
+            adi     1
+            plo     r8
+
+dir_xf_next:
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     dir_xf_loop
+
+dir_xf_done:
+            mov     ra, dir_argv_local  ; RA now points at the
+                                        ; filtered array -- every
+                                        ; branch below reads RA
+                                        ; directly, so this alone
+                                        ; makes "-x" invisible to all
+                                        ; of them with no further
+                                        ; changes needed anywhere else
+                                        ; in this file
+            glo     r8
+            plo     rc                  ; RC.0 = filtered argc
+
             call    K_GETCURDIR         ; RD = current directory cluster
                                         ; (RA/RC survive this call --
                                         ; see kernel_getcurdir's own
@@ -1420,6 +1535,47 @@ pde_print_name:
             call    K_INMSG
             db      "  ",0
 
+            ; "-x" (2026-08-05): print the raw 8.3 short name in its
+            ; own fixed-width column, left-justified and right-padded
+            ; to DIRENT_SHORTNAME_LEN-1 (12) columns, before the long
+            ; display name -- matches real Windows `dir /x`. Reuses
+            ; the exact same count-then-pad-with-a-spaces13-substring
+            ; trick already proven above for the size column (spaces13
+            ; is 13 real spaces + a null terminator, so a count up to
+            ; 13 always yields a valid, in-bounds substring).
+            mov     rf, dir_show_short
+            ldn     rf
+            lbz     pde_no_short
+
+            mov     rf, dir_result
+            add16   rf, DIRENT_SHORTNAME
+            call    K_MSG               ; the short name itself
+
+            mov     rf, dir_result
+            add16   rf, DIRENT_SHORTNAME
+            ldi     0
+            plo     rc
+pde_short_count:
+            ldn     rf
+            lbz     pde_short_count_done
+            inc     rf
+            glo     rc
+            adi     1
+            plo     rc
+            lbr     pde_short_count
+pde_short_count_done:
+            ; pad = 13 - count spaces (13, not 12, deliberately -- a
+            ; maximal 12-char short name still gets 1 space before the
+            ; explicit "  " separator below, matching every other
+            ; column's own "always at least one real gap" look)
+            mov     rf, spaces13
+            add16   rf, rc
+            call    K_MSG
+
+            call    K_INMSG
+            db      "  ",0
+
+pde_no_short:
             mov     rf, dir_result      ; RF = DIRENT_NAME (at offset 0)
             call    K_MSG
             call    K_INMSG
@@ -1501,6 +1657,20 @@ wr_minute:  db      0
 wr_hour12:  db      0           ; 2026-07-26: 12-hour display value
                                 ; (1-12), converted from wr_hour
 dir_ampm:   ds      3           ; "AM"/"PM"+null
+
+dir_show_short: db      0           ; "-x" flag (2026-08-05): show each
+                                    ; entry's raw 8.3 short name too
+dir_xf_argc:    db      0           ; the "-x" filter loop's own
+                                    ; transient argc scratch (separate
+                                    ; from dir_argc below, which stashes
+                                    ; the ALREADY-filtered argc later,
+                                    ; across the volume-header call --
+                                    ; the two uses are sequential, never
+                                    ; overlapping, but kept as separate
+                                    ; fields for clarity)
+dir_argv_local: ds      ARGV_MAX_ARGS*2  ; the "-x"-filtered argv table
+                                    ; (progs/copy.asm's own "-y" filter
+                                    ; precedent)
 
 dir_argv:       dw      0
 dir_argc:       db      0

@@ -17,6 +17,9 @@
 ;   [DIRENT_SIZE]    file size, 4 bytes, big-endian
 ;   [DIRENT_WRTTIME] last-write time, 2 bytes, big-endian, packed FAT format
 ;   [DIRENT_WRTDATE] last-write date, 2 bytes, big-endian, packed FAT format
+;   [DIRENT_SHORTNAME] real raw 8.3 short name (NAME.EXT, trimmed),
+;                    null-terminated -- always the on-disk short name,
+;                    even when DIRENT_NAME used an LFN
 ;
 ; dir_read skips:
 ;   deleted entries (first byte = $E5)
@@ -404,6 +407,42 @@ drd_use83:  ; format 8.3 name into result[DIRENT_NAME]
             call    _dir_fmt83
 
 drd_got_name:
+            ; populate result[DIRENT_SHORTNAME] with the REAL raw 8.3
+            ; short name, regardless of whether DIRENT_NAME above used
+            ; the LFN or fell back to 8.3 directly -- needed for DIR -x
+            ; and anything else that wants to see past a generated
+            ; short name's own truncation/~N collision suffix (see
+            ; _gen_short_name/_check_shortname_collision in file.asm).
+            ; _dir_fmt83's own documented clobber list (RF/RD/RB/RC)
+            ; doesn't include RA, which the rest of this routine still
+            ; needs -- safe to call here, before RA's first use below.
+            mov     rf, ra
+            mov     rd, r9
+            add16   rd, DIRENT_SHORTNAME
+            call    _dir_fmt83
+
+            ; populate result[DIRENT_EXEC] (2026-08-05) -- isolate bit
+            ; DE_EXEC_BIT of the raw entry's DE_EXEC byte (offset 0x0C,
+            ; the FAT/VFAT "reserved for OS use" NTRes byte) into a
+            ; plain 0/1, not the raw byte, since other bits of this
+            ; same byte have unrelated meanings elsewhere (Windows
+            ; NT/2000/XP's own base-name/extension lowercase flags).
+            mov     rf, ra
+            add16   rf, DE_EXEC
+            ldn     rf                  ; D = raw NTRes byte
+            ani     DE_EXEC_BIT
+            lbz     drd_exec_clear
+            ldi     1
+            lbr     drd_exec_store
+drd_exec_clear:
+            ldi     0
+drd_exec_store:
+            plo     rc                  ; stash 0/1 (mov below clobbers D)
+            mov     rf, r9
+            add16   rf, DIRENT_EXEC
+            glo     rc
+            str     rf
+
             ; write attribute to result[DIRENT_ATTR]
             ;
             ; BUG FIX: "mov rf, r9" and "add16 rf, CONST" both clobber D

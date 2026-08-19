@@ -52,6 +52,7 @@
             extrn   file_stat
             extrn   file_setattr
             extrn   file_touch
+            extrn   file_getloc
             extrn   kernel_himem_reserve
             extrn   kernel_himem_release
             extrn   batch_start
@@ -296,7 +297,12 @@ k_file_touch:   lbr     file_touch          ; $018E
 ; the full design. First real consumer: lib/modload.asm.
 k_himem_reserve: lbr    kernel_himem_reserve ; $0191
 k_himem_release: lbr    kernel_himem_release ; $0194
-                ; next free jump-table address: $0197
+
+; K_FILE_GETLOC: locate an existing directory entry's own raw sector
+; LBA + byte offset, without copying/patching anything (2026-08-05) --
+; see kernel/file.asm's own file_getloc for the full design.
+k_file_getloc:  lbr     file_getloc         ; $0197
+                ; next free jump-table address: $019A
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
@@ -497,6 +503,7 @@ run_loop:
             mov     rf, RUN_PATH        ; RF = resolved path (RA/RC
                                         ; already set above -- mov
                                         ; only touches RF/D)
+
             call    prog_run            ; D = exit code, DF=0/1
             lbdf    run_bad_program     ; exists (the shell already
                                         ; confirmed that) but isn't a

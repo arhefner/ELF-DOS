@@ -33,10 +33,12 @@
 ; reduced-precision decimal digit that avoids a 32-bit multiply
 ; overflow for the G unit).
 ;
-; -F: append "/" after directory entries (no executable-attribute
-; concept on ELF-DOS, so unlike real ls -F this is the only suffix
-; case). Composes with quoting below -- a directory name containing a
-; space prints as 'my dir'/, quotes around the name, slash outside.
+; -F: append "/" after directory entries, or "*" after executable
+; (non-directory) entries (2026-08-12, once the executable-flag
+; feature gave ELF-DOS an actual DIRENT_EXEC to check -- matches real
+; ls -F's own mutually-exclusive choice between the two suffixes).
+; Composes with quoting below -- a directory name containing a space
+; prints as 'my dir'/, quotes around the name, suffix outside.
 ;
 ; -a: show entries with the hidden attribute set too (2026-07-22). A
 ; bare directory-scan listing normally skips them; an explicit
@@ -148,7 +150,13 @@ LSENT_QUOTE:    equ     12          ; 1 byte: 1 if this entry's name
                                     ; precomputed at collection time
                                     ; (ls_add_entry) so print time never
                                     ; needs to rescan for a space either.
-LSENT_LEN:      equ     13
+LSENT_EXEC:     equ     13          ; 1 byte: this entry's own
+                                    ; DIRENT_EXEC value (0 or 1),
+                                    ; 2026-08-12 -- used by -l's second
+                                    ; mode-string character ('x'/'-')
+                                    ; and -F's trailing '*' suffix on
+                                    ; executable files.
+LSENT_LEN:      equ     14
 
 LS_NAME_CAP:    equ     127         ; matches K_DIR_READ's own DIRENT_NAME
                                     ; limit -- caps the length-counting
@@ -943,7 +951,20 @@ ladd_dlen_noquote:
             add16   rd, DIRENT_ATTR
             ldn     rd
             ani     ATTR_DIR
-            lbz     ladd_dlen_nof       ; not a directory: skip
+            lbnz    ladd_dlen_suffix    ; directory: +1 for '/' --
+                                        ; always, regardless of its own
+                                        ; exec bit, matching real
+                                        ; ls -F's own mutually-
+                                        ; exclusive '/' vs '*' choice
+
+            ; not a directory -- '*' instead, but only if executable
+            mov     rd, ls_scratch
+            add16   rd, DIRENT_EXEC
+            ldn     rd
+            lbz     ladd_dlen_nof       ; not executable either: no
+                                        ; suffix at all
+
+ladd_dlen_suffix:
             glo     r9
             adi     1
             plo     r9
@@ -955,6 +976,12 @@ ladd_dlen_nof:
             mov     rd, ls_hasquote
             ldn     rd
             str     rf                  ; entry->quote = ls_hasquote
+            inc     rf                  ; RF now at LSENT_EXEC in dest
+
+            mov     rd, ls_scratch
+            add16   rd, DIRENT_EXEC
+            ldn     rd
+            str     rf                  ; entry->exec = DIRENT_EXEC
 
 ls_store_ptr:
             mov     rf, ls_next_ptrslot
@@ -1053,8 +1080,9 @@ ls_add_entry_drop:
 ; ls_print_name: print one entry's display name -- single-quoted if
 ; LSENT_QUOTE is set (a space anywhere in the name, precomputed at
 ; collection time so this never needs to rescan), with a trailing "/"
-; appended if -F is active and the entry is a directory (outside the
-; closing quote, e.g. 'my dir'/). Shared by both the columnar and -l
+; (directory) or "*" (executable, non-directory) appended if -F is
+; active (outside the closing quote, e.g. 'my dir'/). Shared by both
+; the columnar and -l
 ; print paths so the quote/-F logic exists in exactly one place.
 ;
 ; Reads ls_curentry (entry struct address) / ls_curname (name pointer)
@@ -1116,8 +1144,26 @@ lpn_close_done:
             add16   rf, LSENT_ATTR
             ldn     rf                  ; D = attr byte
             ani     ATTR_DIR
-            lbz     lpn_done            ; not a directory: no suffix
+            lbnz    lpn_slash           ; directory: '/' always, same
+                                        ; mutually-exclusive '/' vs '*'
+                                        ; choice as ladd_dlen_nof above
 
+            ; not a directory -- '*' instead, but only if executable
+            mov     rd, ls_curentry
+            lda     rd
+            phi     rf
+            ldn     rd
+            plo     rf                  ; RF = entry struct address
+            add16   rf, LSENT_EXEC
+            ldn     rf                  ; D = exec flag
+            lbz     lpn_done            ; not executable either: no
+                                        ; suffix at all
+
+            call    K_INMSG
+            db      "*",0
+            lbr     lpn_done
+
+lpn_slash:
             call    K_INMSG
             db      "/",0
 
@@ -2171,17 +2217,46 @@ ls_long_loop:
             glo     r8
             str     rb
 
-            ; type indicator
+            ; type/exec mode string (2026-08-12: widened from a single
+            ; 'd'/'-' directory indicator to a 2-character mode
+            ; string, 'd'/'-' then 'x'/'-', matching classic ls -l
+            ; semantics -- LSENT_EXEC populated regardless of type,
+            ; same as real ls showing the executable bit on a
+            ; directory entry too if it happens to be set)
             mov     rf, r8
             add16   rf, LSENT_ATTR
             ldn     rf                  ; D = attr byte
             ani     ATTR_DIR
-            lbz     ls_long_file
+            lbz     ls_long_dash
             call    K_INMSG
-            db      "d  ",0
+            db      "d",0
+            lbr     ls_long_exec
+
+ls_long_dash:
+            call    K_INMSG
+            db      "-",0
+
+ls_long_exec:
+            ; reload the entry struct address fresh from ls_curentry
+            ; (memory) rather than trusting R8 to survive the K_INMSG
+            ; call just above -- only R9 is confirmed safe across
+            ; K_MSG/K_INMSG in this codebase (gotcha #8/#10), matching
+            ; ls_long_size's own established reload-from-ls_curentry
+            ; pattern right below this block
+            mov     rf, ls_curentry
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, r8
+            add16   rf, LSENT_EXEC
+            ldn     rf                  ; D = exec flag
+            lbz     ls_long_noexec
+            call    K_INMSG
+            db      "x  ",0
             lbr     ls_long_size
 
-ls_long_file:
+ls_long_noexec:
             call    K_INMSG
             db      "-  ",0
 
