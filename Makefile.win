@@ -6,19 +6,33 @@
 #   nmake /F Makefile.win mbr        build mbr.bin only
 #   nmake /F Makefile.win progs      build every progs\*.asm into bin\<name>
 #   nmake /F Makefile.win test       build every test\*.asm into test\bin\<name>
+#   nmake /F Makefile.win install DEV=\\.\PhysicalDriveN
+#                                     build everything and write MBR +
+#                                     kernel to a raw device
+#   nmake /F Makefile.win update DEV=\\.\PhysicalDriveN
+#                                     build and write kernel only (MBR
+#                                     already installed)
 #   nmake /F Makefile.win clean      remove all generated files
 #
 # Mirrors the project's Linux Makefile as closely as nmake allows -- see
 # that file for the authoritative build design. Differences are called
 # out below. Assumes asm02.exe and link02.exe are already on PATH.
 #
-# NOT PORTED: "install"/"update" (writing kernel-full.bin + mbr.bin to a
-# raw device via sys/elfdos-sys) -- that tool is a Linux binary talking
-# to Linux block-device paths (/dev/mmcblk0 etc.) with no Windows build
-# here. Build with this Makefile, then flash kernel-full.bin/mbr.bin
-# from Linux (or however you currently write the SD card). Both targets
-# exist below as a one-line stub so running them tells you this instead
-# of nmake just saying "unknown target."
+# "install"/"update" (writing kernel-full.bin + mbr.bin to a raw device
+# via sys\elfdos-sys.exe): sys/sys.c is genuinely cross-platform (a real
+# #ifdef _WIN32 block using the Win32 API for raw disk I/O -- see its own
+# header comment) -- the earlier version of this file's own note calling
+# it "a Linux binary... with no Windows build here" was stale/wrong.
+# Built here via cl (MSVC, expected on PATH from a Developer Command
+# Prompt, matching sys.c's own documented "cl sys.c /Fe:elfdos-sys.exe"
+# invocation) -- if you only have MinGW, build it by hand instead
+# ("cd sys && gcc -o elfdos-sys.exe sys.c") and this rule will see the
+# result already up to date. DEV has NO default here (unlike the Linux
+# Makefile's own DEV=/dev/mmcblk0, a safe default only because that's one
+# person's own dev machine's fixed SD-reader path) -- a wrong physical-
+# drive guess on an arbitrary Windows machine can destroy data with no
+# recovery, so install/update refuse to run at all until DEV is given
+# explicitly on the command line.
 #
 # DIFFERENCE FROM THE LINUX MAKEFILE: nmake has no equivalent of GNU
 # Make's $(wildcard ...)/$(patsubst ...), so "progs"/"test" can't build a
@@ -56,6 +70,16 @@ ASM         = asm02
 ASMFLAGS    = -L -C -I .. -r
 LINK        = link02
 LFLAGS      = -b -be -r
+
+# ---- Host-side installer (sys\sys.c -> sys\elfdos-sys.exe) ----
+SYSCC       = cl
+SYSCFLAGS   = /nologo /O2
+SYS         = sys\elfdos-sys.exe
+
+# DEV: no default (see this file's own header comment for why). Override
+# on the command line, e.g.:
+#   nmake /F Makefile.win install DEV=\\.\PhysicalDrive1
+DEV         =
 
 # ---- Output files (all land in project root) ----
 MBR_BIN     = mbr.bin
@@ -436,11 +460,27 @@ progs: bin $(SPECIAL_BINS) bin\batch.mod
 test: test\bin $(TEST_SPECIAL_BINS)
 	build_test.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
 
-install:
-	@echo install is not available in Makefile.win -- sys\elfdos-sys is a Linux tool with no Windows port here. Build with this Makefile, then flash kernel-full.bin/mbr.bin from Linux.
-	@exit /b 1
+# sys\elfdos-sys.exe: the host-side installer, compiled from sys\sys.c
+# with MSVC (see this file's own header comment). cd's into sys\ to
+# match cl's own default output-naming convention (plain "cl sys.c"
+# would otherwise produce sys.exe, not elfdos-sys.exe) -- same "cd DIR
+# && tool file" shape every asm02 rule above already uses.
+sys\elfdos-sys.exe: sys\sys.c
+	cd sys && $(SYSCC) $(SYSCFLAGS) /Fe:elfdos-sys.exe sys.c
 
-update: install
+# Full install: write MBR boot code and kernel to disk. Use this when
+# setting up a new disk or after changing the MBR. check_dev.bat refuses
+# to run at all if DEV wasn't given explicitly -- see this file's own
+# header comment for why there's no default to fall back to.
+install: $(FULL_BIN) $(MBR_BIN) sys\elfdos-sys.exe
+	check_dev.bat "$(DEV)" install
+	$(SYS) -m $(MBR_BIN) -k $(FULL_BIN) $(DEV)
+
+# Kernel-only update: MBR already on disk, just refresh the kernel.
+# Faster for routine kernel development and testing cycles.
+update: $(FULL_BIN) sys\elfdos-sys.exe
+	check_dev.bat "$(DEV)" update
+	$(SYS) -k $(FULL_BIN) $(DEV)
 
 clean:
 	-del /F /Q boot\*.prg boot\*.lst
@@ -448,6 +488,7 @@ clean:
 	-del /F /Q progs\*.prg progs\*.lst progs\*.build progs\*.lkb
 	-del /F /Q test\*.prg test\*.lst test\*.build test\*.lkb
 	-del /F /Q lib\*.prg lib\*.lst
+	-del /F /Q sys\elfdos-sys.exe sys\sys.obj
 	-del /F /Q $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
 	-if exist bin rmdir /S /Q bin
 	-if exist test\bin rmdir /S /Q test\bin
