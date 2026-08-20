@@ -12,17 +12,35 @@
 ; unsetenv.c in this project's own root, plus their two helpers
 ; _env_read_line.c/_env_split_line.c and the shared constants, all in
 ; ~/projects/Elf/ELFC/src/clib/stdlib/). On-disk store: a flat text
-; file of "NAME=VALUE\n" lines at /cfg/env.dat (already an
-; established path in this project's own history -- see
-; progs/copy.asm's own header comment). setenv/unsetenv both work by
-; streaming the existing file into /cfg/env.tmp (copying every line
-; through unchanged except the one being changed/dropped), then
-; swapping the temp file into place via K_FILE_DELETE+K_FILE_RENAME
-; (this kernel's own rename refuses to overwrite an existing
-; destination, so delete-then-rename is required, exactly matching
-; why the C reference does the same thing with remove()+rename()) --
-; same small crash-safety caveat the C reference already accepts: a
-; crash between the delete and the rename briefly leaves no env.dat.
+; file of "NAME=VALUE\n" lines at "<shell_drive>:/cfg/env.dat" --
+; "/cfg" is already an established path in this project's own history
+; (see progs/copy.asm's own header comment). setenv/unsetenv both work
+; by streaming the existing file into "<shell_drive>:/cfg/env.tmp"
+; (copying every line through unchanged except the one being
+; changed/dropped), then swapping the temp file into place via
+; K_FILE_DELETE+K_FILE_RENAME (this kernel's own rename refuses to
+; overwrite an existing destination, so delete-then-rename is
+; required, exactly matching why the C reference does the same thing
+; with remove()+rename()) -- same small crash-safety caveat the C
+; reference already accepts: a crash between the delete and the
+; rename briefly leaves no env.dat.
+;
+; BUG FIX (2026-08-21), two real, hardware-reported issues: (1) the
+; store's own path used to be a bare, driveless "/cfg/env.dat" --
+; resolved by the kernel against whatever drive happened to be ACTIVE
+; at the moment a call was made, not any fixed drive, so EXPORT/UNSET/
+; PRINTENV were silently reading and writing a DIFFERENT store (or
+; none at all) depending purely on which drive was active when they
+; ran. Fixed by anchoring every path to shell_drive (K_GETSHELLDRIVE)
+; via the new _env_build_paths, called at the top of every public
+; entry point below -- one single, consistent environment for the
+; whole session regardless of the active drive. (2) EXPORT/UNSET both
+; failed completely silently (no message, just a nonzero exit code)
+; the very first time either ran on a drive whose "/cfg" didn't exist
+; yet -- a real first-boot trap, since nothing in this project
+; auto-creates "/cfg". Fixed by having env_setenv/env_unsetenv both
+; best-effort auto-create "/cfg" (via K_DIR_CREATE, ignoring its
+; "already exists" case) immediately before they need it.
 ;
 ; Calling convention (register-passed, RF for the primary string
 ; pointer -- matching K_FILE_DELETE/DEL/REN's own use of RF for path
@@ -67,12 +85,17 @@ ENV_LINE_MAX:   equ     64          ; bounds NAME=VALUE\0, matching
             extrn   env_nl_byte
             extrn   env_file_path
             extrn   env_tmp_path
+            extrn   env_cfg_path
+            extrn   env_file_suffix
+            extrn   env_tmp_suffix
+            extrn   env_cfg_suffix
             extrn   env_dat_name
             extrn   env_split_line
             extrn   env_read_line
             extrn   _env_streq
             extrn   _env_write_line
             extrn   env_next
+            extrn   _env_build_paths
 
 ; ----------------------------------------------------------------
 ; env_read_line: read one line (up to '\n' or EOF) from env_in_fcb (the
@@ -300,6 +323,80 @@ es_notequal:
             endp
 
 ; ----------------------------------------------------------------
+; _env_build_paths: build the drive-prefixed env-store paths
+; (env_file_path/env_tmp_path/env_cfg_path) fresh, anchored to the
+; SHELL's own boot drive (K_GETSHELLDRIVE) rather than whichever
+; drive happens to be active right now.
+;
+; BUG FIX (2026-08-21): env_file_path/env_tmp_path used to be plain,
+; driveless "/cfg/env.dat"/"/cfg/env.tmp" constants -- K_PATH_RESOLVE's
+; own documented behavior for a path with no "X:" prefix is to resolve
+; it against whatever drive is CURRENTLY ACTIVE, not any fixed drive.
+; So EXPORT/UNSET/PRINTENV were silently reading and writing a
+; DIFFERENT env.dat (or none at all, on a drive that's never had one
+; created) depending purely on which drive happened to be active at
+; the moment they ran -- e.g. "export FOO=bar" while active on E:
+; would create/use E:/cfg/env.dat, invisible to "printenv FOO" once
+; back on C:. Fixed by anchoring to shell_drive (via K_GETSHELLDRIVE,
+; the same primitive progs/shell.asm's own bare-command-name fallback
+; search already uses for exactly this "one stable, well-known drive
+; regardless of what's active" reasoning) -- one single, consistent
+; environment store for the whole session, matching how a real DOS
+; AUTOEXEC.BAT-style environment is expected to behave.
+;
+; Args:    none
+; Returns: nothing (env_file_path/env_tmp_path/env_cfg_path updated)
+; Modifies: R9, RB, RD, RF (and D)
+; ----------------------------------------------------------------
+            proc    _env_build_paths
+
+            call    K_GETSHELLDRIVE     ; D = shell_drive (0-3)
+            adi     'C'                 ; D = drive letter
+            plo     r9                  ; stash it -- R9 is free here,
+                                        ; and the call below clobbers D
+
+            mov     rd, env_file_path
+            glo     r9
+            str     rd
+            inc     rd
+            mov     rf, env_file_suffix
+            call    ebp_strcpy_app      ; appends suffix + NUL at RD
+
+            mov     rd, env_tmp_path
+            glo     r9
+            str     rd
+            inc     rd
+            mov     rf, env_tmp_suffix
+            call    ebp_strcpy_app
+
+            mov     rd, env_cfg_path
+            glo     r9
+            str     rd
+            inc     rd
+            mov     rf, env_cfg_suffix
+            call    ebp_strcpy_app
+            rtn
+
+; ----------------------------------------------------------------
+; ebp_strcpy_app: copy the NUL-terminated string at RF to RD
+; (including the terminator). Internal to _env_build_paths only --
+; called via a plain `call` from within this same proc, matching
+; env_setenv's own se_write_nv/se_strlen precedent (no extrn/public
+; needed for a helper only its own enclosing proc ever reaches).
+; Args:    RF = src, RD = dst (both advance)
+; ----------------------------------------------------------------
+ebp_strcpy_app:
+            lda     rf
+            str     rd
+            lbz     ebp_done
+            inc     rd
+            lbr     ebp_strcpy_app
+ebp_done:
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; env_parse_uint: parse a decimal string into an unsigned integer,
 ; stopping at the first non-digit character. Moved here from
 ; progs/date.asm's own hardware-confirmed parse_uint (2026-07-17,
@@ -400,6 +497,8 @@ epu_done:
 ; ----------------------------------------------------------------
             proc    env_first
 
+            call    _env_build_paths    ; no incoming args to protect
+
             mov     rf, env_file_path
             mov     rd, env_in_fcb
             mov     ra, env_in_iobuf
@@ -482,6 +581,8 @@ en_eof:
             inc     rb
             glo     rf
             str     rb                  ; env_name = name pointer
+
+            call    _env_build_paths    ; RF now safely stashed above
 
             mov     rf, env_file_path
             mov     rd, env_in_fcb
@@ -593,6 +694,10 @@ ge_notfound:
             glo     rd
             str     rb                  ; env_value = value
 
+            call    _env_build_paths    ; name/value already stashed
+                                        ; above -- safe to clobber
+                                        ; RF/RD/R9 now
+
             ; reject a name containing '='
             mov     rf, env_name
             lda     rf
@@ -613,6 +718,31 @@ se_reject:
             rtn
 
 se_name_ok:
+            ; best-effort auto-create /cfg if it doesn't already exist
+            ; -- BUG FIX (2026-08-21): without this, the very first
+            ; EXPORT on a fresh install (or any drive that's never had
+            ; /cfg created) failed at the K_FILE_OPEN below with no
+            ; error message at all (see export.asm's own header --
+            ; env_setenv's DF=1 just sets an internal "failed" flag,
+            ; never printed), which read as a silent no-op rather than
+            ; a real failure. K_DIR_CREATE's own DF=1 "already exists"
+            ; case is deliberately ignored here (expected, common, and
+            ; harmless) -- any OTHER failure (e.g. a full root, or an
+            ; invalid drive) is left to surface naturally at the
+            ; K_FILE_OPEN just below instead of being duplicated here.
+            mov     rf, env_cfg_path
+            call    K_DIR_CREATE        ; DF ignored -- see above.
+                                        ; K_DIR_CREATE has no
+                                        ; documented clobber list, so
+                                        ; per this project's own
+                                        ; standing convention it's
+                                        ; treated as broadly unsafe --
+                                        ; but nothing here needs
+                                        ; anything it might have
+                                        ; touched, since env_tmp_path
+                                        ; is reloaded fresh from
+                                        ; memory right below anyway
+
             ; open the temp file for write (mode 1 = create/
             ; overwrite, always truncates fresh -- confirmed via this
             ; project's own file_open history)
@@ -828,6 +958,8 @@ se_strlen_done:
             glo     rf
             str     rb                  ; env_name = name
 
+            call    _env_build_paths    ; RF already stashed above
+
             mov     rf, env_name
             lda     rf
             phi     r8
@@ -847,6 +979,19 @@ ue_reject:
             rtn
 
 ue_name_ok:
+            ; best-effort auto-create /cfg if it doesn't already exist
+            ; -- same reasoning as env_setenv's own identical fix
+            ; (2026-08-21), but doubly important here: without it,
+            ; UNSET on a totally fresh install (no /cfg at all) failed
+            ; the K_FILE_OPEN below and returned DF=1, breaking this
+            ; routine's OWN documented "DF=0 even if the variable was
+            ; never set" idempotent-success contract -- a name that
+            ; was never set should never be able to make UNSET report
+            ; failure. DF ignored for the same reason as env_setenv's
+            ; copy of this call.
+            mov     rf, env_cfg_path
+            call    K_DIR_CREATE
+
             mov     rf, env_tmp_path
             mov     rd, env_out_fcb
             mov     ra, env_out_iobuf
@@ -957,8 +1102,15 @@ env_found:          db      0
 env_len:            dw      0
 env_eq_byte:        db      '='
 env_nl_byte:        db      10
-env_file_path:      db      "/cfg/env.dat",0
-env_tmp_path:       db      "/cfg/env.tmp",0
+env_file_path:      ds      16          ; "X:/cfg/env.dat",0 -- built
+                                        ; fresh by _env_build_paths,
+                                        ; not a fixed constant (see its
+                                        ; own header comment for why)
+env_tmp_path:       ds      16          ; "X:/cfg/env.tmp",0
+env_cfg_path:       ds      8           ; "X:/cfg",0
+env_file_suffix:    db      ":/cfg/env.dat",0
+env_tmp_suffix:     db      ":/cfg/env.tmp",0
+env_cfg_suffix:     db      ":/cfg",0
 env_dat_name:       db      "env.dat",0
 
                 public  env_line_buf
@@ -976,6 +1128,10 @@ env_dat_name:       db      "env.dat",0
                 public  env_nl_byte
                 public  env_file_path
                 public  env_tmp_path
+                public  env_cfg_path
+                public  env_file_suffix
+                public  env_tmp_suffix
+                public  env_cfg_suffix
                 public  env_dat_name
 
             endp
