@@ -23,31 +23,33 @@
 # DIFFERENCE FROM THE LINUX MAKEFILE: nmake has no equivalent of GNU
 # Make's $(wildcard ...)/$(patsubst ...), so "progs"/"test" can't build a
 # real per-file dependency graph for arbitrary progs\*.asm/test\*.asm the
-# way the Linux Makefile does. The progs\ programs that link against
-# lib\ (printenv, export, unset, ls, more, edlin, move, xcopy, shell, yr,
-# ys) and the 3 test\ programs that do (envtest, bumptest, malloctest --
-# moved out of progs\ 2026-07-25, see the Linux Makefile's own
-# TEST_SRCS/TEST_EXES comment) keep real nmake rules below, same as the
-# Linux Makefile's own explicit overrides for them, with proper
-# incremental rebuilds. Every OTHER progs\*.asm/test\*.asm file is auto-
-# discovered (no Makefile.win edit needed for a new one, matching the
-# Linux Makefile's own praised property) and built by the companion
-# scripts build_progs.bat/build_test.bat, which this Makefile calls --
-# but they rebuild their whole set unconditionally each time, rather than
-# tracking each file's own timestamp. asm02/link02 are fast enough that
-# this hasn't been worth the extra complexity of a real incremental check
-# in batch.
+# way the Linux Makefile does. Every progs\*.asm that links against lib\
+# (SPECIAL_BINS below) and every test\*.asm that does (TEST_SPECIAL_BINS
+# below) gets a real, explicit nmake rule -- same set the Linux Makefile
+# itself gives an explicit override rule to, and for the same reason:
+# each needs an extra lib\*.prg linked in, which a generic single-file
+# rule can't express. Every OTHER progs\*.asm/test\*.asm file needs no
+# entry here at all -- it's auto-discovered (no Makefile.win edit needed
+# for a new one) and built by the companion scripts build_progs.bat/
+# build_test.bat, which this Makefile calls. Keep SPECIAL_BINS/
+# TEST_SPECIAL_BINS below in sync with those two scripts' own skip
+# lists -- a program in one but not the other either fails to build
+# (missing from both) or gets built twice (missing from the skip list
+# while still having its own explicit rule here).
 #
-# NOTE (pre-existing gap, not addressed by adding yr/ys here): several
-# newer file_glob.asm-linked Linux programs (dir, label, pwd, del, touch,
-# copy, attrib, stat) and their own lib\ deps (file_glob, fmt32, vollabel,
-# pathstr) still have no Makefile.win/build_progs.bat entries at all --
-# this Windows port has been lagging the Linux Makefile's own lib\ set
-# for a while (see the project's own session notes). ys.asm's own need
-# for lib\file_glob.prg is the first time that gap has blocked a NEW
-# program from building on Windows at all, so lib\file_glob.prg's own
-# assembly rule is added below (needed for bin\ys) -- the 8 programs
-# above that also need it on Linux are a separate, still-open gap.
+# CAUGHT UP (this pass): this file had fallen behind the Linux
+# Makefile's own lib\-linked program set for a while -- badly enough
+# that the kernel itself would have failed to link at all (KOBJ was
+# missing lib\modload.prg/lib\icall.prg, both required by
+# kernel\batch.asm's own extrn mod_load/mod_release/icall), the loadable
+# batch-script module (bin\batch.mod) was never built here, and three
+# already-listed programs (ls, edlin, move) were missing a lib\*.prg
+# they now need, so linking them would have failed too. All fixed below,
+# together with the 9 programs (dir, label, pwd, del, touch, copy,
+# attrib, stat, chkdsk) and 2 test programs (big64test, corrupt) that
+# had no Makefile.win entry at all. This file's own header comment used
+# to carry a running note about exactly this gap -- removed now that
+# it's closed; if it opens again, that's the place to look.
 #
 
 ASM         = asm02
@@ -62,6 +64,10 @@ KERNEL_BIN  = kernel.bin
 FULL_BIN    = kernel-full.bin
 
 # ---- Kernel object files (in kernel\ subdir, link order matters) ----
+# lib\modload.prg/lib\icall.prg (loadable-module support, needed by
+# kernel\batch.asm's own dispatcher) MUST be part of this list -- the
+# kernel link fails with unresolved symbols (mod_load, mod_release,
+# icall) without them, same as on Linux.
 KOBJ =  kernel\kernel.prg  \
         kernel\fat.prg     \
         kernel\dir.prg     \
@@ -71,7 +77,9 @@ KOBJ =  kernel\kernel.prg  \
         kernel\loader.prg  \
         kernel\batch.prg   \
         kernel\redir.prg   \
-        kernel\glob.prg
+        kernel\glob.prg    \
+        lib\modload.prg    \
+        lib\icall.prg
 
 # ---- Common include dependencies ----
 INCS =  include\bios.inc    \
@@ -82,11 +90,14 @@ INCS =  include\bios.inc    \
 # own exclusion list, which must be kept in sync with this set ----
 SPECIAL_BINS = bin\printenv bin\export bin\unset \
         bin\ls bin\more bin\edlin bin\move bin\xcopy bin\shell \
-        bin\yr bin\ys
+        bin\yr bin\ys \
+        bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
+        bin\stat bin\chkdsk
 
-# ---- The 3 test\*.asm that link against lib\ -- see build_test.bat's
+# ---- The test\*.asm that link against lib\ -- see build_test.bat's
 # own exclusion list, which must be kept in sync with this set ----
-TEST_SPECIAL_BINS = test\bin\envtest test\bin\bumptest test\bin\malloctest
+TEST_SPECIAL_BINS = test\bin\envtest test\bin\bumptest test\bin\malloctest \
+        test\bin\big64test test\bin\corrupt
 
 all: $(FULL_BIN)
 
@@ -123,7 +134,7 @@ kernel\file.prg: kernel\file.asm $(INCS)
 kernel\loader.prg: kernel\loader.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) loader.asm
 
-kernel\batch.prg: kernel\batch.asm $(INCS)
+kernel\batch.prg: kernel\batch.asm $(INCS) include\batchmod.inc
 	cd kernel && $(ASM) $(ASMFLAGS) batch.asm
 
 kernel\redir.prg: kernel\redir.asm $(INCS)
@@ -131,6 +142,19 @@ kernel\redir.prg: kernel\redir.asm $(INCS)
 
 kernel\glob.prg: kernel\glob.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) glob.asm
+
+# kernel\batch_mod.asm: the loadable batch-script module -- NOT part of
+# KOBJ/kernel.bin. A standalone build (own "-m" module link, see the
+# Linux Makefile's own bin/batch.mod rule), landing on disk as
+# bin\batch.mod and loaded fresh into RAM by kernel\batch.asm's own
+# dispatcher whenever a .bat script runs. Without this, batch scripting
+# doesn't work at all on a card built from this Makefile.
+kernel\batch_mod.prg: kernel\batch_mod.asm include\opcodes.def include\bios.inc include\kernel_api.inc include\batchmod.inc include\modformat.inc
+	cd kernel && $(ASM) $(ASMFLAGS) batch_mod.asm
+
+bin\batch.mod: kernel\batch_mod.prg bin
+	$(LINK) $(LFLAGS) -m -o bin\batch.mod kernel\batch_mod.prg
+	-del /F /Q bin\batch.lkb
 
 bin:
 	if not exist bin mkdir bin
@@ -165,8 +189,23 @@ lib\fmt32.prg: lib\fmt32.asm include\opcodes.def
 lib\file_glob.prg: lib\file_glob.asm include\opcodes.def include\bios.inc include\kernel_api.inc include\file_glob.inc
 	cd lib && $(ASM) $(ASMFLAGS) file_glob.asm
 
+lib\pathstr.prg: lib\pathstr.asm include\opcodes.def include\bios.inc include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) pathstr.asm
+
+lib\vollabel.prg: lib\vollabel.asm include\opcodes.def include\kernel_api.inc include\vollabel.inc
+	cd lib && $(ASM) $(ASMFLAGS) vollabel.asm
+
+lib\lineedit.prg: lib\lineedit.asm include\opcodes.def include\bios.inc include\kernel_api.inc include\lineedit.inc
+	cd lib && $(ASM) $(ASMFLAGS) lineedit.asm
+
+lib\icall.prg: lib\icall.asm include\opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) icall.asm
+
+lib\modload.prg: lib\modload.asm include\opcodes.def include\bios.inc include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) modload.asm
+
 #------------------------------------------------------------------
-# The 10 progs\*.asm that link against lib\ -- explicit rules, real
+# The progs\*.asm that link against lib\ -- explicit rules, real
 # incremental rebuilds, matching the Linux Makefile's own overrides for
 # the exact same set (see its own comment for why: each needs an extra
 # lib\*.prg linked in, which the generic single-file case doesn't).
@@ -220,11 +259,25 @@ test\bin\malloctest: test\malloctest.prg lib\heap_malloc.prg test\bin
 	$(LINK) $(LFLAGS) -o test\bin\malloctest test\malloctest.prg lib\heap_malloc.prg
 	-del /F /Q test\bin\malloctest.lkb
 
+test\big64test.prg: test\big64test.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd test && $(ASM) $(ASMFLAGS) big64test.asm
+
+test\bin\big64test: test\big64test.prg lib\fmt32.prg test\bin
+	$(LINK) $(LFLAGS) -o test\bin\big64test test\big64test.prg lib\fmt32.prg
+	-del /F /Q test\bin\big64test.lkb
+
+test\corrupt.prg: test\corrupt.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd test && $(ASM) $(ASMFLAGS) corrupt.asm
+
+test\bin\corrupt: test\corrupt.prg lib\ymodem.prg lib\fmt32.prg test\bin
+	$(LINK) $(LFLAGS) -o test\bin\corrupt test\corrupt.prg lib\ymodem.prg lib\fmt32.prg
+	-del /F /Q test\bin\corrupt.lkb
+
 progs\ls.prg: progs\ls.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) ls.asm
 
-bin\ls: progs\ls.prg lib\heap_bump.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\ls progs\ls.prg lib\heap_bump.prg lib\env.prg
+bin\ls: progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg bin
+	$(LINK) $(LFLAGS) -o bin\ls progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg
 	-del /F /Q bin\ls.lkb
 
 progs\more.prg: progs\more.asm include\kernel_api.inc include\bios.inc include\opcodes.def
@@ -237,15 +290,15 @@ bin\more: progs\more.prg lib\env.prg bin
 progs\edlin.prg: progs\edlin.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) edlin.asm
 
-bin\edlin: progs\edlin.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg
+bin\edlin: progs\edlin.prg lib\env.prg lib\lineedit.prg bin
+	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg lib\lineedit.prg
 	-del /F /Q bin\edlin.lkb
 
 progs\move.prg: progs\move.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) move.asm
 
-bin\move: progs\move.prg lib\move.prg bin
-	$(LINK) $(LFLAGS) -o bin\move progs\move.prg lib\move.prg
+bin\move: progs\move.prg lib\move.prg lib\file_glob.prg bin
+	$(LINK) $(LFLAGS) -o bin\move progs\move.prg lib\move.prg lib\file_glob.prg
 	-del /F /Q bin\move.lkb
 
 progs\shell.prg: progs\shell.asm include\kernel_api.inc include\bios.inc include\opcodes.def
@@ -269,6 +322,69 @@ bin\ys: progs\ys.prg lib\ymodem.prg lib\fmt32.prg lib\file_glob.prg bin
 	$(LINK) $(LFLAGS) -o bin\ys progs\ys.prg lib\ymodem.prg lib\fmt32.prg lib\file_glob.prg
 	-del /F /Q bin\ys.lkb
 
+progs\dir.prg: progs\dir.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\file_glob.inc include\vollabel.inc
+	cd progs && $(ASM) $(ASMFLAGS) dir.asm
+
+bin\dir: progs\dir.prg lib\fmt32.prg lib\file_glob.prg lib\vollabel.prg lib\pathstr.prg bin
+	$(LINK) $(LFLAGS) -o bin\dir progs\dir.prg lib\fmt32.prg lib\file_glob.prg lib\vollabel.prg lib\pathstr.prg
+	-del /F /Q bin\dir.lkb
+
+progs\label.prg: progs\label.asm include\kernel_api.inc include\opcodes.def include\vollabel.inc
+	cd progs && $(ASM) $(ASMFLAGS) label.asm
+
+bin\label: progs\label.prg lib\vollabel.prg bin
+	$(LINK) $(LFLAGS) -o bin\label progs\label.prg lib\vollabel.prg
+	-del /F /Q bin\label.lkb
+
+progs\pwd.prg: progs\pwd.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) pwd.asm
+
+bin\pwd: progs\pwd.prg lib\pathstr.prg bin
+	$(LINK) $(LFLAGS) -o bin\pwd progs\pwd.prg lib\pathstr.prg
+	-del /F /Q bin\pwd.lkb
+
+progs\del.prg: progs\del.asm include\kernel_api.inc include\opcodes.def include\file_glob.inc
+	cd progs && $(ASM) $(ASMFLAGS) del.asm
+
+bin\del: progs\del.prg lib\file_glob.prg bin
+	$(LINK) $(LFLAGS) -o bin\del progs\del.prg lib\file_glob.prg
+	-del /F /Q bin\del.lkb
+
+progs\touch.prg: progs\touch.asm include\kernel_api.inc include\opcodes.def include\file_glob.inc
+	cd progs && $(ASM) $(ASMFLAGS) touch.asm
+
+bin\touch: progs\touch.prg lib\file_glob.prg bin
+	$(LINK) $(LFLAGS) -o bin\touch progs\touch.prg lib\file_glob.prg
+	-del /F /Q bin\touch.lkb
+
+progs\copy.prg: progs\copy.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\file_glob.inc
+	cd progs && $(ASM) $(ASMFLAGS) copy.asm
+
+bin\copy: progs\copy.prg lib\file_glob.prg bin
+	$(LINK) $(LFLAGS) -o bin\copy progs\copy.prg lib\file_glob.prg
+	-del /F /Q bin\copy.lkb
+
+progs\attrib.prg: progs\attrib.asm include\kernel_api.inc include\opcodes.def include\file_glob.inc
+	cd progs && $(ASM) $(ASMFLAGS) attrib.asm
+
+bin\attrib: progs\attrib.prg lib\file_glob.prg bin
+	$(LINK) $(LFLAGS) -o bin\attrib progs\attrib.prg lib\file_glob.prg
+	-del /F /Q bin\attrib.lkb
+
+progs\stat.prg: progs\stat.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) stat.asm
+
+bin\stat: progs\stat.prg lib\fmt32.prg bin
+	$(LINK) $(LFLAGS) -o bin\stat progs\stat.prg lib\fmt32.prg
+	-del /F /Q bin\stat.lkb
+
+progs\chkdsk.prg: progs\chkdsk.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) chkdsk.asm
+
+bin\chkdsk: progs\chkdsk.prg lib\fmt32.prg bin
+	$(LINK) $(LFLAGS) -o bin\chkdsk progs\chkdsk.prg lib\fmt32.prg
+	-del /F /Q bin\chkdsk.lkb
+
 #------------------------------------------------------------------
 # Link rules (boot/kernel)
 #------------------------------------------------------------------
@@ -279,8 +395,13 @@ $(MBR_BIN): boot\mbr.prg
 $(KRNBOOT_BIN): boot\krnboot.prg
 	$(LINK) $(LFLAGS) -o $(KRNBOOT_BIN) boot\krnboot.prg
 
+# python3 (any recent version, on PATH) runs the same margin guard the
+# Linux build does -- see tools\check_kernel_margin.py's own header.
+# Catches a real bug class (an uninitialized kernel buffer silently left
+# out of the linked binary) before it ever reaches hardware.
 $(KERNEL_BIN): $(KOBJ)
 	$(LINK) $(LFLAGS) -o $(KERNEL_BIN) $(KOBJ)
+	python3 tools\check_kernel_margin.py
 
 #------------------------------------------------------------------
 # Concatenate bootstrap + kernel proper into the final install image --
@@ -298,18 +419,20 @@ $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
 mbr: $(MBR_BIN)
 
 # Build every progs\*.asm into bin\<name> (bare name, no extension --
-# matches the on-device \bin layout). The 8 lib-linked programs above
-# get real nmake incremental rebuilds via SPECIAL_BINS; everything else
-# is auto-discovered and (re)built by build_progs.bat -- see this
-# file's own header comment for why the split exists.
-progs: bin $(SPECIAL_BINS)
+# matches the on-device \bin layout), plus bin\batch.mod (the loadable
+# batch-script module -- required for .bat scripts to work at all,
+# matching the Linux Makefile's own "progs: $(PROG_EXES) bin/batch.mod").
+# The SPECIAL_BINS programs get real nmake incremental rebuilds;
+# everything else is auto-discovered and (re)built by build_progs.bat --
+# see this file's own header comment for why the split exists.
+progs: bin $(SPECIAL_BINS) bin\batch.mod
 	build_progs.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
 
 # Build every test\*.asm into test\bin\<name> -- diagnostic/subsystem-
-# exercising programs, kept out of bin\ entirely (moved out of progs\
-# 2026-07-25) so a normal install's \bin never includes them. Same
-# split as "progs" above: the 3 lib-linked ones via TEST_SPECIAL_BINS,
-# everything else auto-discovered by build_test.bat.
+# exercising programs, kept out of bin\ entirely so a normal install's
+# \bin never includes them. Same split as "progs" above: the
+# TEST_SPECIAL_BINS ones via real nmake rules, everything else
+# auto-discovered by build_test.bat.
 test: test\bin $(TEST_SPECIAL_BINS)
 	build_test.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
 

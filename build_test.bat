@@ -37,6 +37,8 @@ for %%f in (test\*.asm) do (
     if /I "!name!"=="envtest"    set "skip=1"
     if /I "!name!"=="bumptest"   set "skip=1"
     if /I "!name!"=="malloctest" set "skip=1"
+    if /I "!name!"=="big64test"  set "skip=1"
+    if /I "!name!"=="corrupt"    set "skip=1"
 
     if not defined skip (
         echo Building !name!...

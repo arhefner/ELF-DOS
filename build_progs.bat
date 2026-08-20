@@ -47,6 +47,15 @@ for %%f in (progs\*.asm) do (
     if /I "!name!"=="shell"      set "skip=1"
     if /I "!name!"=="yr"         set "skip=1"
     if /I "!name!"=="ys"         set "skip=1"
+    if /I "!name!"=="dir"        set "skip=1"
+    if /I "!name!"=="label"      set "skip=1"
+    if /I "!name!"=="pwd"        set "skip=1"
+    if /I "!name!"=="del"        set "skip=1"
+    if /I "!name!"=="touch"      set "skip=1"
+    if /I "!name!"=="copy"       set "skip=1"
+    if /I "!name!"=="attrib"     set "skip=1"
+    if /I "!name!"=="stat"       set "skip=1"
+    if /I "!name!"=="chkdsk"     set "skip=1"
 
     if not defined skip (
         echo Building !name!...

@@ -335,6 +335,7 @@ $(KRNBOOT_BIN): boot/krnboot.prg
 
 $(KERNEL_BIN): $(KOBJ)
 	$(LINK) $(LFLAGS) -o $(KERNEL_BIN) $(KOBJ)
+	python3 tools/check_kernel_margin.py
 
 #------------------------------------------------------------------
 # Concatenate bootstrap + kernel proper into final install image.
