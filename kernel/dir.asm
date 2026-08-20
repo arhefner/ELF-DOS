@@ -883,14 +883,160 @@ clba_done:
 
             proc    _dir_fmt83
 
+            ; REAL BUG FOUND AND FIXED (2026-08-20, hardware-found "No
+            ; shell on C:." investigation): this routine used to copy
+            ; the raw short name straight through with no case folding
+            ; at all. That was fine for every card this project had
+            ; ever tested against (all created with Linux's mtools,
+            ; which writes a real LFN entry for any lowercase name --
+            ; dir_read always prefers a valid LFN over this fallback,
+            ; so the no-folding gap here was never exercised). A card
+            ; created with Windows Explorer's own FAT/VFAT writer
+            ; behaves differently: for a name that's already clean 8.3
+            ; and either all-lowercase or all-uppercase, Windows skips
+            ; the LFN entirely and instead sets bits 3/4 (0x08/0x10) of
+            ; the raw entry's NTRes byte (offset 12) -- "display the
+            ; base name / extension in lowercase" -- while the short
+            ; name field itself stays uppercase on disk. This routine
+            ; had no idea that byte existed, so "bin"/"shell" (kernel-
+            ; internal literal paths, always lowercase) never matched
+            ; the "BIN"/"SHELL" this routine produced, even though the
+            ; files were completely, correctly present -- confirmed via
+            ; a hardware round pointing straight at path_resolve's own
+            ; "bin" lookup, then via direct byte inspection of the raw
+            ; entries on the actual failing card (NTRes=$08 on both).
+            ;
+            ; Fixed by reading NTRes once, up front, and applying the
+            ; corresponding lowercase-fold to each field's own copy
+            ; loop below, conditioned on that field's own hint bit.
+            ; The fold itself (D |= $20) is only applied to a byte
+            ; that's first confirmed to be an uppercase letter ('A'-
+            ; 'Z') -- an earlier draft applied it unconditionally,
+            ; reasoning that every OTHER FAT-legal short-name byte
+            ; (digits, space, most of the allowed punctuation) already
+            ; has bit 5 set and so would be unaffected regardless; that
+            ; reasoning missed '@' ($40), which does NOT have bit 5
+            ; set and would have been silently corrupted into a
+            ; backtick by a blanket OR -- caught during review, before
+            ; ever reaching hardware, by checking the OR's effect
+            ; against the FULL FAT-legal short-name character set
+            ; rather than just the common cases. See fmt83_name/
+            ; fmt83_ext below for the actual range check.
+            ;
+            ; REGRESSION FOUND AND FIXED (2026-08-20, same investigation,
+            ; found via a SECOND hardware round after this fix's first
+            ; draft): the first draft of this setup used RA to hold
+            ; &fmt83_ext_fold, and both copy loops below used R9 as
+            ; scratch to hold the raw byte across the SMI range check --
+            ; but dir_read's OWN caller-side code, immediately after this
+            ; routine returns (drd_got_name and everything through the
+            ; DIRENT_WRTDATE write), depends on BOTH RA (the raw entry
+            ; base pointer, re-read for DE_ATTR/DE_CLUSTER/DE_SIZE/
+            ; DE_WRTTIME/DE_WRTDATE) and R9 (the result buffer base
+            ; pointer, re-read for every DIRENT_* field write) surviving
+            ; completely untouched across this call -- neither register
+            ; is in this routine's own documented "Modifies" list, and
+            ; for good reason: the ORIGINAL implementation never touched
+            ; either one. This is exactly the class of bug this project
+            ; has hit before (a callee assuming a register is free scratch
+            ; when a distant caller actually depends on it surviving) --
+            ; confirmed by a hardware round showing "bin" resolving
+            ; correctly (the NAME comparison itself doesn't depend on RA/
+            ; R9) followed immediately by garbage directory entries once
+            ; the corrupted RA-based cluster number was used to descend
+            ; into "bin" for the "shell" lookup. Fixed by using ONLY R7/
+            ; R8 as scratch (confirmed, by grepping dir_read's own body,
+            ; that neither is referenced anywhere between drd_check_entry
+            ; and the end of the DIRENT_* field-population code) and by
+            ; never holding two fold-mask addresses in registers at once
+            ; -- RB is reused sequentially for the base-name write, then
+            ; again for the extension write, rather than needing a second
+            ; register to hold both simultaneously. R8 holds the NTRes
+            ; byte's own address throughout this setup block (re-read
+            ; twice, once per hint bit, with no D-survival concern since
+            ; it's kept as an address, not a value). Every mov/str here
+            ; is ordered mov-then-ldn/ldi-then-str with no mov wedged in
+            ; between a value being computed and where it's stored,
+            ; matching gotcha #4; the fold application itself stages
+            ; the mask into M(R2) before loading the real byte into D,
+            ; matching gotcha #18 (see kernel/rtc.asm's own "or" usage
+            ; for the exact same staging shape already proven in this
+            ; codebase).
+            mov     r8, rf
+            add16   r8, 12              ; R8 = &NTRes (offset 12), kept
+                                        ; as an ADDRESS so it can be
+                                        ; re-read below with no D-
+                                        ; survival concern at all
+
+            ldn     r8                  ; D = NTRes byte
+            ani     $08                 ; lowercase-base-name hint bit
+            lbz     fmt83_base_nofold
+            mov     rb, fmt83_base_fold
+            ldi     $20
+            str     rb                  ; fmt83_base_fold = $20
+            lbr     fmt83_base_done
+fmt83_base_nofold:
+            mov     rb, fmt83_base_fold
+            ldi     $00
+            str     rb                  ; fmt83_base_fold = $00
+fmt83_base_done:
+
+            ldn     r8                  ; D = NTRes byte again (R8
+                                        ; unchanged -- safe to re-read)
+            ani     $10                 ; lowercase-extension hint bit
+            lbz     fmt83_ext_nofold
+            mov     rb, fmt83_ext_fold
+            ldi     $20
+            str     rb                  ; fmt83_ext_fold = $20
+            lbr     fmt83_ext_hint_done
+fmt83_ext_nofold:
+            mov     rb, fmt83_ext_fold
+            ldi     $00
+            str     rb                  ; fmt83_ext_fold = $00
+fmt83_ext_hint_done:
+
             ; --- Copy and trim 8-character name field ---
             mov     rb, rd              ; RB = dest start (trim boundary ref)
             ldi     8
             plo     rc                  ; RC.0 = 8 char count
 
 fmt83_name:
-            lda     rf                  ; D = name byte, RF advances
-            str     rd                  ; copy to dest
+            ; D |= $20 is only a safe "fold to lowercase" for a byte
+            ; that's already an uppercase letter -- every OTHER FAT-
+            ; legal short-name byte (digits, space, and most of the
+            ; allowed punctuation) already has bit 5 set so it would be
+            ; a no-op regardless, EXCEPT '@' ($40), which does not, and
+            ; would be silently corrupted into a backtick by a blanket
+            ; OR. So this explicitly range-checks 'A'-'Z' first (via
+            ; the SMI/SMI double-subtract idiom -- range membership
+            ; checked without a compare-and-branch chain per possible
+            ; letter, same "byte in a range" pattern used elsewhere in
+            ; this project for a drive-letter check, just for a wider
+            ; range here) and only applies the fold to a genuine letter.
+            ; R7.0 stashes the raw byte across this test, since SMI
+            ; itself consumes D -- R7 is free scratch in this loop
+            ; (confirmed unused anywhere in dir_read between entry-
+            ; check and the DIRENT_* field writes; RA/R9 are NOT free
+            ; here -- see this proc's own header comment for why).
+            lda     rf                  ; D = name byte (RF advances)
+            plo     r7                  ; R7.0 = raw byte (reload target)
+            smi     'A'
+            lbnf    fmt83_name_nofold   ; byte < 'A': not an uppercase letter
+            smi     26
+            lbdf    fmt83_name_nofold   ; byte > 'Z': not an uppercase letter
+
+            mov     r8, fmt83_base_fold
+            ldn     r8
+            str     r2                  ; M(R2) = base-name fold mask
+            glo     r7                  ; D = raw byte, reloaded (gotcha
+                                        ; #18 -- loaded last, right
+                                        ; before the consuming "or")
+            or                          ; D = byte | fold_mask
+            lbr     fmt83_name_store
+fmt83_name_nofold:
+            glo     r7                  ; D = raw byte, unmodified
+fmt83_name_store:
+            str     rd                  ; copy (possibly folded) byte
             inc     rd
             dec     rc
             glo     rc
@@ -956,7 +1102,27 @@ fmt83_has_ext:
             ldi     3
             plo     rc
 fmt83_ext:
-            lda     rf                  ; D = ext byte
+            ; same 'A'-'Z' range check as fmt83_name above, and the
+            ; same reason for it (see that loop's own comment) -- R7.0
+            ; stashes the raw byte across the SMI test (R7, not R9 --
+            ; see this proc's own header comment for why R9 is unsafe).
+            lda     rf                  ; D = ext byte (RF advances)
+            plo     r7
+            smi     'A'
+            lbnf    fmt83_ext_nofold_byte
+            smi     26
+            lbdf    fmt83_ext_nofold_byte
+
+            mov     r8, fmt83_ext_fold
+            ldn     r8
+            str     r2                  ; M(R2) = extension fold mask
+            glo     r7                  ; D = raw byte, reloaded
+                                        ; (gotcha #18)
+            or                          ; D = byte | fold_mask
+            lbr     fmt83_ext_store
+fmt83_ext_nofold_byte:
+            glo     r7                  ; D = raw byte, unmodified
+fmt83_ext_store:
             str     rd
             inc     rd
             dec     rc
@@ -990,6 +1156,12 @@ fmt83_null:
             ldi     0
             str     rd                  ; null terminator
             rtn
+
+fmt83_base_fold:    db  0   ; local to this proc only -- $00 or $20,
+                            ; the base-name lowercase-fold mask (see
+                            ; this proc's own header comment)
+fmt83_ext_fold:     db  0   ; local to this proc only -- same, for the
+                            ; 3-character extension
 
 ;==================================================================
 ; _dir_proc_lfn: accumulate one LFN entry into dir_lfn buffer
