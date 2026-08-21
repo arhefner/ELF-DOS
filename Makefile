@@ -323,6 +323,10 @@ bin/ys: progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg | bin
 	$(LINK) $(LFLAGS) -o bin/ys progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg
 	rm -f bin/ys.lkb
 
+bin/termsize: progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg | bin
+	$(LINK) $(LFLAGS) -o bin/termsize progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg
+	rm -f bin/termsize.lkb
+
 #------------------------------------------------------------------
 # Link rules
 #------------------------------------------------------------------

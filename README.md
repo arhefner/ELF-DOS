@@ -238,8 +238,8 @@ happens by writing the built image to an SD card and running it on
 physical Elf/OS-compatible hardware:
 
 ```
-make install DEV=/dev/sdX          # write MBR + kernel (new/blank disk)
-make update DEV=/dev/sdX           # refresh kernel only (MBR already installed)
+make install DEV=/dev/mmcblkx      # write MBR + kernel (new/blank disk)
+make update DEV=/dev/mmcblkx       # refresh kernel only (MBR already installed)
 ```
 
 On Windows, use `nmake /F Makefile.win install DEV=\\.\PhysicalDriveN` /

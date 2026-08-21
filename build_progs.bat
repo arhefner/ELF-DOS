@@ -47,6 +47,7 @@ for %%f in (progs\*.asm) do (
     if /I "!name!"=="shell"      set "skip=1"
     if /I "!name!"=="yr"         set "skip=1"
     if /I "!name!"=="ys"         set "skip=1"
+    if /I "!name!"=="termsize"   set "skip=1"
     if /I "!name!"=="dir"        set "skip=1"
     if /I "!name!"=="label"      set "skip=1"
     if /I "!name!"=="pwd"        set "skip=1"

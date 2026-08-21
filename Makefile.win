@@ -114,7 +114,7 @@ INCS =  include\bios.inc    \
 # own exclusion list, which must be kept in sync with this set ----
 SPECIAL_BINS = bin\printenv bin\export bin\unset \
         bin\ls bin\more bin\edlin bin\move bin\xcopy bin\shell \
-        bin\yr bin\ys \
+        bin\yr bin\ys bin\termsize \
         bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
         bin\stat bin\chkdsk
 
@@ -345,6 +345,13 @@ progs\ys.prg: progs\ys.asm include\kernel_api.inc include\bios.inc include\opcod
 bin\ys: progs\ys.prg lib\ymodem.prg lib\fmt32.prg lib\file_glob.prg bin
 	$(LINK) $(LFLAGS) -o bin\ys progs\ys.prg lib\ymodem.prg lib\fmt32.prg lib\file_glob.prg
 	-del /F /Q bin\ys.lkb
+
+progs\termsize.prg: progs\termsize.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\ymodem.inc
+	cd progs && $(ASM) $(ASMFLAGS) termsize.asm
+
+bin\termsize: progs\termsize.prg lib\ymodem.prg lib\fmt32.prg lib\env.prg bin
+	$(LINK) $(LFLAGS) -o bin\termsize progs\termsize.prg lib\ymodem.prg lib\fmt32.prg lib\env.prg
+	-del /F /Q bin\termsize.lkb
 
 progs\dir.prg: progs\dir.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\file_glob.inc include\vollabel.inc
 	cd progs && $(ASM) $(ASMFLAGS) dir.asm
