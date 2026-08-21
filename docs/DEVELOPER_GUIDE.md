@@ -30,10 +30,16 @@ uses:
 ```
 Offset   Contents
 0-2      The letters 'E', 'D', 'F'
-3        Program version number
-4-5      Reserved
+3        Program major version number
+4        Program minor version number
+5        Reserved
 6+       Program code -- this is where execution starts
 ```
+
+This mirrors the kernel's own header exactly (see `KERNEL_HDR_VER` above). Nothing
+reads a program's own version bytes at load time today - the loader only checks the
+magic - so a program's version is informational, for whatever the program itself
+wants to use it for.
 
 Programs are loaded at a fixed address, `PROG_BASE`, defined in
 `kernel_api.inc`.

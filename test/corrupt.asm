@@ -110,7 +110,8 @@ FAT_BAD:        equ     $FFF7
 
             db      'E','D','F'         ; ELF-DOS program magic
             db      1                   ; program major version
-            dw      0                   ; reserved
+            db      0                   ; program minor version
+            db      0                   ; reserved
 
 start:
             ; argc must be >= 2 (mode word present) for anything below

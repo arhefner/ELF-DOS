@@ -57,11 +57,18 @@
             org     PROG_BASE
 
 ;------------------------------------------------------------------
-; 6-byte program header (mirrors the kernel's own header convention)
+; 6-byte program header (mirrors the kernel's own header layout
+; exactly: magic + major + minor + 1 reserved byte -- widened from a
+; single version byte + 2 reserved bytes 2026-08-21, before release,
+; specifically for this consistency; nothing reads this byte pair at
+; load time today -- see kernel/loader.asm's prog_run, which only
+; ever validates the 3 magic bytes -- so it's a labeling change with
+; no effect on program size or the loader)
 ;------------------------------------------------------------------
             db      'E','D','F'         ; ELF-DOS program magic
             db      1                   ; program major version
-            dw      0                   ; reserved
+            db      0                   ; program minor version
+            db      0                   ; reserved
 
 ;------------------------------------------------------------------
 ; Program entry point - PROG_BASE + $06

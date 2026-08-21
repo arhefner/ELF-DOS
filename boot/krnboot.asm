@@ -172,7 +172,7 @@ boot_init2:
             call        f_setbd             ; configure serial baud rate
 
             call        f_inmsg
-            db          "ELF-DOS v0.1",13,10,0
+            db          "ELF-DOS v1.0",13,10,0
 
 ;--------------------------------------------------------------
 ; Inlined, multi-partition bpb_init (relocated from kernel/bpb.asm,

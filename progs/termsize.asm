@@ -83,7 +83,8 @@ TS_DIGIT_MAX:       equ     5           ; digits per field before
 
             db      'E','D','F'         ; ELF-DOS program magic
             db      1                   ; program major version
-            dw      0                   ; reserved
+            db      0                   ; program minor version
+            db      0                   ; reserved
 
 ;------------------------------------------------------------------
 ; Program entry point - PROG_BASE + $06

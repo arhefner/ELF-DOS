@@ -18,7 +18,8 @@ TYPE_CHUNK_LEN: equ     64
 
             db      'E','D','F'         ; ELF-DOS program magic
             db      1                   ; program major version
-            dw      0                   ; reserved
+            db      0                   ; program minor version
+            db      0                   ; reserved
 
 ;------------------------------------------------------------------
 ; Program entry point - PROG_BASE + $06

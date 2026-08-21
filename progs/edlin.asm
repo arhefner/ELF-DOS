@@ -139,7 +139,8 @@ ED_DEFAULT_LOOKBACK: equ 11         ; L with no explicit range starts
 
             db      'E','D','F'         ; ELF-DOS program magic
             db      1                   ; program major version
-            dw      0                   ; reserved
+            db      0                   ; program minor version
+            db      0                   ; reserved
 
 ;------------------------------------------------------------------
 ; Program entry point - PROG_BASE + $06
