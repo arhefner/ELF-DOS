@@ -171,8 +171,59 @@ load_halt:  lbr         load_halt       ; hang -- nothing to return to
 boot_init2:
             call        f_setbd             ; configure serial baud rate
 
+            ; Print "ELF-DOS v<major>.<minor>" read live from the
+            ; kernel's own header bytes at KERNEL_HDR_VER, rather than
+            ; a hand-maintained literal -- mirrors progs/ver.asm's own
+            ; already-proven approach exactly (same KERNEL_HDR_VER
+            ; read, same f_uintout formatting), just via direct BIOS
+            ; calls (f_inmsg/f_msg, not K_INMSG/K_MSG) since this is
+            ; boot code, not a loaded program. Safe to read here: the
+            ; entire kernel image, including its own header at $0100,
+            ; has already been loaded into RAM by the sector loop
+            ; above by the time load_done reaches boot_init2. RD is
+            ; set to the destination first in each pair below, since
+            ; "mov" itself clobbers D -- reading it afterward via
+            ; lda/ldn is safe either way (see project notes).
+            mov         rd, boot_ver_major
+            mov         rf, KERNEL_HDR_VER
+            lda         rf                  ; D = major version byte, RF++
+            str         rd                  ; boot_ver_major = major byte
+            inc         rd
+            ldn         rf                  ; D = minor version byte
+            str         rd                  ; boot_ver_minor = minor byte
+
             call        f_inmsg
-            db          "ELF-DOS v1.0",13,10,0
+            db          "ELF-DOS v",0
+
+            mov         rf, boot_ver_major
+            ldn         rf
+            plo         rd
+            ldi         0
+            phi         rd
+            mov         rf, boot_ver_buf
+            call        f_uintout           ; writes decimal ASCII into *rf, advances rf
+            ldi         0
+            str         rf                  ; null-terminate
+            mov         rf, boot_ver_buf
+            call        f_msg
+
+            call        f_inmsg
+            db          ".",0
+
+            mov         rf, boot_ver_minor
+            ldn         rf
+            plo         rd
+            ldi         0
+            phi         rd
+            mov         rf, boot_ver_buf
+            call        f_uintout
+            ldi         0
+            str         rf
+            mov         rf, boot_ver_buf
+            call        f_msg
+
+            call        f_inmsg
+            db          13,10,0
 
 ;--------------------------------------------------------------
 ; Inlined, multi-partition bpb_init (relocated from kernel/bpb.asm,
@@ -850,6 +901,14 @@ boot_drive_base:    dw      0           ; DRIVE_DATA_PTR's resolved
                                         ; read once before the loop
 boot_present_addr:  dw      0           ; this iteration's own
                                         ; &drive_present[idx]
+
+; Scratch for boot_init2's own dynamic version-banner print, above --
+; unrelated to the partition-scan fields just above, grouped here only
+; to keep this file's single data-declaration area intact.
+boot_ver_major:     db      0
+boot_ver_minor:     db      0
+boot_ver_buf:       ds      6           ; decimal scratch (max "65535"+null)
+
 boot_scratch:       ds      512
 
 ;--------------------------------------------------------------

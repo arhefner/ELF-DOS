@@ -718,18 +718,50 @@ se_reject:
             rtn
 
 se_name_ok:
-            ; best-effort auto-create /cfg if it doesn't already exist
-            ; -- BUG FIX (2026-08-21): without this, the very first
-            ; EXPORT on a fresh install (or any drive that's never had
-            ; /cfg created) failed at the K_FILE_OPEN below with no
-            ; error message at all (see export.asm's own header --
-            ; env_setenv's DF=1 just sets an internal "failed" flag,
-            ; never printed), which read as a silent no-op rather than
-            ; a real failure. K_DIR_CREATE's own DF=1 "already exists"
-            ; case is deliberately ignored here (expected, common, and
-            ; harmless) -- any OTHER failure (e.g. a full root, or an
-            ; invalid drive) is left to surface naturally at the
-            ; K_FILE_OPEN just below instead of being duplicated here.
+            ; Open the temp file for write (mode 1 = create/overwrite,
+            ; always truncates fresh -- confirmed via this project's
+            ; own file_open history) -- retrying with a best-effort
+            ; /cfg auto-create ONLY if this first attempt fails.
+            ;
+            ; RESTRUCTURED (2026-08-21) from an earlier version of this
+            ; same fix that called K_DIR_CREATE unconditionally, every
+            ; single call. That version was investigated as a possible
+            ; cause of real, hardware-reported /cfg corruption after
+            ; heavy EXPORT/UNSET activity -- ruled out by reading
+            ; dir_create's own collision path directly (kernel/file.asm):
+            ; on an already-existing target it branches straight to its
+            ; error return with zero intervening instructions, so it's
+            ; a provably clean, read-only scan of the parent directory,
+            ; not a write. The real, load-bearing effect of this fix
+            ; making EXPORT/UNSET actually complete their full create-
+            ; temp/delete-old/rename sequence reliably for the first
+            ; time -- and that sequence never reuses a deleted
+            ; directory-entry slot -- is the far more likely mechanism;
+            ; see test/dirgrowtest.asm, built the same day to test that
+            ; directly. This restructuring doesn't change end-user
+            ; behavior at all (still auto-creates /cfg exactly when
+            ; needed) -- it just cuts the unconditional per-call
+            ; directory scan down to only the rare case that actually
+            ; needs it (a missing /cfg), instead of paying for it on
+            ; every single call once /cfg already exists.
+            mov     rf, env_tmp_path
+            mov     rd, env_out_fcb
+            mov     ra, env_out_iobuf
+            ldi     1                   ; set LAST (mov clobbers D,
+                                        ; gotcha #4)
+            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
+                                        ; env_out_fcb is a fixed
+                                        ; address, nothing to capture)
+            lbnf    se_opened           ; success on the first try --
+                                        ; the common case, /cfg already
+                                        ; exists
+
+            ; first attempt failed -- best-effort auto-create /cfg
+            ; (K_DIR_CREATE's own DF=1 "already exists" case is
+            ; deliberately ignored -- expected, common, and harmless;
+            ; any OTHER failure, e.g. a full root or an invalid drive,
+            ; is left to surface naturally at the retry just below
+            ; instead of being duplicated here) and retry once.
             mov     rf, env_cfg_path
             call    K_DIR_CREATE        ; DF ignored -- see above.
                                         ; K_DIR_CREATE has no
@@ -743,19 +775,16 @@ se_name_ok:
                                         ; is reloaded fresh from
                                         ; memory right below anyway
 
-            ; open the temp file for write (mode 1 = create/
-            ; overwrite, always truncates fresh -- confirmed via this
-            ; project's own file_open history)
             mov     rf, env_tmp_path
             mov     rd, env_out_fcb
             mov     ra, env_out_iobuf
             ldi     1                   ; set LAST (mov clobbers D,
                                         ; gotcha #4)
-            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
-                                        ; env_out_fcb is a fixed
-                                        ; address, nothing to capture)
-            lbdf    se_reject           ; can't create temp file
+            call    K_FILE_OPEN         ; DF=0/1
+            lbdf    se_reject           ; still can't create temp file
+                                        ; -- give up
 
+se_opened:
             mov     rb, env_found
             ldi     0
             str     rb                  ; env_found = 0
@@ -979,18 +1008,29 @@ ue_reject:
             rtn
 
 ue_name_ok:
-            ; best-effort auto-create /cfg if it doesn't already exist
-            ; -- same reasoning as env_setenv's own identical fix
-            ; (2026-08-21), but doubly important here: without it,
-            ; UNSET on a totally fresh install (no /cfg at all) failed
-            ; the K_FILE_OPEN below and returned DF=1, breaking this
-            ; routine's OWN documented "DF=0 even if the variable was
-            ; never set" idempotent-success contract -- a name that
-            ; was never set should never be able to make UNSET report
-            ; failure. DF ignored for the same reason as env_setenv's
-            ; copy of this call.
+            ; Open the temp file for write, retrying with a best-
+            ; effort /cfg auto-create ONLY if the first attempt fails
+            ; -- restructured the same way and for the same reason as
+            ; env_setenv's own identical block above (see its own
+            ; comment for the full reasoning, including why the
+            ; earlier unconditional-K_DIR_CREATE version was
+            ; investigated, and ruled out, as a possible cause of real
+            ; /cfg corruption). Doubly important that /cfg still gets
+            ; auto-created here when genuinely missing: without SOME
+            ; success path, a totally fresh install would make UNSET
+            ; report failure for a name that was never set to begin
+            ; with, breaking this routine's own documented "DF=0 even
+            ; if the variable was never set" idempotent-success
+            ; contract.
+            mov     rf, env_tmp_path
+            mov     rd, env_out_fcb
+            mov     ra, env_out_iobuf
+            ldi     1
+            call    K_FILE_OPEN         ; DF=0/1
+            lbnf    ue_opened           ; success on the first try
+
             mov     rf, env_cfg_path
-            call    K_DIR_CREATE
+            call    K_DIR_CREATE        ; DF ignored -- see above
 
             mov     rf, env_tmp_path
             mov     rd, env_out_fcb
@@ -1001,6 +1041,7 @@ ue_name_ok:
                                         ; address, nothing to capture)
             lbdf    ue_reject
 
+ue_opened:
             mov     rf, env_file_path
             mov     rd, env_in_fcb
             mov     ra, env_in_iobuf

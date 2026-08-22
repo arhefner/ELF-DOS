@@ -686,11 +686,36 @@ dns_subdir:
             sm                          ; D = dir_sect - bpb_spc
             lbnf    dns_in_cluster      ; dir_sect < bpb_spc: still same cluster
 
-            ; need the next cluster in the chain
-            mov     rf, dir_sect
-            ldi     0
-            str     rf                  ; dir_sect = 0
-            plo     rc                  ; RC.0 = 0 (sector 0 of new cluster)
+            ; need the next cluster in the chain -- BUG FIX (2026-08-22,
+            ; real hardware-found /cfg + root corruption, root-caused
+            ; via a controlled repro in test/dirgrowtest.asm): dir_sect
+            ; must NOT be reset to 0 here, before fat_get has actually
+            ; confirmed a real next cluster exists. The original code
+            ; did exactly that unconditionally -- so when the chain is
+            ; genuinely exhausted (the dns_end path just below), this
+            ; routine still correctly reports DF=1, but has ALREADY
+            ; left dir_sect sitting at 0, a value only meaningful if a
+            ; real new cluster had been found. A caller that then calls
+            ; this routine a SECOND time (exactly what _file_create's
+            ; own "doesn't fit, get the next sector" logic does, after
+            ; _scan_dir_for_name's own earlier scan already hit this
+            ; same end-of-chain) increments from that stale 0 to 1,
+            ; concludes "still room in the current cluster" (1 < spc),
+            ; and silently reads and reuses an already-occupied sector
+            ; instead of ever reaching fc_grow -- fat_alloc/dir_clust
+            ; are never touched, no error is ever reported (the write
+            ; itself is well-formed, just aimed at the wrong sector),
+            ; and every subsequent call repeats the identical sequence,
+            ; permanently overwriting that one sector. Confirmed via a
+            ; hardware diagnostic trace (test/dirgrowtest.asm, printing
+            ; the target LBA/cluster/sector of every directory-entry
+            ; write): the sector index climbed cleanly through an
+            ; entire cluster (0-31 for this card's spc=32) then dropped
+            ; to exactly 1 and stayed there for the rest of the run,
+            ; while the cluster number never changed -- exactly what
+            ; this mechanism predicts. Fixed by moving the dir_sect=0
+            ; reset into dns_not_eoc below, so it only happens once
+            ; fat_get has confirmed a real next cluster.
 
             ; load current cluster into RD and call fat_get
             mov     rf, dir_clust
@@ -711,6 +736,13 @@ dns_subdir:
             lbdf    dns_end             ; cluster >= $FFF8: end of chain
 
 dns_not_eoc:
+            ; confirmed a real next cluster exists -- NOW it's safe to
+            ; treat this as sector 0 of it (see BUG FIX note above)
+            mov     rf, dir_sect
+            ldi     0
+            str     rf                  ; dir_sect = 0
+            plo     rc                  ; RC.0 = 0 (sector 0 of new cluster)
+
             ; save new cluster
             mov     rf, dir_clust
             ghi     rd

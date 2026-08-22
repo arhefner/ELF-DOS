@@ -131,6 +131,7 @@
             extrn   fc_lfncount
             extrn   fc_checksum
             extrn   fc_target_lba
+            extrn   fc_grow_lba
             extrn   fc_target_off
             extrn   fc_new_attr
             extrn   fc_new_cluster
@@ -2320,6 +2321,116 @@ fc_grow:
             ; just above.
             call    fat_flush
             lbdf    fc_full
+
+            ; --- zero all REMAINING sectors of the newly allocated
+            ; cluster (sectors 1..spc-1) -- BUG FIX (2026-08-22, real
+            ; hardware-found garbage-directory-entry corruption after a
+            ; directory grew past its first cluster, found via a
+            ; controlled repro in test/dirgrowtest.asm): a freshly
+            ; allocated cluster holds whatever was physically on disk
+            ; before it -- mkfs.vfat does not zero the data area, and
+            ; this project's own reformats have shown that can be
+            ; genuinely nonzero garbage, not a predictable fill
+            ; pattern. The code just below this block has ALWAYS only
+            ; zeroed and written SECTOR 0 (the one receiving the new
+            ; directory entry) -- sectors 1 through spc-1 of this SAME
+            ; newly-allocated cluster were never touched at all. The
+            ; first time a later scan needed to walk past sector 0 into
+            ; one of those untouched sectors (dns_in_cluster in
+            ; kernel/dir.asm, which reads a within-cluster sector
+            ; directly with no zero-check of its own, by design -- it
+            ; trusts the cluster was already correctly initialized), it
+            ; silently read raw disk garbage and dir_read interpreted
+            ; it as real directory entries: confirmed via a real
+            ; hardware fsck report showing ~1800 garbled short names
+            ; and huge bogus file sizes in a single directory, after
+            ; the 2026-08-22 _dir_next_sector fix (see its own BUG FIX
+            ; comment in kernel/dir.asm) finally let a directory-growth
+            ; scan successfully walk past sector 0 for the first time
+            ; in this project's history -- this bug was always latent
+            ; here, just never reachable before that fix. Mirrors
+            ; dir_create's (MD's) own already-hardware-confirmed "zero
+            ; any remaining sectors in the cluster" logic (dcr_zero2/
+            ; dcr_zero_loop, above in this same file) as closely as
+            ; possible, including its own dedicated-memory-field-for-
+            ; the-walking-LBA discipline (fc_grow_lba, reloaded fresh
+            ; before every f_idewrite call rather than trusted in a
+            ; register across it -- nothing in this codebase has ever
+            ; confirmed f_idewrite preserves R7/R8, and every other
+            ; call site already reloads them fresh for exactly this
+            ; reason). Leaves dir_cur_lba itself completely untouched
+            ; throughout, so the EXISTING code right after this block
+            ; (which re-derives fc_target_lba from dir_cur_lba for
+            ; sector 0) is completely unaffected.
+            mov     rf, bpb_spc
+            ldn     rf
+            smi     1
+            lbz     fc_grow_zero_done   ; spc == 1: nothing more to do
+            plo     r9                  ; R9.0 = remaining sector count
+
+            mov     rf, dir_cur_lba
+            mov     rb, fc_grow_lba
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb                  ; fc_grow_lba = dir_cur_lba
+                                        ; (sector 0's own LBA, the
+                                        ; starting point to walk
+                                        ; forward from)
+
+            mov     rf, dir_buf
+            ldi     2
+            phi     rc
+            ldi     0
+            plo     rc
+fc_grow_zero_fill:
+            ldi     0
+            str     rf
+            inc     rf
+            dec     rc                  ; DEC not SUB16 (matches this
+                                        ; file's own 2026-07-30 sweep
+                                        ; convention) -- the
+                                        ; immediately following ghi rc
+                                        ; reloads D fresh regardless
+            ghi     rc
+            lbnz    fc_grow_zero_fill
+            glo     rc
+            lbnz    fc_grow_zero_fill
+
+fc_grow_zero_loop:
+            ; advance to the next sector -- byte2 (fc_grow_lba+2, bits
+            ; 7-0) is enough since bpb_spc (a single byte, max 255)
+            ; bounds how many sectors a cluster can ever have, so
+            ; sector-within-cluster addressing never needs to carry
+            ; into the higher LBA bytes (same reasoning as dir_create's
+            ; own dcr_zero_loop)
+            mov     rf, fc_grow_lba+2
+            ldn     rf
+            adi     1
+            str     rf
+
+            mov     rf, fc_grow_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+            mov     rf, dir_buf
+            call    f_idewrite
+            lbdf    fc_full
+
+            dec     r9
+            glo     r9
+            lbnz    fc_grow_zero_loop
+
+fc_grow_zero_done:
 
             ; zero-fill dir_buf: a freshly allocated cluster holds
             ; disk garbage, not zero, until something writes it
@@ -6442,6 +6553,14 @@ fc_lfncount:    db      0
 fc_checksum:    db      0
 fc_target_lba:  ds      LBA_SIZE
 fc_target_off:  dw      0
+
+; fc_grow_lba: fc_grow's own walking LBA while zeroing sectors 1..
+; spc-1 of a newly allocated cluster (see fc_grow's own BUG FIX
+; comment, 2026-08-22) -- a dedicated memory field, reloaded fresh
+; before every f_idewrite call rather than trusted in a register
+; across it, matching every other LBA field in this file (nothing
+; here has ever confirmed f_idewrite preserves R7/R8).
+fc_grow_lba:    ds      LBA_SIZE
 fc_elba:        ds      LBA_SIZE
 fc_eoff:        dw      0
 
@@ -6527,6 +6646,7 @@ fsk_target:         dw      0,0             ; 4 bytes, big-endian
                 public  fc_lfncount
                 public  fc_checksum
                 public  fc_target_lba
+                public  fc_grow_lba
                 public  fc_target_off
                 public  fc_elba
                 public  fc_new_attr
