@@ -87,7 +87,7 @@ PROG_EXES = $(patsubst progs/%.asm,bin/%,$(PROG_SRCS))
 TEST_SRCS = $(wildcard test/*.asm)
 TEST_EXES = $(patsubst test/%.asm,test/bin/%,$(TEST_SRCS))
 
-.PHONY: all mbr install update progs test clean
+.PHONY: all mbr install update progs test sdk clean
 
 all: $(FULL_BIN)
 
@@ -383,6 +383,73 @@ progs: $(PROG_EXES) bin/batch.mod
 # convention as progs/, deliberately never mixed into bin/ itself (see
 # TEST_SRCS/TEST_EXES above).
 test: $(TEST_EXES)
+
+#------------------------------------------------------------------
+# SDK export -- for external projects building against ELF-DOS's own
+# kernel API (see docs/DEVELOPER_GUIDE.md). Copies the program-facing
+# headers plus every lib/ module (and its own companion .inc, where it
+# has one) into DEST, preserving the include/+lib/ layout so consuming
+# source can use the exact same "#include include/kernel_api.inc"
+# convention this project's own progs/*.asm already do -- no path
+# translation needed on the consumer's side. Ships SOURCE, never a
+# prebuilt .prg/.bin: this toolchain's own .prg fixup-marker format has
+# changed across Asm/02 versions before (see CLAUDE.md's own toolchain
+# gotchas), so a prebuilt artifact would be exactly the kind of
+# cross-toolchain-version fragility this project has already been
+# bitten by more than once. Deliberately does NOT include kernel.inc
+# (kernel-internal only -- the whole reason kernel_api.inc exists as a
+# separate, decoupled file) or the toolchain itself (asm02/link02 are
+# already a shared, separately-installed system tool at /opt/elfc,
+# independent of any one project).
+#
+# Pins to a COMMIT, not a version number -- there is no binary ABI
+# stability guarantee yet (PROG_BASE alone has moved roughly 8 times
+# in this project's history), so an external project rebuilds from
+# source whenever it wants to move to a newer ELF-DOS revision;
+# re-running this target and re-vendoring the result IS that "move to
+# a newer revision" action, deliberate and visible in the consuming
+# project's own git history, never automatic.
+#
+# Usage: make sdk DEST=../my-external-project/vendor/elfdos-sdk
+#------------------------------------------------------------------
+SDK_HEADERS = include/kernel_api.inc include/opcodes.def include/bios.inc
+
+# lib/ modules considered part of the public SDK surface (see
+# docs/DEVELOPER_GUIDE.md's own "Library Modules" table) -- their own
+# companion .inc, where one exists, ships alongside. env/fmt32/
+# heap_bump/heap_malloc/icall/move/pathstr have no companion .inc of
+# their own.
+SDK_LIB_MODULES = env file_glob fmt32 heap_bump heap_malloc icall \
+                  lineedit modload move pathstr vollabel ymodem
+SDK_LIB_ASM  = $(patsubst %,lib/%.asm,$(SDK_LIB_MODULES))
+SDK_LIB_INCS = include/file_glob.inc include/lineedit.inc \
+               include/modformat.inc include/vollabel.inc \
+               include/ymodem.inc
+
+sdk:
+	@if [ -z "$(DEST)" ]; then \
+		echo "Usage: make sdk DEST=path/to/export"; \
+		exit 1; \
+	fi
+	mkdir -p $(DEST)/include $(DEST)/lib
+	cp $(SDK_HEADERS) $(DEST)/include/
+	cp $(SDK_LIB_INCS) $(DEST)/include/
+	cp $(SDK_LIB_ASM) $(DEST)/lib/
+	@echo "ELF-DOS SDK snapshot"                                     >  $(DEST)/MANIFEST.txt
+	@echo "Exported:       $$(date -u +%Y-%m-%dT%H:%M:%SZ)"          >> $(DEST)/MANIFEST.txt
+	@echo "ELF-DOS commit: $$(git rev-parse HEAD)"                   >> $(DEST)/MANIFEST.txt
+	@echo "Kernel version: $$(grep -m1 'KERNEL_VER_MAJOR:' kernel/kernel.asm | sed 's/.*equ *//').$$(grep -m1 'KERNEL_VER_MINOR:' kernel/kernel.asm | sed 's/.*equ *//')" >> $(DEST)/MANIFEST.txt
+	@echo "PROG_BASE:      $$(grep -m1 '^PROG_BASE:' include/kernel_api.inc | sed 's/.*equ *//' | awk '{print $$1}')" >> $(DEST)/MANIFEST.txt
+	@echo ""                                                         >> $(DEST)/MANIFEST.txt
+	@echo "Headers:"                                                 >> $(DEST)/MANIFEST.txt
+	@for f in $(SDK_HEADERS) $(SDK_LIB_INCS); do echo "  $$f" >> $(DEST)/MANIFEST.txt; done
+	@echo "Library modules (lib/):"                                  >> $(DEST)/MANIFEST.txt
+	@for m in $(SDK_LIB_MODULES); do echo "  $$m.asm" >> $(DEST)/MANIFEST.txt; done
+	@echo ""                                                         >> $(DEST)/MANIFEST.txt
+	@echo "See docs/DEVELOPER_GUIDE.md in the ELF-DOS repo for the full API reference." >> $(DEST)/MANIFEST.txt
+	@echo "Toolchain (asm02/link02) is NOT included -- see the ELF-DOS repo's own CLAUDE.md Build section for the install location." >> $(DEST)/MANIFEST.txt
+	@echo "SDK exported to $(DEST)"
+	@cat $(DEST)/MANIFEST.txt
 
 clean:
 	rm -f boot/*.prg boot/*.lst \
