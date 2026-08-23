@@ -194,17 +194,10 @@ ed_have_filename:
             ; LOADER_ARGS (word0/word1, big-endian -- see
             ; kernel/loader.asm's own _prog_finish_load, which writes
             ; them in exactly this layout)
-            mov     rf, LOADER_ARGS
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = mem_base
-            mov     rf, ed_buf_start
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      LOADER_ARGS  ; RD = mem_base
+            call    ed_stw_rd
+            dw      ed_buf_start
 
             mov     rf, LOADER_ARGS
             inc     rf
@@ -213,12 +206,8 @@ ed_have_filename:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = mem_top
-            mov     rf, ed_buf_end
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_buf_end
 
             ; zero line_count / text_len / cur_line -- cur_line starts
             ; at 1 (not 0) so a bare "I" on a brand-new/empty file
@@ -292,11 +281,8 @@ ed_open_file:
                                         ; open attempted
 
 ed_open_file_real:
-            mov     rf, ed_filename_ptr
-            lda     rf
-            phi     ra
-            ldn     rf
-            plo     ra                  ; RA = filename pointer
+            call    ed_ldw_ra
+            dw      ed_filename_ptr  ; RA = filename pointer
             mov     rf, ra              ; RF = filename (K_FILE_OPEN's
                                         ; own path argument)
             mov     rd, ed_fcb
@@ -421,16 +407,10 @@ el_err:
 ; Modifies: RF, RA, RC, RD, R7 (and D, DF)
 ;------------------------------------------------------------------
 ed_getbyte:
-            mov     rf, ed_rdbuf_pos
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = ed_rdbuf_pos
-            mov     rf, ed_rdbuf_len
-            lda     rf
-            phi     ra
-            ldn     rf
-            plo     ra                  ; RA = ed_rdbuf_len
+            call    ed_ldw_rd
+            dw      ed_rdbuf_pos  ; RD = ed_rdbuf_pos
+            call    ed_ldw_ra
+            dw      ed_rdbuf_len  ; RA = ed_rdbuf_len
 
             glo     ra
             str     r2
@@ -449,12 +429,8 @@ ed_getbyte:
                                         ; below (mov/str clobber D)
 
             inc     rd            ; RD = pos+1
-            mov     rf, ed_rdbuf_pos
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; ed_rdbuf_pos = pos+1
+            call    ed_stw_rd
+            dw      ed_rdbuf_pos  ; ed_rdbuf_pos = pos+1
 
             glo     r7                  ; D = the byte
             clc
@@ -496,12 +472,8 @@ egb_check_count:
             rtn
 
 egb_have_data:
-            mov     rf, ed_rdbuf_len
-            ghi     rc
-            str     rf
-            inc     rf
-            glo     rc
-            str     rf                  ; ed_rdbuf_len = RC
+            call    ed_stw_rc
+            dw      ed_rdbuf_len  ; ed_rdbuf_len = RC
 
             mov     rf, ed_rdbuf_pos
             ldi     0
@@ -524,23 +496,14 @@ ed_append_byte:
             plo     r9                  ; stash the byte (movs below
                                         ; clobber D)
 
-            mov     rf, ed_buf_start
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = ed_buf_start
-            mov     rf, ed_text_len
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = ed_text_len
+            call    ed_ldw_rd
+            dw      ed_buf_start  ; RD = ed_buf_start
+            call    ed_ldw_r8
+            dw      ed_text_len  ; R8 = ed_text_len
             add16   rd, r8              ; RD = write position (absolute)
 
-            mov     rf, ed_buf_end
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = ed_buf_end
+            call    ed_ldw_r8
+            dw      ed_buf_end  ; R8 = ed_buf_end
 
             ; DF=1 if write position >= ed_buf_end (no room)
             glo     r8
@@ -557,18 +520,11 @@ ed_append_byte:
             glo     r9
             str     rf                  ; write the byte
 
-            mov     rf, ed_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_text_len
             inc     rd
-            mov     rf, ed_text_len
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; ed_text_len++
+            call    ed_stw_rd
+            dw      ed_text_len  ; ed_text_len++
 
             clc
             rtn
@@ -584,11 +540,8 @@ eab_full:
 ; Returns: DF = 0 on success, DF = 1 if ed_line_count >= ED_MAX_LINES
 ;------------------------------------------------------------------
 ed_start_line:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = ed_line_count
+            call    ed_ldw_rd
+            dw      ed_line_count  ; RD = ed_line_count
 
             ldi     low ED_MAX_LINES
             str     r2
@@ -600,11 +553,8 @@ ed_start_line:
             smb
             lbdf    esl_full            ; DF=1: line_count >= ED_MAX_LINES
 
-            mov     rf, ed_text_len
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = ed_text_len
+            call    ed_ldw_r8
+            dw      ed_text_len  ; R8 = ed_text_len
 
             shl16   rd                  ; RD = ed_line_count * 2
             mov     rf, ed_lines
@@ -626,18 +576,11 @@ esl_full:
 ; ed_finish_line: ed_line_count++
 ;------------------------------------------------------------------
 ed_finish_line:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_line_count
             inc     rd
-            mov     rf, ed_line_count
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_line_count
             rtn
 
 ;------------------------------------------------------------------
@@ -646,11 +589,8 @@ ed_finish_line:
 ; Returns: DF = 1 if ed_text_len > ed_lines[ed_line_count], else DF = 0
 ;------------------------------------------------------------------
 ed_cur_line_has_bytes:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = ed_line_count
+            call    ed_ldw_rd
+            dw      ed_line_count  ; RD = ed_line_count
             shl16   rd
             mov     rf, ed_lines
             add16   rf, rd
@@ -660,11 +600,8 @@ ed_cur_line_has_bytes:
             plo     r8                  ; R8 = ed_lines[ed_line_count]
                                         ; (this line's own start offset)
 
-            mov     rf, ed_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = ed_text_len
+            call    ed_ldw_rd
+            dw      ed_text_len  ; RD = ed_text_len
 
             ; BUG FIX (2026-07-31, hardware-reported): a plain sm/smb
             ; here (subtrahend=start_offset, minuend=text_len) yields
@@ -710,6 +647,141 @@ echb_has_bytes:
 ;==================================================================
 
 ;------------------------------------------------------------------
+; ed_ldw_rd / ed_ldw_r8 / ed_ldw_r9 / ed_ldw_ra: load a 16-bit
+; big-endian word from a FIXED memory address into RD/R8/R9/RA, where
+; the address is encoded as 2 inline bytes ("dw SYMBOL") immediately
+; following the "call ed_ldw_rX" instruction that invokes it -- the
+; same R6 inline-operand SCRT idiom K_INMSG's own inline text already
+; uses (see kernel/redir.asm's _redir_inmsg, hardware-confirmed on
+; this exact mechanism), just for a fixed 2-byte address instead of a
+; variable-length NUL-terminated string. At entry, R6 holds the
+; address right after the 3-byte CALL instruction (the standard SCRT
+; call convention -- the same fact _redir_inmsg's own kim_scan relies
+; on) -- exactly where the 2 inline address bytes live. Since none of
+; these four routines make any further call of their own, R6 is never
+; at risk of being clobbered before RTN uses its current value to
+; resume -- no explicit save/restore needed (unlike _redir_inmsg,
+; which DOES make nested calls and must save/restore R6 around them).
+; Replaces the old "mov rf, ADDR / lda rf / phi rX / ldn rf / plo rX"
+; 5-instruction/10-byte inline shape -- this file's single most
+; common block by far (220+ occurrences before this pass) -- with
+; "call ed_ldw_rX" + "dw ADDR" (5 bytes): HALF the size per call
+; site. Only ever applied where the ORIGINAL code used RF itself as
+; the address pointer (never r8/r9/rd/rb) -- those alternate-register
+; sites were left untouched, since choosing a non-RF pointer there
+; was itself the signal that RF already held something else that
+; needed to survive, which this routine's own internal RF use would
+; have clobbered.
+; Args (inline): 2 bytes = address of the word to load
+; Returns: RD/R8/R9/RA = the word's value
+; Modifies: RF (scratch), R6 (consumed as the inline-operand cursor;
+;           left pointing at the real resume address for RTN)
+;------------------------------------------------------------------
+ed_ldw_rd:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            rtn
+
+ed_ldw_r8:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            rtn
+
+ed_ldw_r9:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            rtn
+
+ed_ldw_ra:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra
+            rtn
+
+;------------------------------------------------------------------
+; ed_stw_rd / ed_stw_r8 / ed_stw_r9 / ed_stw_rc: store RD/R8/R9/RC's
+; 16-bit value (big-endian) to a FIXED memory address, addressed the
+; same inline-operand way ed_ldw_* above does -- see that block's own
+; header comment for the full mechanism explanation; identical
+; reasoning applies here (no nested calls, RF only ever used where
+; the original inline code already treated it as dead, source
+; register is only ever READ so it's untouched by the call).
+; Args (inline): 2 bytes = address to store to
+; Returns: nothing (the memory word is written)
+; Modifies: RF (scratch), R6 (consumed as the inline-operand cursor)
+;------------------------------------------------------------------
+ed_stw_rd:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            rtn
+
+ed_stw_r8:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
+            rtn
+
+ed_stw_r9:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            rtn
+
+ed_stw_rc:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
 ; ed_line_info: compute a line's absolute start pointer and byte
 ; length (excluding its trailing LF separator).
 ; Args:    RD = 0-based line index (must be < ed_line_count)
@@ -717,12 +789,8 @@ echb_has_bytes:
 ;          ed_li_len = length in bytes (0 for an empty line)
 ;------------------------------------------------------------------
 ed_line_info:
-            mov     rf, ed_li_idx
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_li_idx
 
             shl16   rd                  ; RD = index * 2
             mov     rf, ed_lines
@@ -732,25 +800,15 @@ ed_line_info:
             ldn     rf
             plo     r8                  ; R8 = start offset
 
-            mov     rf, ed_li_start_off
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf
+            call    ed_stw_r8
+            dw      ed_li_start_off
 
-            mov     rf, ed_li_idx
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_li_idx
             inc     rd            ; RD = index+1
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r9
+            dw      ed_line_count
 
             glo     r9
             str     r2
@@ -772,31 +830,18 @@ ed_line_info:
             lbr     eli_have_end
 
 eli_use_textlen:
-            mov     rf, ed_text_len
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = end offset (= ed_text_len)
+            call    ed_ldw_r9
+            dw      ed_text_len  ; R9 = end offset (= ed_text_len)
 
 eli_have_end:
-            mov     rf, ed_buf_start
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = ed_buf_start
-            mov     rf, ed_li_start_off
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = start offset (reloaded)
+            call    ed_ldw_rd
+            dw      ed_buf_start  ; RD = ed_buf_start
+            call    ed_ldw_r8
+            dw      ed_li_start_off  ; R8 = start offset (reloaded)
             add16   rd, r8              ; RD = absolute start pointer
 
-            mov     rf, ed_li_ptr
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_li_ptr
 
             ; length = end - start - 1 (drop the trailing LF)
             glo     r8
@@ -818,12 +863,8 @@ eli_have_end:
             smi     1
             phi     rc
 eli_no_borrow:
-            mov     rf, ed_li_len
-            ghi     rc
-            str     rf
-            inc     rf
-            glo     rc
-            str     rf
+            call    ed_stw_rc
+            dw      ed_li_len
             rtn
 
 ;------------------------------------------------------------------
@@ -832,72 +873,42 @@ eli_no_borrow:
 ; a delete).
 ;------------------------------------------------------------------
 ed_copy_fwd:
-            mov     rf, ed_mv_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_mv_count
             ghi     rd
             lbnz    ecf_have
             glo     rd
             lbz     ecf_done
 ecf_have:
-            mov     rf, ed_mv_src
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_mv_src
             mov     rf, rd
             ldn     rf
             plo     r9                  ; stash the byte
 
-            mov     rf, ed_mv_dst
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_mv_dst
             mov     rf, rd
             glo     r9
             str     rf
 
-            mov     rf, ed_mv_src
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_mv_src
             inc     rd
-            mov     rf, ed_mv_src
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_mv_src
 
-            mov     rf, ed_mv_dst
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_mv_dst
             inc     rd
-            mov     rf, ed_mv_dst
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_mv_dst
 
-            mov     rf, ed_mv_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_mv_count
             dec     rd
-            mov     rf, ed_mv_count
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_mv_count
 
             lbr     ed_copy_fwd
 ecf_done:
@@ -912,60 +923,38 @@ ecf_done:
 ; survive across anything.
 ;------------------------------------------------------------------
 ed_copy_bwd:
-            mov     rf, ed_mv_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_mv_count
             ghi     rd
             lbnz    ecb_have
             glo     rd
             lbz     ecb_done
 ecb_have:
-            mov     rf, ed_mv_src
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_mv_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_mv_src
+            call    ed_ldw_r8
+            dw      ed_mv_count
             add16   rd, r8
             dec     rd            ; RD = src_end
             mov     rf, rd
             ldn     rf
             plo     r9                  ; stash the byte
 
-            mov     rf, ed_mv_dst
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_mv_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_mv_dst
+            call    ed_ldw_r8
+            dw      ed_mv_count
             add16   rd, r8
             dec     rd            ; RD = dst_end
             mov     rf, rd
             glo     r9
             str     rf
 
-            mov     rf, ed_mv_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_mv_count
             dec     rd
-            mov     rf, ed_mv_count
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_mv_count
 
             lbr     ed_copy_bwd
 ecb_done:
@@ -994,11 +983,8 @@ estr_done:
 ed_print_line:
             call    ed_line_info
 
-            mov     rf, ed_li_ptr
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_li_ptr
             mov     rf, rd              ; RF = absolute start pointer
                                         ; (using RF, not RD, to survive
                                         ; K_TYPE -- matches
@@ -1545,22 +1531,16 @@ ed_bare_number:
             ldn     rf
             lbz     ed_unknown_cmd
 
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = n1
+            call    ed_ldw_rd
+            dw      ed_n1  ; RD = n1
 
             ghi     rd
             lbnz    ed_num_range_err
             glo     rd
             lbz     ed_num_range_err    ; n1 == 0: invalid
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_line_count
 
             ; line_count >= n1 ?
             glo     rd
@@ -1581,11 +1561,8 @@ ed_bare_number:
             ldn     rd
             str     rf
 
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_n1
             dec     rd            ; RD = n1 - 1 (0-based index)
             call    ed_print_line
             call    K_INMSG
@@ -1625,27 +1602,16 @@ ed_bare_number:
             ; insert-then-delete, not delete-then-insert, so a "buffer
             ; full" failure leaves the original line completely intact
             ; instead of losing it
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = n1 (1-based, already
+            call    ed_ldw_rd
+            dw      ed_n1  ; RD = n1 (1-based, already
                                         ; range-validated above)
-            mov     rf, ed_i_target
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_target
 
             mov     rf, ed_input_buf
             call    ed_strlen
-            mov     rf, ed_i_text_len
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_text_len
 
             mov     rf, ed_i_source_buf
             ldi     high ed_input_buf
@@ -1657,26 +1623,15 @@ ed_bare_number:
             call    ed_insert_one
             lbdf    ed_edit_toolong
 
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_n1
             inc     rd            ; RD = n1+1 (old line's new
                                         ; 1-based position, after the
                                         ; insert shifted it down)
-            mov     rf, ed_d_first
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
-            mov     rf, ed_d_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_d_first
+            call    ed_stw_rd
+            dw      ed_d_last
 
             call    ed_delete_range
 
@@ -1791,31 +1746,21 @@ ed_lp_have_default:
             plo     rd                  ; RD = first (restore, 1-based)
             call    ed_list_clamp_last  ; RD = last (first+page-1,
                                         ; clamped to line_count)
-            mov     rf, ed_list_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_list_last
             lbr     ed_list_start
 
 ed_lp_n1_given:
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = n1 (1-based)
+            call    ed_ldw_rd
+            dw      ed_n1  ; RD = n1 (1-based)
 
             ghi     rd
             lbnz    ed_l_n1_ok
             glo     rd
             lbz     ed_l_err            ; n1 == 0: invalid
 ed_l_n1_ok:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = line_count
+            call    ed_ldw_r8
+            dw      ed_line_count  ; R8 = line_count
 
             ; line_count >= n1 ?
             glo     rd
@@ -1840,11 +1785,8 @@ ed_l_n1_ok:
             ldn     rf
             lbz     ed_l_single         ; only n1: a page starting there
 
-            mov     rf, ed_n2
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = n2 (1-based)
+            call    ed_ldw_rd
+            dw      ed_n2  ; RD = n2 (1-based)
 
             ghi     rd
             lbnz    ed_l_n2_ok
@@ -1862,28 +1804,17 @@ ed_l_n2_ok:
             smb
             lbnf    ed_l_err
 
-            mov     rf, ed_list_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_list_last
             lbr     ed_list_start
 
 ed_l_single:
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = n1 (1-based, already
+            call    ed_ldw_rd
+            dw      ed_n1  ; RD = n1 (1-based, already
                                         ; validated above)
             call    ed_list_clamp_last  ; RD = min(n1+page-1, line_count)
-            mov     rf, ed_list_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_list_last
             lbr     ed_list_start
 
 ed_l_err:
@@ -1962,29 +1893,16 @@ ed_list_start:
             ; appearing to compute from the wrong base -- they were
             ; correct all along, just relative to a STALE cur_line
             ; that the previous L/P never advanced)
-            mov     rf, ed_list_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_list_start_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_list_i
+            call    ed_stw_rd
+            dw      ed_list_start_i
 
 ed_list_loop:
-            mov     rf, ed_list_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_list_last
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_list_i
+            call    ed_ldw_r8
+            dw      ed_list_last
 
             glo     r8
             str     r2
@@ -1996,11 +1914,8 @@ ed_list_loop:
             smb
             lbdf    ed_list_finish      ; list_i >= list_last: done
 
-            mov     rf, ed_list_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_list_i
             inc     rd            ; RD = 1-based line number
             mov     rf, ed_num_buf
             call    f_uintout
@@ -2011,28 +1926,18 @@ ed_list_loop:
             call    K_INMSG
             db      ": ",0
 
-            mov     rf, ed_list_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = list_i (0-based, for
+            call    ed_ldw_rd
+            dw      ed_list_i  ; RD = list_i (0-based, for
                                         ; ed_print_line)
             call    ed_print_line
             call    K_INMSG
             db      13,10,0
 
-            mov     rf, ed_list_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_list_i
             inc     rd
-            mov     rf, ed_list_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_list_i
 
             ; --- pause every ed_page_lines lines, fully silent (no
             ; "-- More --" text, no key echo) -- redesigned 2026-07-31
@@ -2074,21 +1979,15 @@ ed_list_loop:
 ; least one line was (an empty range must leave cur_line untouched).
 ;------------------------------------------------------------------
 ed_list_finish:
-            mov     rf, ed_list_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = list_i (0-based "next"
+            call    ed_ldw_rd
+            dw      ed_list_i  ; RD = list_i (0-based "next"
                                         ; index -- equals the 1-based
                                         ; line number of whatever was
                                         ; last actually shown, if
                                         ; anything was)
 
-            mov     rf, ed_list_start_i
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = starting index (0-based)
+            call    ed_ldw_r8
+            dw      ed_list_start_i  ; R8 = starting index (0-based)
 
             ; want: skip the update iff list_i <= start_i (strict "<="
             ; test) -- staging list_i (RD) as subtrahend and loading
@@ -2112,12 +2011,8 @@ ed_list_finish:
                                         ; nothing was ever shown, leave
                                         ; ed_cur_line untouched
 
-            mov     rf, ed_cur_line
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_cur_line
             lbr     ed_cmdloop
 
 ;==================================================================
@@ -2130,22 +2025,15 @@ ed_list_finish:
 ; same validate/prompt/loop as I, just with the target pre-set, so the
 ; append/insert mechanics themselves have exactly one implementation.
 ed_cmd_a:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_line_count
             inc     rd            ; RD = line_count + 1 (append
                                         ; position -- always valid,
                                         ; ed_i_validate's range check
                                         ; is a no-op here but reusing
                                         ; it costs nothing)
-            mov     rf, ed_i_target
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_target
             lbr     ed_i_validate
 
 ;==================================================================
@@ -2223,12 +2111,8 @@ ed_i_not_dot:
 
             mov     rf, ed_input_buf
             call    ed_strlen
-            mov     rf, ed_i_text_len
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_text_len
 
             mov     rf, ed_i_source_buf
             ldi     high ed_input_buf
@@ -2240,18 +2124,11 @@ ed_i_not_dot:
             call    ed_insert_one
             lbdf    ed_i_toolong
 
-            mov     rf, ed_i_target
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_target
             inc     rd
-            mov     rf, ed_i_target
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_target
 
             lbr     ed_i_loop
 
@@ -2275,21 +2152,15 @@ ed_i_err:
 ; Returns: DF = 0 if valid, DF = 1 if not
 ;------------------------------------------------------------------
 ed_validate_insert_target:
-            mov     rf, ed_i_target
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_target
             ghi     rd
             lbnz    evit_nonzero
             glo     rd
             lbz     evit_bad
 evit_nonzero:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_line_count
             inc     r8            ; R8 = line_count+1
 
             glo     rd
@@ -2324,16 +2195,10 @@ evit_bad:
 ;------------------------------------------------------------------
 ed_insert_one:
             ; capacity_left = (buf_end - buf_start) - ed_text_len
-            mov     rf, ed_buf_end
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_buf_start
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_buf_end
+            call    ed_ldw_r8
+            dw      ed_buf_start
 
             glo     r8
             str     r2
@@ -2346,11 +2211,8 @@ ed_insert_one:
             smb
             phi     rc                  ; RC = total capacity
 
-            mov     rf, ed_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_text_len
 
             glo     rd
             str     r2
@@ -2363,11 +2225,8 @@ ed_insert_one:
             smb
             phi     r9                  ; R9 = bytes remaining
 
-            mov     rf, ed_i_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_text_len
             inc     rd            ; RD = bytes needed (text + LF)
 
             ; remaining >= needed ?
@@ -2381,11 +2240,8 @@ ed_insert_one:
             smb
             lbnf    eio_full
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_line_count
             ldi     low ED_MAX_LINES
             str     r2
             glo     rd
@@ -2397,26 +2253,16 @@ ed_insert_one:
             lbdf    eio_full
 
             ; ins_idx (0-based) = target - 1
-            mov     rf, ed_i_target
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_target
             dec     rd
-            mov     rf, ed_i_ins_idx
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_ins_idx
 
             ; insert_offset = (ins_idx < line_count) ? ed_lines[ins_idx]
             ; : ed_text_len
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_line_count
 
             glo     r8
             str     r2
@@ -2438,75 +2284,38 @@ ed_insert_one:
             lbr     eio_have_off
 
 eio_use_textlen:
-            mov     rf, ed_text_len
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r9
+            dw      ed_text_len
 
 eio_have_off:
-            mov     rf, ed_i_ins_off
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf
+            call    ed_stw_r9
+            dw      ed_i_ins_off
 
-            mov     rf, ed_i_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_text_len
             inc     rd
-            mov     rf, ed_i_shift
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_shift
 
             ; --- shift ed_buf's tail forward to open a gap ---
-            mov     rf, ed_buf_start
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_i_ins_off
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_buf_start
+            call    ed_ldw_r8
+            dw      ed_i_ins_off
             add16   rd, r8              ; RD = absolute insert_offset
-            mov     rf, ed_mv_src
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_mv_src
 
-            mov     rf, ed_i_shift
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_i_shift
             add16   rd, r8              ; RD = ed_mv_src + shift
-            mov     rf, ed_mv_dst
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_mv_dst
 
-            mov     rf, ed_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_i_ins_off
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_text_len
+            call    ed_ldw_r8
+            dw      ed_i_ins_off
             glo     r8
             str     r2
             glo     rd
@@ -2517,27 +2326,16 @@ eio_have_off:
             ghi     rd
             smb
             phi     rc
-            mov     rf, ed_mv_count
-            ghi     rc
-            str     rf
-            inc     rf
-            glo     rc
-            str     rf
+            call    ed_stw_rc
+            dw      ed_mv_count
 
             call    ed_copy_bwd
 
             ; --- write the new text + LF into the freed gap ---
-            mov     rf, ed_mv_src
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_i_wr_ptr
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_mv_src
+            call    ed_stw_rd
+            dw      ed_i_wr_ptr
 
             mov     rf, ed_i_source_buf ; caller-supplied source buffer
                                         ; (ed_input_buf for every
@@ -2571,110 +2369,64 @@ eio_have_off:
             str     rf
 
 eio_wr_loop:
-            mov     rf, ed_i_wr_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_wr_count
             ghi     rd
             lbnz    eio_wr_have
             glo     rd
             lbz     eio_wr_lf
 eio_wr_have:
-            mov     rf, ed_i_src_ptr
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_src_ptr
             mov     rf, rd
             ldn     rf
             plo     r9
 
-            mov     rf, ed_i_wr_ptr
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_wr_ptr
             mov     rf, rd
             glo     r9
             str     rf
 
-            mov     rf, ed_i_src_ptr
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_src_ptr
             inc     rd
-            mov     rf, ed_i_src_ptr
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_src_ptr
 
-            mov     rf, ed_i_wr_ptr
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_wr_ptr
             inc     rd
-            mov     rf, ed_i_wr_ptr
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_wr_ptr
 
-            mov     rf, ed_i_wr_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_wr_count
             dec     rd
-            mov     rf, ed_i_wr_count
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_wr_count
 
             lbr     eio_wr_loop
 
 eio_wr_lf:
-            mov     rf, ed_i_wr_ptr
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_wr_ptr
             mov     rf, rd
             ldi     10
             str     rf
 
             ; --- shift ed_lines[ins_idx..line_count-1] up by one
             ; slot, adding ed_i_shift to each moved entry's value ---
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_i_shift_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_line_count
+            call    ed_stw_rd
+            dw      ed_i_shift_i
 
 eio_shift_loop:
-            mov     rf, ed_i_shift_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_i_ins_idx
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_i_shift_i
+            call    ed_ldw_r8
+            dw      ed_i_ins_idx
 
             ; ins_idx >= shift_i ?
             glo     rd
@@ -2687,11 +2439,8 @@ eio_shift_loop:
             smb
             lbdf    eio_shift_done      ; DF=1: shift_i <= ins_idx: done
 
-            mov     rf, ed_i_shift_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_shift_i
             dec     rd            ; RD = src_index (shift_i - 1)
 
             shl16   rd
@@ -2702,11 +2451,8 @@ eio_shift_loop:
             ldn     rf
             plo     r9                  ; R9 = ed_lines[shift_i-1]
 
-            mov     rf, ed_i_shift
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_i_shift
 
             glo     r8
             str     r2
@@ -2719,11 +2465,8 @@ eio_shift_loop:
             adc
             phi     rc                  ; RC = ed_lines[shift_i-1] + shift
 
-            mov     rf, ed_i_shift_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_shift_i
             shl16   rd
             mov     rf, ed_lines
             add16   rf, rd
@@ -2733,27 +2476,17 @@ eio_shift_loop:
             glo     rc
             str     rf
 
-            mov     rf, ed_i_shift_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_shift_i
             dec     rd
-            mov     rf, ed_i_shift_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_shift_i
 
             lbr     eio_shift_loop
 
 eio_shift_done:
-            mov     rf, ed_i_ins_idx
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_ins_idx
             shl16   rd
             mov     rf, ed_lines
             add16   rf, rd
@@ -2764,29 +2497,16 @@ eio_shift_done:
             ldn     rd
             str     rf
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_line_count
             inc     rd
-            mov     rf, ed_line_count
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_line_count
 
-            mov     rf, ed_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_i_shift
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_text_len
+            call    ed_ldw_r8
+            dw      ed_i_shift
             glo     r8
             str     r2
             glo     rd
@@ -2797,12 +2517,8 @@ eio_shift_done:
             ghi     rd
             adc
             phi     rc
-            mov     rf, ed_text_len
-            ghi     rc
-            str     rf
-            inc     rf
-            glo     rc
-            str     rf
+            call    ed_stw_rc
+            dw      ed_text_len
 
             mov     rf, ed_cur_line
             mov     rd, ed_i_target
@@ -2877,11 +2593,8 @@ ed_t_validate:
             lbdf    ed_i_err            ; reuse I/A's own message
 
             ; --- open the file (reusing ed_fcb/ed_iobuf) ---
-            mov     rf, ed_t_filename_ptr
-            lda     rf
-            phi     ra
-            ldn     rf
-            plo     ra
+            call    ed_ldw_ra
+            dw      ed_t_filename_ptr
             mov     rf, ra              ; RF = filename (K_FILE_OPEN's
                                         ; own path argument)
             mov     rd, ed_fcb
@@ -2928,11 +2641,8 @@ ed_t_byte_loop:
             ; matching K_INPUTL's own cap (there's no way to type a
             ; longer line interactively either, and ed_input_buf is
             ; only ever sized for that)
-            mov     rf, ed_t_line_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current line length
+            call    ed_ldw_rd
+            dw      ed_t_line_len  ; RD = current line length
             ldi     127
             str     r2
             glo     rd
@@ -2946,18 +2656,11 @@ ed_t_byte_loop:
             glo     r9
             str     rf                  ; ed_input_buf[len] = byte
 
-            mov     rf, ed_t_line_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_t_line_len
             inc     rd
-            mov     rf, ed_t_line_len
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_t_line_len
             lbr     ed_t_byte_loop
 
 ed_t_line_done:
@@ -2982,11 +2685,8 @@ ed_t_eof:
 
             ; a final partial line (no trailing LF) still needs
             ; inserting if it has any content
-            mov     rf, ed_t_line_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_t_line_len
             ghi     rd
             lbnz    ed_t_final_have
             glo     rd
@@ -3043,17 +2743,10 @@ ed_t_usage:
 ; Returns: DF = 0 on success, DF = 1 if out of room
 ;------------------------------------------------------------------
 ed_t_insert_line:
-            mov     rf, ed_t_line_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_i_text_len
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_t_line_len
+            call    ed_stw_rd
+            dw      ed_i_text_len
 
             mov     rf, ed_i_source_buf
             ldi     high ed_input_buf
@@ -3065,18 +2758,11 @@ ed_t_insert_line:
             call    ed_insert_one
             lbdf    eti_full
 
-            mov     rf, ed_i_target
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_i_target
             inc     rd
-            mov     rf, ed_i_target
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_i_target
 
             clc
             rtn
@@ -3124,21 +2810,15 @@ ed_cmd_r:
             ldn     rf
             lbz     ed_r_default_first
 
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_n1
             ghi     rd
             lbnz    ed_r_n1_ok
             glo     rd
             lbz     ed_r_err
 ed_r_n1_ok:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_line_count
             glo     rd
             str     r2
             glo     r8
@@ -3148,48 +2828,31 @@ ed_r_n1_ok:
             ghi     r8
             smb
             lbnf    ed_r_err
-            mov     rf, ed_r_first
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_r_first
             lbr     ed_r_have_first
 
 ed_r_default_first:
-            mov     rf, ed_cur_line
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_cur_line
             inc     rd            ; RD = cur_line + 1
-            mov     rf, ed_r_first
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_r_first
 
 ed_r_have_first:
             mov     rf, ed_have_n2
             ldn     rf
             lbz     ed_r_default_last
 
-            mov     rf, ed_n2
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_n2
             ghi     rd
             lbnz    ed_r_n2_ok
             glo     rd
             lbz     ed_r_err
 ed_r_n2_ok:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_line_count
             glo     rd
             str     r2
             glo     r8
@@ -3216,35 +2879,21 @@ ed_r_n2_ok:
             smb
             lbnf    ed_r_err            ; n2 < first: invalid
 
-            mov     rf, ed_r_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_r_last
             lbr     ed_r_range_ready
 
 ed_r_default_last:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_r_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_line_count
+            call    ed_stw_rd
+            dw      ed_r_last
 
 ed_r_range_ready:
             ; a DEFAULTED range that's empty (first > line_count, or
             ; first > last) is not an error -- just nothing to do
-            mov     rf, ed_r_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_r_first
             ; BUG FIX (2026-07-31, hardware-reported): all three checks
             ; in this proc used to stage the wrong operand as
             ; subtrahend, so "lbdf" fired on ">=" instead of the
@@ -3255,11 +2904,8 @@ ed_r_range_ready:
             ; sm), and switching lbdf->lbnf to match: DF=0 (borrow)
             ; now correctly means the swapped minuend < the swapped
             ; subtrahend, i.e. the original strict ">" condition.
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = line_count
+            call    ed_ldw_r8
+            dw      ed_line_count  ; R8 = line_count
             glo     rd
             str     r2
             glo     r8
@@ -3271,11 +2917,8 @@ ed_r_range_ready:
             lbnf    ed_r_report         ; DF=0: line_count < first,
                                         ; i.e. first > line_count
 
-            mov     rf, ed_r_last
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = last
+            call    ed_ldw_r8
+            dw      ed_r_last  ; R8 = last
             glo     rd
             str     r2
             glo     r8
@@ -3287,12 +2930,8 @@ ed_r_range_ready:
             lbnf    ed_r_report         ; DF=0: last < first,
                                         ; i.e. first > last
 
-            mov     rf, ed_r_line_idx
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; ed_r_line_idx = first
+            call    ed_stw_rd
+            dw      ed_r_line_idx  ; ed_r_line_idx = first
 
             mov     rf, ed_r_count
             ldi     0
@@ -3301,16 +2940,10 @@ ed_r_range_ready:
             str     rf
 
 ed_r_loop:
-            mov     rf, ed_r_line_idx
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_r_last
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = last
+            call    ed_ldw_rd
+            dw      ed_r_line_idx
+            call    ed_ldw_r8
+            dw      ed_r_last  ; R8 = last
             glo     rd
             str     r2
             glo     r8
@@ -3333,26 +2966,16 @@ ed_r_loop:
             call    ed_r_process_line
             lbdf    ed_r_toolong
 
-            mov     rf, ed_r_line_idx
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_r_line_idx
             inc     rd
-            mov     rf, ed_r_line_idx
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_r_line_idx
             lbr     ed_r_loop
 
 ed_r_report:
-            mov     rf, ed_r_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_r_count
             mov     rf, ed_num_buf
             call    f_uintout
             ldi     0
@@ -3488,11 +3111,8 @@ erpa_have_old:
 
             ; resume scanning at ed_r_new_ptr for the NUL that ends
             ; the new field
-            mov     rf, ed_r_new_ptr
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_r_new_ptr
             mov     rf, r8              ; RF = new field start
 
 erpa_scan2:
@@ -3592,19 +3212,11 @@ ersq_is_quote:
             dec     rd
             dec     rd            ; len -= 2
 
-            mov     rf, ra
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf
+            call    ed_stw_r8
+            dw      ra
 
-            mov     rf, rc
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      rc
 
 ersq_done:
             rtn
@@ -3618,11 +3230,8 @@ ersq_done:
 ;          couldn't be inserted (ed_buf itself full)
 ;------------------------------------------------------------------
 ed_r_process_line:
-            mov     rf, ed_r_line_idx
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_r_line_idx
             dec     rd            ; RD = 0-based index
             call    ed_line_info        ; ed_li_ptr/ed_li_len set
 
@@ -3642,16 +3251,10 @@ ed_r_process_line:
 
 ed_rpl_loop:
             ; remaining = li_len - src_pos
-            mov     rf, ed_li_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_r_src_pos
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_li_len
+            call    ed_ldw_r8
+            dw      ed_r_src_pos
             glo     r8
             str     r2
             glo     rd
@@ -3663,11 +3266,8 @@ ed_rpl_loop:
             smb
             phi     r9                  ; R9 = remaining
 
-            mov     rf, ed_r_old_len
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = old_len
+            call    ed_ldw_r8
+            dw      ed_r_old_len  ; R8 = old_len
 
             ; remaining >= old_len ?
             glo     r8
@@ -3685,16 +3285,10 @@ ed_rpl_loop:
             lbdf    ed_rpl_copy_one
 
             ; matched -- append new_text, then skip old_len bytes
-            mov     rf, ed_r_new_ptr
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
-            mov     rf, ed_r_new_len
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r8
+            dw      ed_r_new_ptr
+            call    ed_ldw_r9
+            dw      ed_r_new_len
             call    ed_r_append_block
             lbdf    ed_rpl_full
 
@@ -3702,16 +3296,10 @@ ed_rpl_loop:
             ldi     1
             str     rf
 
-            mov     rf, ed_r_src_pos
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_r_old_len
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_r_src_pos
+            call    ed_ldw_r8
+            dw      ed_r_old_len
             glo     r8
             str     r2
             glo     rd
@@ -3722,25 +3310,15 @@ ed_rpl_loop:
             ghi     rd
             adc
             phi     rd
-            mov     rf, ed_r_src_pos
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_r_src_pos
             lbr     ed_rpl_loop
 
 ed_rpl_copy_one:
-            mov     rf, ed_li_ptr
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
-            mov     rf, ed_r_src_pos
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r8
+            dw      ed_li_ptr
+            call    ed_ldw_r9
+            dw      ed_r_src_pos
             add16   r8, r9              ; R8 = &li_ptr[src_pos]
             ldi     0
             phi     r9
@@ -3749,31 +3327,18 @@ ed_rpl_copy_one:
             call    ed_r_append_block
             lbdf    ed_rpl_full
 
-            mov     rf, ed_r_src_pos
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_r_src_pos
             inc     rd
-            mov     rf, ed_r_src_pos
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_r_src_pos
             lbr     ed_rpl_loop
 
 ed_rpl_copy_rest:
-            mov     rf, ed_r_src_pos
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_li_len
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_r_src_pos
+            call    ed_ldw_r8
+            dw      ed_li_len
             glo     r8
             str     r2
             glo     rd
@@ -3784,11 +3349,8 @@ ed_rpl_copy_rest:
             smb
             lbdf    ed_rpl_done         ; DF=1: src_pos >= li_len
 
-            mov     rf, ed_li_ptr
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_li_ptr
             add16   r8, rd              ; R8 = &li_ptr[src_pos]
             ldi     0
             phi     r9
@@ -3797,18 +3359,11 @@ ed_rpl_copy_rest:
             call    ed_r_append_block
             lbdf    ed_rpl_full
 
-            mov     rf, ed_r_src_pos
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_r_src_pos
             inc     rd
-            mov     rf, ed_r_src_pos
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_r_src_pos
             lbr     ed_rpl_copy_rest
 
 ed_rpl_done:
@@ -3834,17 +3389,10 @@ ed_rpl_done:
             ldn     rf
             str     rd                  ; ed_i_target = ed_r_line_idx
 
-            mov     rf, ed_r_out_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_i_text_len
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_r_out_len
+            call    ed_stw_rd
+            dw      ed_i_text_len
 
             mov     rf, ed_i_source_buf
             ldi     high ed_line_scratch
@@ -3857,38 +3405,20 @@ ed_rpl_done:
             lbdf    ed_rpl_full
 
             ; delete the old line, now shifted to ed_r_line_idx + 1
-            mov     rf, ed_r_line_idx
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_r_line_idx
             inc     rd
-            mov     rf, ed_d_first
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
-            mov     rf, ed_d_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_d_first
+            call    ed_stw_rd
+            dw      ed_d_last
             call    ed_delete_range
 
-            mov     rf, ed_r_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_r_count
             inc     rd
-            mov     rf, ed_r_count
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_r_count
 
 ed_rpl_unchanged:
             clc
@@ -3905,29 +3435,17 @@ ed_rpl_full:
 ; Returns: DF = 0 if it matches, DF = 1 if not
 ;------------------------------------------------------------------
 ed_r_match_here:
-            mov     rf, ed_li_ptr
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
-            mov     rf, ed_r_src_pos
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r8
+            dw      ed_li_ptr
+            call    ed_ldw_r9
+            dw      ed_r_src_pos
             add16   r8, r9              ; R8 = &li_ptr[src_pos]
 
-            mov     rf, ed_r_old_ptr
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = old_ptr
+            call    ed_ldw_r9
+            dw      ed_r_old_ptr  ; R9 = old_ptr
 
-            mov     rf, ed_r_old_len
-            lda     rf
-            phi     ra
-            ldn     rf
-            plo     ra                  ; RA = remaining count
+            call    ed_ldw_ra
+            dw      ed_r_old_len  ; RA = remaining count
 
 erm_loop:
             ghi     ra
@@ -3962,11 +3480,8 @@ erm_nomatch:
 ; Returns: DF = 0 on success, DF = 1 if it wouldn't fit
 ;------------------------------------------------------------------
 ed_r_append_block:
-            mov     rf, ed_r_out_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = out_len
+            call    ed_ldw_rd
+            dw      ed_r_out_len  ; RD = out_len
 
             glo     r9
             str     r2
@@ -4088,21 +3603,15 @@ ecpt_first_cur:
             str     rf
 
 ecpt_have_first:
-            mov     rf, ed_c_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_c_first
             ghi     rd
             lbnz    ecpt_f_ok
             glo     rd
             lbz     ecpt_err
 ecpt_f_ok:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_line_count
             glo     rd
             str     r2
             glo     r8
@@ -4136,21 +3645,15 @@ ecpt_last_cur:
             str     rf
 
 ecpt_have_last:
-            mov     rf, ed_c_last
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_c_last
             ghi     rd
             lbnz    ecpt_l_ok
             glo     rd
             lbz     ecpt_err
 ecpt_l_ok:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_line_count
             glo     rd
             str     r2
             glo     r8
@@ -4194,16 +3697,10 @@ ecpt_l_ok:
 
             ; target must be <= first, OR > last -- never strictly
             ; inside (first,last]
-            mov     rf, ed_i_target
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = target
-            mov     rf, ed_c_first
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = first
+            call    ed_ldw_rd
+            dw      ed_i_target  ; RD = target
+            call    ed_ldw_r8
+            dw      ed_c_first  ; R8 = first
 
             glo     rd
             str     r2
@@ -4216,11 +3713,8 @@ ecpt_l_ok:
             lbdf    ecpt_shift_yes      ; DF=1: first >= target ->
                                         ; target <= first
 
-            mov     rf, ed_c_last
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = last
+            call    ed_ldw_r8
+            dw      ed_c_last  ; R8 = last
             glo     rd
             str     r2
             glo     r8
@@ -4294,16 +3788,10 @@ ed_c_ready:
             str     rf
 
 ed_c_outer:
-            mov     rf, ed_c_k
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_c_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_c_k
+            call    ed_ldw_r8
+            dw      ed_c_count
             glo     r8
             str     r2
             glo     rd
@@ -4317,18 +3805,11 @@ ed_c_outer:
             call    ed_c_copy_block     ; always returns DF=0 -- see
                                         ; its own header comment
 
-            mov     rf, ed_c_k
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_c_k
             inc     rd
-            mov     rf, ed_c_k
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_c_k
             lbr     ed_c_outer
 
 ed_c_done:
@@ -4367,16 +3848,10 @@ ed_c_err:
 ; own single pass) need before their first call to ed_c_copy_block.
 ;------------------------------------------------------------------
 ed_c_setup_pass:
-            mov     rf, ed_c_last
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_c_first
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_c_last
+            call    ed_ldw_r8
+            dw      ed_c_first
             glo     r8
             str     r2
             glo     rd
@@ -4388,12 +3863,8 @@ ed_c_setup_pass:
             smb
             phi     r9
             inc     r9
-            mov     rf, ed_c_blocklen
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf
+            call    ed_stw_r9
+            dw      ed_c_blocklen
 
             mov     rf, ed_c_n
             ldi     0
@@ -4434,16 +3905,10 @@ ed_c_copy_block:
             str     rf
 
 ed_c_inner:
-            mov     rf, ed_c_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_c_blocklen
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_c_i
+            call    ed_ldw_r8
+            dw      ed_c_blocklen
             glo     r8
             str     r2
             glo     rd
@@ -4454,16 +3919,10 @@ ed_c_inner:
             smb
             lbdf    ed_c_inner_done     ; DF=1: i >= blocklen
 
-            mov     rf, ed_c_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_c_i
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_c_first
+            call    ed_ldw_r8
+            dw      ed_c_i
             glo     r8
             str     r2
             glo     rd
@@ -4479,11 +3938,8 @@ ed_c_inner:
             ldn     rf
             lbz     ed_c_have_src
 
-            mov     rf, ed_c_n
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_c_n
             glo     r8
             str     r2
             glo     rd
@@ -4552,44 +4008,23 @@ ed_c_copy_done:
             call    ed_insert_one
             lbdf    ed_c_toolong
 
-            mov     rf, ed_c_ins_pos
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_c_ins_pos
             inc     rd
-            mov     rf, ed_c_ins_pos
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_c_ins_pos
 
-            mov     rf, ed_c_n
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_c_n
             inc     rd
-            mov     rf, ed_c_n
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_c_n
 
-            mov     rf, ed_c_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_c_i
             inc     rd
-            mov     rf, ed_c_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_c_i
             lbr     ed_c_inner
 
 ed_c_inner_done:
@@ -4625,20 +4060,14 @@ ed_m_ready:
             call    ed_c_copy_block    ; single pass -- always DF=0
 
             ; delete_first = first + (shift ? n : 0)
-            mov     rf, ed_c_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_c_first
             mov     rf, ed_c_shift
             ldn     rf
             lbz     ed_m_first_noshift
 
-            mov     rf, ed_c_n
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_c_n
             glo     r8
             str     r2
             glo     rd
@@ -4651,28 +4080,18 @@ ed_m_ready:
             phi     rd
 
 ed_m_first_noshift:
-            mov     rf, ed_d_first
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_d_first
 
             ; delete_last = last + (shift ? n : 0)
-            mov     rf, ed_c_last
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_c_last
             mov     rf, ed_c_shift
             ldn     rf
             lbz     ed_m_last_noshift
 
-            mov     rf, ed_c_n
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_c_n
             glo     r8
             str     r2
             glo     rd
@@ -4685,12 +4104,8 @@ ed_m_first_noshift:
             phi     rd
 
 ed_m_last_noshift:
-            mov     rf, ed_d_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_d_last
 
             call    ed_delete_range
 
@@ -4771,21 +4186,15 @@ ed_d_use_cur:
             str     rf
 
 ed_d_validate:
-            mov     rf, ed_d_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_d_first
             ghi     rd
             lbnz    ed_d_err
             glo     rd
             lbz     ed_d_err            ; first == 0
 
-            mov     rf, ed_d_last
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_d_last
 
             ; last >= first ?
             glo     rd
@@ -4798,11 +4207,8 @@ ed_d_validate:
             smb
             lbnf    ed_d_err
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r9
+            dw      ed_line_count
 
             ; line_count >= last ?
             glo     r8
@@ -4835,11 +4241,8 @@ ed_d_err:
 ;------------------------------------------------------------------
 ed_delete_range:
             ; start_off = ed_lines[first-1]
-            mov     rf, ed_d_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_d_first
             dec     rd
             shl16   rd
             mov     rf, ed_lines
@@ -4848,27 +4251,17 @@ ed_delete_range:
             phi     r8
             ldn     rf
             plo     r8
-            mov     rf, ed_d_start_off
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf
+            call    ed_stw_r8
+            dw      ed_d_start_off
 
             ; end_off = (last < line_count) ? ed_lines[last] : ed_text_len
-            mov     rf, ed_d_last
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = last (0-based index of
+            call    ed_ldw_rd
+            dw      ed_d_last  ; RD = last (0-based index of
                                         ; the line right after the
                                         ; deleted range)
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r9
+            dw      ed_line_count
 
             glo     r9
             str     r2
@@ -4890,31 +4283,18 @@ ed_delete_range:
             lbr     ed_d_have_end
 
 ed_d_use_textlen:
-            mov     rf, ed_text_len
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r9
+            dw      ed_text_len
 
 ed_d_have_end:
-            mov     rf, ed_d_end_off
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf
+            call    ed_stw_r9
+            dw      ed_d_end_off
 
             ; removed = end_off - start_off
-            mov     rf, ed_d_start_off
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_d_end_off
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_d_start_off
+            call    ed_ldw_r8
+            dw      ed_d_end_off
 
             glo     rd
             str     r2
@@ -4926,60 +4306,30 @@ ed_d_have_end:
             ghi     r8
             smb
             phi     rc
-            mov     rf, ed_d_removed
-            ghi     rc
-            str     rf
-            inc     rf
-            glo     rc
-            str     rf
+            call    ed_stw_rc
+            dw      ed_d_removed
 
             ; --- shift ed_buf: [end_off, text_len) back to start_off ---
-            mov     rf, ed_buf_start
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_d_end_off
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_buf_start
+            call    ed_ldw_r8
+            dw      ed_d_end_off
             add16   rd, r8              ; RD = absolute src
-            mov     rf, ed_mv_src
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_mv_src
 
-            mov     rf, ed_buf_start
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_d_start_off
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_buf_start
+            call    ed_ldw_r8
+            dw      ed_d_start_off
             add16   rd, r8              ; RD = absolute dst
-            mov     rf, ed_mv_dst
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_mv_dst
 
-            mov     rf, ed_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_d_end_off
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_text_len
+            call    ed_ldw_r8
+            dw      ed_d_end_off
             glo     r8
             str     r2
             glo     rd
@@ -4990,53 +4340,29 @@ ed_d_have_end:
             ghi     rd
             smb
             phi     rc
-            mov     rf, ed_mv_count
-            ghi     rc
-            str     rf
-            inc     rf
-            glo     rc
-            str     rf
+            call    ed_stw_rc
+            dw      ed_mv_count
 
             call    ed_copy_fwd
 
             ; --- shift ed_lines[last..line_count-1] down to
             ; [first-1..], subtracting "removed" from each entry ---
-            mov     rf, ed_d_last
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_d_shift_src
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_d_last
+            call    ed_stw_rd
+            dw      ed_d_shift_src
 
-            mov     rf, ed_d_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_d_first
             dec     rd
-            mov     rf, ed_d_shift_dst
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_d_shift_dst
 
 ed_d_shift_loop:
-            mov     rf, ed_d_shift_src
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_d_shift_src
+            call    ed_ldw_r8
+            dw      ed_line_count
 
             ; shift_src >= line_count ?
             glo     r8
@@ -5049,11 +4375,8 @@ ed_d_shift_loop:
             smb
             lbdf    ed_d_shift_done
 
-            mov     rf, ed_d_shift_src
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_d_shift_src
             shl16   rd
             mov     rf, ed_lines
             add16   rf, rd
@@ -5062,11 +4385,8 @@ ed_d_shift_loop:
             ldn     rf
             plo     r9                  ; R9 = ed_lines[shift_src]
 
-            mov     rf, ed_d_removed
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_d_removed
 
             glo     r8
             str     r2
@@ -5080,11 +4400,8 @@ ed_d_shift_loop:
             phi     rc                  ; RC = ed_lines[shift_src] -
                                         ; removed
 
-            mov     rf, ed_d_shift_dst
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_d_shift_dst
             shl16   rd
             mov     rf, ed_lines
             add16   rf, rd
@@ -5094,46 +4411,26 @@ ed_d_shift_loop:
             glo     rc
             str     rf
 
-            mov     rf, ed_d_shift_src
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_d_shift_src
             inc     rd
-            mov     rf, ed_d_shift_src
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_d_shift_src
 
-            mov     rf, ed_d_shift_dst
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_d_shift_dst
             inc     rd
-            mov     rf, ed_d_shift_dst
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_d_shift_dst
 
             lbr     ed_d_shift_loop
 
 ed_d_shift_done:
             ; line_count -= (last - first + 1)
-            mov     rf, ed_d_last
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_d_first
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_d_last
+            call    ed_ldw_r8
+            dw      ed_d_first
 
             glo     r8
             str     r2
@@ -5147,11 +4444,8 @@ ed_d_shift_done:
             phi     rc
             inc     rc            ; RC = deleted-line count
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_line_count
 
             glo     rc
             str     r2
@@ -5164,24 +4458,14 @@ ed_d_shift_done:
             smb
             phi     r9
 
-            mov     rf, ed_line_count
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf
+            call    ed_stw_r9
+            dw      ed_line_count
 
             ; text_len -= removed
-            mov     rf, ed_text_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_d_removed
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_text_len
+            call    ed_ldw_r8
+            dw      ed_d_removed
 
             glo     r8
             str     r2
@@ -5194,26 +4478,16 @@ ed_d_shift_done:
             smb
             phi     rc
 
-            mov     rf, ed_text_len
-            ghi     rc
-            str     rf
-            inc     rf
-            glo     rc
-            str     rf
+            call    ed_stw_rc
+            dw      ed_text_len
 
             ; cur_line = (first <= new line_count) ? first :
             ; (new line_count >= 1 ? new line_count : 1)
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = new line_count
+            call    ed_ldw_rd
+            dw      ed_line_count  ; RD = new line_count
 
-            mov     rf, ed_d_first
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_d_first
 
             ; line_count >= first ?
             glo     r8
@@ -5237,19 +4511,12 @@ ed_d_shift_done:
             lbr     ed_d_cur_is_count
 
 ed_d_cur_is_first:
-            mov     rf, ed_d_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_d_first
 
 ed_d_cur_is_count:
-            mov     rf, ed_cur_line
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_cur_line
 
             rtn
 
@@ -5354,21 +4621,15 @@ ed_wsave_have_target:
             ldn     rf
             lbz     ed_wsave_all
 
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = n1
+            call    ed_ldw_rd
+            dw      ed_n1  ; RD = n1
             ghi     rd
             lbnz    ed_wsave_n1_ok
             glo     rd
             lbz     ed_wsave_rangeerr   ; n1 == 0: invalid
 ed_wsave_n1_ok:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = line_count
+            call    ed_ldw_r8
+            dw      ed_line_count  ; R8 = line_count
             glo     rd
             str     r2
             glo     r8
@@ -5378,36 +4639,22 @@ ed_wsave_n1_ok:
             ghi     r8
             smb
             lbnf    ed_wsave_rangeerr   ; DF=0: line_count < n1
-            mov     rf, ed_w_count
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_w_count
             lbr     ed_wsave_have_count
 
 ed_wsave_all:
-            mov     rf, ed_line_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_w_count
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_line_count
+            call    ed_stw_rd
+            dw      ed_w_count
 
 ed_wsave_have_count:
             ; --- open the target file (reusing ed_fcb/ed_iobuf --
             ; safe: nothing else has either open at this point in the
             ; command loop) ---
-            mov     rf, ed_w_filename_ptr
-            lda     rf
-            phi     ra
-            ldn     rf
-            plo     ra
+            call    ed_ldw_ra
+            dw      ed_w_filename_ptr
             mov     rf, ra
             mov     rd, ed_fcb
             mov     ra, ed_iobuf
@@ -5422,16 +4669,10 @@ ed_wsave_have_count:
             str     rf
 
 ed_wsave_loop:
-            mov     rf, ed_save_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_w_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_save_i
+            call    ed_ldw_r8
+            dw      ed_w_count
 
             glo     r8
             str     r2
@@ -5448,18 +4689,12 @@ ed_wsave_loop:
                                         ; 1-based-line-vs-last shape
                                         ; ed_cmd_r's own bug was in)
 
-            mov     rf, ed_save_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_save_i
             call    ed_line_info
 
-            mov     rf, ed_li_ptr
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_li_ptr
             mov     rf, ed_li_len
             lda     rf
             phi     rc
@@ -5479,18 +4714,11 @@ ed_wsave_loop:
             call    K_FILE_WRITE
             lbdf    ed_wsave_werr
 
-            mov     rf, ed_save_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_save_i
             inc     rd
-            mov     rf, ed_save_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_save_i
             lbr     ed_wsave_loop
 
 ed_wsave_done:
@@ -5499,17 +4727,10 @@ ed_wsave_done:
 
             ; update ed_filename_ptr to the target just written -- see
             ; this section's own header comment for why
-            mov     rf, ed_w_filename_ptr
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_filename_ptr
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_w_filename_ptr
+            call    ed_stw_rd
+            dw      ed_filename_ptr
 
             mov     rf, ed_wsave_is_e
             ldn     rf
@@ -5591,34 +4812,23 @@ ed_cmd_s:
                                         ; was already saved above)
             mov     r8, rd              ; stash before the range-calc
                                         ; code below reuses RD heavily
-            mov     rf, ed_s_text_len
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf
+            call    ed_stw_r8
+            dw      ed_s_text_len
 
             ; first = have_n1 ? n1 : 1
             mov     rf, ed_have_n1
             ldn     rf
             lbz     ed_s_first_default
 
-            mov     rf, ed_n1
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_n1
             ghi     rd
             lbnz    ed_s_first_ok
             glo     rd
             lbz     ed_s_err            ; n1 == 0: invalid
 ed_s_first_ok:
-            mov     rf, ed_s_first
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_s_first
             lbr     ed_s_first_done
 
 ed_s_first_default:
@@ -5628,18 +4838,12 @@ ed_s_first_default:
             ; what lets a bare "S" naturally continue forward on a
             ; second press after landing on a match, without needing
             ; to remember the last search text.
-            mov     rf, ed_cur_line
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = cur_line
+            call    ed_ldw_rd
+            dw      ed_cur_line  ; RD = cur_line
             inc     rd            ; RD = cur_line + 1
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = line_count
+            call    ed_ldw_r8
+            dw      ed_line_count  ; R8 = line_count
 
             ; cur_line+1 > line_count ? (already at/past the last line
             ; -- nothing left to search from here). Report "Not
@@ -5656,12 +4860,8 @@ ed_s_first_default:
             smb
             lbnf    ed_s_not_found      ; DF=0: line_count < cur_line+1
 
-            mov     rf, ed_s_first
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_s_first
 
 ed_s_first_done:
             ; last = have_n2 ? n2 : line_count
@@ -5669,17 +4869,10 @@ ed_s_first_done:
             ldn     rf
             lbz     ed_s_last_default
 
-            mov     rf, ed_n2
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            mov     rf, ed_s_last
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_ldw_rd
+            dw      ed_n2
+            call    ed_stw_rd
+            dw      ed_s_last
             lbr     ed_s_range_ready
 
 ed_s_last_default:
@@ -5693,16 +4886,10 @@ ed_s_last_default:
 
 ed_s_range_ready:
             ; validate: 1 <= first <= last <= line_count
-            mov     rf, ed_s_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = first
-            mov     rf, ed_s_last
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = last
+            call    ed_ldw_rd
+            dw      ed_s_first  ; RD = first
+            call    ed_ldw_r8
+            dw      ed_s_last  ; R8 = last
 
             ; last >= first ?
             glo     rd
@@ -5715,11 +4902,8 @@ ed_s_range_ready:
             smb
             lbnf    ed_s_err
 
-            mov     rf, ed_line_count
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r9
+            dw      ed_line_count
 
             ; line_count >= last ?
             glo     r8
@@ -5733,31 +4917,18 @@ ed_s_range_ready:
             lbnf    ed_s_err
 
             ; scan lines [first-1 .. last-1] (0-based)
-            mov     rf, ed_s_first
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_s_first
             dec     rd
-            mov     rf, ed_s_scan_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_s_scan_i
 
 ed_s_scan_loop:
-            mov     rf, ed_s_scan_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = scan_i (0-based)
+            call    ed_ldw_rd
+            dw      ed_s_scan_i  ; RD = scan_i (0-based)
             inc     rd            ; RD = 1-based line number
-            mov     rf, ed_s_last
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_r8
+            dw      ed_s_last
 
             ; 1-based scan number > last ? -> done, not found
             ; BUG FIX (hardware-found, 2026-07-19): operands were loaded
@@ -5783,44 +4954,27 @@ ed_s_scan_loop:
             smb
             lbnf    ed_s_not_found
 
-            mov     rf, ed_s_scan_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_s_scan_i
             call    ed_line_info        ; sets ed_li_ptr/ed_li_len for
                                         ; this candidate line
 
             call    ed_line_contains
             lbnf    ed_s_found
 
-            mov     rf, ed_s_scan_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_s_scan_i
             inc     rd
-            mov     rf, ed_s_scan_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_s_scan_i
             lbr     ed_s_scan_loop
 
 ed_s_found:
-            mov     rf, ed_s_scan_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_s_scan_i
             inc     rd            ; RD = 1-based line number
-            mov     rf, ed_cur_line
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_cur_line
 
             mov     rf, ed_num_buf
             call    f_uintout
@@ -5831,11 +4985,8 @@ ed_s_found:
             call    K_INMSG
             db      ": ",0
 
-            mov     rf, ed_s_scan_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_s_scan_i
             call    ed_print_line
             call    K_INMSG
             db      13,10,0
@@ -5874,18 +5025,11 @@ ed_s_found:
 
             ; anything else: keep searching from the line after this
             ; match, through the end of the already-established range
-            mov     rf, ed_s_scan_i
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_s_scan_i
             inc     rd
-            mov     rf, ed_s_scan_i
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_s_scan_i
             lbr     ed_s_scan_loop
 
 ed_s_not_found:
@@ -5923,16 +5067,10 @@ elc_outer_loop:
             ; remaining = haystack_len - outer (can't borrow: outer
             ; only ever advances while remaining >= needle_len, so it
             ; never exceeds haystack_len before this loop exits)
-            mov     rf, ed_li_len
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = haystack_len
-            mov     rf, ed_lc_outer
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = outer
+            call    ed_ldw_rd
+            dw      ed_li_len  ; RD = haystack_len
+            call    ed_ldw_r8
+            dw      ed_lc_outer  ; R8 = outer
 
             glo     r8
             str     r2
@@ -5945,11 +5083,8 @@ elc_outer_loop:
             smb
             phi     rc                  ; RC = remaining
 
-            mov     rf, ed_s_text_len
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = needle_len
+            call    ed_ldw_r9
+            dw      ed_s_text_len  ; R9 = needle_len
 
             ; remaining >= needle_len ?
             glo     r9
@@ -5969,16 +5104,10 @@ elc_outer_loop:
             str     rf
 
 elc_inner_loop:
-            mov     rf, ed_lc_inner
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = inner
-            mov     rf, ed_s_text_len
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_ldw_rd
+            dw      ed_lc_inner  ; RD = inner
+            call    ed_ldw_r8
+            dw      ed_s_text_len
 
             ; inner >= needle_len ? -> every byte matched
             glo     r8
@@ -6015,22 +5144,13 @@ elc_inner_loop:
             ; form is affected). Fixed by computing BOTH addresses
             ; first, so no add16/sub16 ever runs between "str r2" and
             ; the compare that depends on it.
-            mov     rf, ed_li_ptr
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
-            mov     rf, ed_lc_outer
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r8
+            dw      ed_li_ptr
+            call    ed_ldw_r9
+            dw      ed_lc_outer
             add16   r8, r9
-            mov     rf, ed_lc_inner
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r9
+            dw      ed_lc_inner
             add16   r8, r9              ; R8 = &haystack[outer+inner]
 
             mov     rf, ed_s_text_ptr
@@ -6038,11 +5158,8 @@ elc_inner_loop:
             phi     rb
             ldn     rf
             plo     rb
-            mov     rf, ed_lc_inner
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_ldw_r9
+            dw      ed_lc_inner
             add16   rb, r9              ; RB = &needle[inner] -- both
                                         ; addresses fully computed now;
                                         ; no more add16/sub16 calls
@@ -6059,33 +5176,19 @@ elc_inner_loop:
             xor                         ; D = needle ^ haystack
             lbnz    elc_mismatch
 
-            mov     rf, ed_lc_inner
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_lc_inner
             inc     rd
-            mov     rf, ed_lc_inner
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_lc_inner
             lbr     elc_inner_loop
 
 elc_mismatch:
-            mov     rf, ed_lc_outer
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
+            call    ed_ldw_rd
+            dw      ed_lc_outer
             inc     rd
-            mov     rf, ed_lc_outer
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    ed_stw_rd
+            dw      ed_lc_outer
             lbr     elc_outer_loop
 
 elc_match:
