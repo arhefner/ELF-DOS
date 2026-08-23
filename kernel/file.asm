@@ -120,6 +120,11 @@
             extrn   _load_lba24
             extrn   _dir_read_sector_from
             extrn   _dir_write_sector_from
+            extrn   _fcb_load_boff
+            extrn   _fcb_load_cclust
+            extrn   _fcb_load_iobuf
+            extrn   _fcb_store_cclust
+            extrn   _fcb_store_boff
             extrn   _file_create
             extrn   _delete_located_entry
             extrn   _mark_entry_deleted
@@ -479,26 +484,14 @@ fst_no_wrap:
             plo     rb                  ; RB = FCB base (reload -- the
                                         ; fat_get walk clobbered it)
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; FCB_CCLUST = target cluster
+            call    _fcb_store_cclust
 
             mov     rf, rb
             add16   rf, FCB_CSECT
             glo     r9
             str     rf                  ; FCB_CSECT = new_csect
 
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_BOFF = new_boff
+            call    _fcb_store_boff
 
             clc
             rtn
@@ -1486,6 +1479,89 @@ gsn_build_ext_done:
             call    _load_lba24
             mov     rf, dir_buf
             call    f_idewrite
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _fcb_load_boff/_fcb_load_cclust/_fcb_load_iobuf/_fcb_store_cclust/
+; _fcb_store_boff: small FCB-field accessors, factored out of
+; file_read/file_write/_fcb_seek_to after finding each one's own
+; "mov rf,rb / add16 rf,FCB_xxx / <read-or-write 2 bytes>" sequence
+; duplicated verbatim, always into/out of the SAME destination
+; register, at several call sites apiece (confirmed by direct
+; line-by-line comparison of every site before extracting -- same
+; discipline as _load_lba24 above). Every call site was individually
+; checked to confirm RB (the FCB base pointer) is genuinely live and
+; unclobbered at that point, matching what these procs assume.
+;
+; Args:    RB = FCB base pointer (all five)
+;          _fcb_store_cclust: RD = new FCB_CCLUST value
+;          _fcb_store_boff:   R8 = new FCB_BOFF value
+; Returns: _fcb_load_boff:    R8 = FCB_BOFF
+;          _fcb_load_cclust:  RD = FCB_CCLUST
+;          _fcb_load_iobuf:   R9 = FCB's own 512-byte I/O buffer pointer
+;          (the two stores return nothing meaningful in a register)
+; Modifies: RF (all five), plus the one register named above
+; ----------------------------------------------------------------
+            proc    _fcb_load_boff
+
+            mov     rf, rb
+            add16   rf, FCB_BOFF
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            rtn
+
+            endp
+
+            proc    _fcb_load_cclust
+
+            mov     rf, rb
+            add16   rf, FCB_CCLUST
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            rtn
+
+            endp
+
+            proc    _fcb_load_iobuf
+
+            mov     rf, rb
+            add16   rf, FCB_IOBUF
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            rtn
+
+            endp
+
+            proc    _fcb_store_cclust
+
+            mov     rf, rb
+            add16   rf, FCB_CCLUST
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            rtn
+
+            endp
+
+            proc    _fcb_store_boff
+
+            mov     rf, rb
+            add16   rf, FCB_BOFF
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
             rtn
 
             endp
@@ -4954,12 +5030,7 @@ fread_remaining_done:
             push    rb
             push    rc
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current cluster
+            call    _fcb_load_cclust
             call    _cluster_to_lba     ; R7/R8 = LBA of first sector of cluster
 
             mov     rf, rb
@@ -4979,12 +5050,7 @@ fread_remaining_done:
             ; R7/R8 hold the target LBA (f_ideread's own arg) -- R9 is
             ; free here to stage this FCB's own IOBUF pointer before
             ; moving it into RF for the call
-            mov     rf, rb
-            add16   rf, FCB_IOBUF
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = this FCB's own I/O buffer
+            call    _fcb_load_iobuf
             mov     rf, r9
             call    f_ideread
             lbdf    fread_ioerr_cleanup
@@ -5004,12 +5070,7 @@ fread_have_sector:
             ; ---- chunk = min(remaining_requested, sector_remaining, file_remaining) ----
             push    rd                  ; save file_remaining while computing sector_remaining
 
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = FCB_BOFF
+            call    _fcb_load_boff
 
             glo     r8
             str     r2
@@ -5058,19 +5119,9 @@ fread_skip_min2:
 
             ; ---- copy chunk bytes from this FCB's own IOBUF+FCB_BOFF
             ; to dest ----
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = FCB_BOFF
+            call    _fcb_load_boff
 
-            mov     rf, rb
-            add16   rf, FCB_IOBUF
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = this FCB's own I/O buffer
+            call    _fcb_load_iobuf
             mov     rf, r9
             add16   rf, r8              ; RF = IOBUF + FCB_BOFF (source)
 
@@ -5093,20 +5144,9 @@ fread_copy_have:
 fread_copy_done:
 
             ; FCB_BOFF += chunk
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    _fcb_load_boff        ; R8 = FCB_BOFF (post-update)
             add16   r8, r7
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_BOFF updated
+            call    _fcb_store_boff
 
             ; FCB_FPOS += chunk, full 32-bit (2026-07-26, >64K support)
             ; -- chunk (R7) is always <=512 (one sector's worth), so it
@@ -5163,12 +5203,7 @@ fread_copy_done:
             phi     rc                  ; RC -= chunk
 
             ; ---- did we cross a sector boundary? (FCB_BOFF == 512) ----
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = FCB_BOFF (post-update)
+            call    _fcb_load_boff
 
             ghi     r8
             xri     $02
@@ -5210,12 +5245,7 @@ fread_copy_done:
             push    ra
             push    rb
             push    rc
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current cluster
+            call    _fcb_load_cclust
 
             call    fat_get             ; RD = next cluster
             pop     rc
@@ -5224,13 +5254,7 @@ fread_copy_done:
             pop     r9
             lbdf    fread_ioerr         ; I/O error from fat_get
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; FCB_CCLUST = next cluster
+            call    _fcb_store_cclust
             ; if this is now an end-of-chain marker, the next iteration's
             ; FCB_FPOS/FCB_FSIZE check stops the loop before we'd ever
             ; try to load a sector from it, provided the directory
@@ -5392,13 +5416,7 @@ fread_calc_read:
             inc     rf
             glo     rd
             str     rf
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
+            call    _fcb_store_cclust
 
             ; the directory entry's first-cluster field now needs
             ; rewriting at close too -- _fclose_rewrite_size patches
@@ -5454,12 +5472,7 @@ fwrite_have_more:
             push    rb
             push    rc
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current cluster
+            call    _fcb_load_cclust
             call    _cluster_to_lba     ; R7/R8 = LBA of first sector of cluster
 
             mov     rf, rb
@@ -5479,12 +5492,7 @@ fwrite_have_more:
             ; R7/R8 hold the target LBA (f_ideread's own arg) -- R9 is
             ; free here to stage this FCB's own IOBUF pointer before
             ; moving it into RF for the call
-            mov     rf, rb
-            add16   rf, FCB_IOBUF
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = this FCB's own I/O buffer
+            call    _fcb_load_iobuf
             mov     rf, r9
             call    f_ideread
             ; consolidated (2026-08-01 size-reduction pass): the
@@ -5510,12 +5518,7 @@ fwrite_have_more:
 
 fwrite_have_sector:
             ; ---- chunk = min(remaining_requested, sector_remaining) ----
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = FCB_BOFF
+            call    _fcb_load_boff
 
             glo     r8
             str     r2
@@ -5549,19 +5552,9 @@ fwrite_skip_min1:
 
             ; ---- copy chunk bytes from source into this FCB's own
             ; IOBUF+FCB_BOFF ----
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = FCB_BOFF
+            call    _fcb_load_boff
 
-            mov     rf, rb
-            add16   rf, FCB_IOBUF
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = this FCB's own I/O buffer
+            call    _fcb_load_iobuf
             mov     rf, r9
             add16   rf, r8              ; RF = IOBUF + FCB_BOFF (dest)
 
@@ -5601,12 +5594,7 @@ fwrite_copy_done:
             push    rb
             push    rc
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current cluster
+            call    _fcb_load_cclust
             call    _cluster_to_lba     ; R7/R8 = LBA of first sector of cluster (temporary, restored below)
 
             mov     rf, rb
@@ -5626,12 +5614,7 @@ fwrite_copy_done:
             ; R7/R8 hold the target LBA (f_idewrite's own arg) -- R9 is
             ; free here to stage this FCB's own IOBUF pointer before
             ; moving it into RF for the call
-            mov     rf, rb
-            add16   rf, FCB_IOBUF
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = this FCB's own I/O buffer
+            call    _fcb_load_iobuf
             mov     rf, r9
             call    f_idewrite
             ; consolidated (2026-08-01 size-reduction pass), same
@@ -5650,20 +5633,9 @@ fwrite_copy_done:
             lbdf    fwrite_ioerr
 
             ; FCB_BOFF += chunk
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    _fcb_load_boff
             add16   r8, r7
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_BOFF updated
+            call    _fcb_store_boff
 
             ; FCB_FPOS += chunk, full 32-bit (2026-07-26, >64K support).
             ; R7 (chunk) MUST survive this entire block untouched --
@@ -5794,12 +5766,7 @@ fwrite_no_grow:
             phi     rc                  ; RC -= chunk
 
             ; ---- did we cross a sector boundary? (FCB_BOFF == 512) ----
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = FCB_BOFF (post-update)
+            call    _fcb_load_boff        ; R8 = FCB_BOFF (post-update)
 
             ghi     r8
             xri     $02
@@ -5841,12 +5808,7 @@ fwrite_no_grow:
             push    ra
             push    rb
             push    rc
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = current cluster
+            call    _fcb_load_cclust
 
             call    fat_get             ; RD = next cluster, or EOC
 
@@ -5890,12 +5852,7 @@ fwrite_no_grow:
             plo     r8                  ; R8 = new cluster
 
             ; fetch old (current) cluster into RD -- fat_set's arg
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = old cluster
+            call    _fcb_load_cclust        ; RD = old cluster
 
             ; RB is our FCB-base register throughout this loop, but
             ; fat_set also uses RB for its "value to write" argument
@@ -5954,13 +5911,7 @@ fwrite_no_grow:
 
 fwrite_have_next:
             ; fat_get returned a valid existing next cluster (RD)
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; FCB_CCLUST = next cluster
+            call    _fcb_store_cclust
 
 fwrite_no_cluster_wrap:
             ; clear this FCB's own IOVALID flag so the next iteration
@@ -6321,13 +6272,7 @@ fsk_rewind:
             ldn     rf
             plo     rd                  ; RD = start cluster
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; FCB_CCLUST = FCB_SCLUST
+            call    _fcb_store_cclust        ; FCB_CCLUST = FCB_SCLUST
 
             mov     rf, rb
             add16   rf, FCB_CSECT
