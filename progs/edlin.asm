@@ -3150,11 +3150,44 @@ ersq_is_quote:
             dec     rd
             dec     rd            ; len -= 2
 
-            call    ed_stw_r8
-            dw      ra
+            ; BUG FIX (self-review during this size-reduction pass,
+            ; caught before ever hardware-testing): RA/RC here are
+            ; RUNTIME POINTER VALUES (the caller's own output pointer/
+            ; length cells, whose addresses the caller already loaded
+            ; into RA/RC before calling), not symbolic addresses -- a
+            ; genuine "mov rf, ra" / "mov rf, rc" register-to-register
+            ; copy (RF := whatever RA/RC currently point at). An
+            ; earlier, overly-generic version of the mechanical STORE-
+            ; pattern transform script (used to introduce ed_stw_*
+            ; elsewhere in this file) matched this exact site by
+            ; mistake -- its address-extraction regex accepted ANY
+            ; non-whitespace token after "mov rf,", including a bare
+            ; register name, producing "call ed_stw_r8 / dw ra". Since
+            ; ed_stw_*'s whole inline-operand mechanism only works for
+            ; a real, compile-time-constant address, "dw ra" silently
+            ; assembled to the literal 2-byte value $000A (RA's own
+            ; register INDEX, confirmed via direct .lst byte decode --
+            ; NOT its runtime contents), which would have corrupted
+            ; this store into writing through address $000A instead of
+            ; wherever RA actually points. Caught by a dedicated post-
+            ; hoc scan of every ed_ldw_*/ed_stw_*/ed_cmp_* call site's
+            ; own "dw" operand for a register-name false match -- the
+            ; only such instance found in this file (2 of the 333
+            ; converted sites, both here). Reverted to this original,
+            ; correct register-indirect form.
+            mov     rf, ra
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
 
-            call    ed_stw_rd
-            dw      rc
+            mov     rf, rc
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
 
 ersq_done:
             rtn
