@@ -117,6 +117,9 @@
             extrn   fcrw_iobuf
             extrn   _fclose_rewrite_size
             extrn   _fcb_seek_to
+            extrn   _load_lba24
+            extrn   _dir_read_sector_from
+            extrn   _dir_write_sector_from
             extrn   _file_create
             extrn   _delete_located_entry
             extrn   _mark_entry_deleted
@@ -1408,6 +1411,86 @@ gsn_build_ext_done:
             endp
 
 ; ----------------------------------------------------------------
+; _load_lba24: read a 3-byte (LBA_SIZE) big-endian-on-disk LBA field
+; out of memory into the R7:R8 register pair, in the exact byte
+; layout f_ideread/f_idewrite expect as their own sector-address
+; argument (R8.lo=byte0, R7.hi=byte1, R7.lo=byte2, R8.hi=0 always --
+; an LBA never needs more than 24 bits on this hardware). Factored
+; out 2026-08-XX (kernel size-reduction pass) after finding this exact
+; 9-byte instruction sequence duplicated verbatim at 14 separate call
+; sites across this file (_check_shortname_collision, _file_create,
+; _fclose_rewrite_size, _mark_entry_deleted, dir_create, dir_remove,
+; file_rename, file_setattr, file_touch) -- each one reading a
+; different source field (dir_cur_lba, fc_saved_lba, fc_grow_lba,
+; fc_target_lba, dcr_sect_lba, FCB_ELBA) but via byte-for-byte
+; identical code, matching this project's own established gotcha-#4-
+; adjacent lesson that a mechanical, byte-for-byte duplicate is safe
+; to consolidate with zero behavior risk.
+;
+; Args:    RF = pointer to the 3-byte LBA field to read
+; Returns: R7:R8 loaded per the layout above; RF advanced by 3 (past
+;          the field) -- matches every existing call site's own
+;          "RF is dead after this" usage, confirmed by re-reading all
+;          14 original sites before extracting this.
+; Modifies: R7, R8, RF
+; ----------------------------------------------------------------
+            proc    _load_lba24
+
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            ldi     0
+            phi     r8
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _dir_read_sector_from: read dir_buf from disk at the 3-byte LBA
+; pointed to by RF (see _load_lba24 just above). Factored out
+; alongside _load_lba24 -- the "load LBA, then f_ideread into dir_buf"
+; shape (not just the load) was itself byte-for-byte duplicated at
+; several of the 14 sites (_check_shortname_collision, dir_create,
+; dir_remove, file_rename).
+;
+; Args:    RF = pointer to the 3-byte LBA field to read from
+; Returns: DF = 0/1 (f_ideread's own result); dir_buf holds the
+;          sector's real content on success
+; Modifies: R7, R8, R9, RF (same as f_ideread itself, plus RF)
+; ----------------------------------------------------------------
+            proc    _dir_read_sector_from
+
+            call    _load_lba24
+            mov     rf, dir_buf
+            call    f_ideread
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _dir_write_sector_from: write dir_buf to disk at the 3-byte LBA
+; pointed to by RF -- the write-side twin of _dir_read_sector_from
+; just above, covering the remaining, more numerous call sites
+; (_file_create's own fc_grow/fc_target paths, _mark_entry_deleted,
+; dir_create, file_rename, file_setattr, file_touch).
+;
+; Args:    RF = pointer to the 3-byte LBA field to write to
+; Returns: DF = 0/1 (f_idewrite's own result)
+; Modifies: R7, R8, R9, RF (same as f_idewrite itself, plus RF)
+; ----------------------------------------------------------------
+            proc    _dir_write_sector_from
+
+            call    _load_lba24
+            mov     rf, dir_buf
+            call    f_idewrite
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; _check_shortname_collision: does fc_shortname (the just-generated
 ; 8.3 fallback short name) already exist as some OTHER entry's raw
 ; short name in the CURRENT directory?
@@ -1658,16 +1741,7 @@ csc_restore:
             ; available since the scan above overwrote it with
             ; whatever sector it last examined
             mov     rf, fc_saved_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-            mov     rf, dir_buf
-            call    f_ideread
+            call    _dir_read_sector_from
             lbdf    csc_ioerr
 
             mov     rf, fc_collision
@@ -2185,16 +2259,7 @@ fc_mark_have:
 fc_mark_done:
             ; write the patched old sector back before moving on
             mov     rf, dir_cur_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-            mov     rf, dir_buf
-            call    f_idewrite
+            call    _dir_write_sector_from
             lbdf    fc_full
 
             call    _dir_next_sector    ; DF=0: dir_buf/dir_cur_lba
@@ -2414,16 +2479,7 @@ fc_grow_zero_loop:
             str     rf
 
             mov     rf, fc_grow_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-            mov     rf, dir_buf
-            call    f_idewrite
+            call    _dir_write_sector_from
             lbdf    fc_full
 
             dec     r9
@@ -2797,17 +2853,7 @@ fc_no_term:
 
             ; --- write the sector back ---
             mov     rf, fc_target_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-
-            mov     rf, dir_buf
-            call    f_idewrite
+            call    _dir_write_sector_from
             lbdf    fc_full
 
             clc                         ; DF = 0, success
@@ -2910,14 +2956,7 @@ fclose_no_rewrite:
             ; load FCB_ELBA into R7/R8 for f_ideread
             mov     rf, rd
             add16   rf, FCB_ELBA
-            lda     rf                  ; D = bits 23-16
-            plo     r8
-            lda     rf                  ; D = bits 15-8
-            phi     r7
-            ldn     rf                  ; D = bits 7-0
-            plo     r7
-            ldi     0
-            phi     r8                  ; R8.1 = 0 (drive/head)
+            call    _load_lba24        ; R7:R8 = LBA
 
             mov     r9, fcrw_iobuf
             lda     r9
@@ -3063,14 +3102,7 @@ fclose_no_rewrite:
             plo     rd                  ; RD = FCB slot base
             mov     rf, rd
             add16   rf, FCB_ELBA
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
+            call    _load_lba24
 
             mov     r9, fcrw_iobuf
             lda     r9
@@ -3293,17 +3325,7 @@ dle_mark_short:
             str     rf                  ; mark deleted in memory
 
             mov     rf, dir_cur_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-
-            mov     rf, dir_buf
-            call    f_idewrite
+            call    _dir_write_sector_from
             lbdf    med_err
 
             clc                         ; DF = 0, success
@@ -3915,16 +3937,7 @@ dcr_dotdot_pad:
                                         ; write calls below)
 
             mov     rf, dcr_sect_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-            mov     rf, dir_buf
-            call    f_idewrite
+            call    _dir_write_sector_from
             lbdf    dcr_err
 
             ; --- zero any remaining sectors in the cluster ---
@@ -3965,16 +3978,7 @@ dcr_zero_loop:
             str     rf                  ; dcr_sect_lba's low byte += 1
 
             mov     rf, dcr_sect_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-            mov     rf, dir_buf
-            call    f_idewrite
+            call    _dir_write_sector_from
             lbdf    dcr_err
 
             dec     r9
@@ -3988,16 +3992,7 @@ dcr_restore:
             ; untouched by any of the above, so a plain re-read puts
             ; dir_buf back exactly where _file_create expects it) ---
             mov     rf, dir_cur_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-            mov     rf, dir_buf
-            call    f_ideread
+            call    _dir_read_sector_from
             lbdf    dcr_err
 
             mov     rf, fc_new_attr
@@ -4198,17 +4193,7 @@ drm_restore:
             str     rb
 
             mov     rf, dir_cur_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-
-            mov     rf, dir_buf
-            call    f_ideread           ; dir_buf = parent's sector
+            call    _dir_read_sector_from ; dir_buf = parent's sector
                                         ; content again
             lbdf    drm_err
 
@@ -4493,18 +4478,8 @@ ren_insert:
             str     rb
 
             mov     rf, dir_cur_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-
-            mov     rf, dir_buf
-            call    f_ideread           ; dir_buf = OLD entry's parent
-                                        ; sector content again
+            call    _dir_read_sector_from ; dir_buf = OLD entry's
+                                        ; parent sector content again
             lbdf    ren_err
 
             ; R9 = the OLD entry's own cluster -- still sitting in
@@ -4715,17 +4690,7 @@ fst_buf:        dw      0
             ; extraction + f_idewrite pattern _mark_entry_deleted
             ; already uses
             mov     rf, dir_cur_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-
-            mov     rf, dir_buf
-            call    f_idewrite
+            call    _dir_write_sector_from
             lbdf    fsa_err
 
             clc                         ; DF = 0, success
@@ -4813,17 +4778,7 @@ fsa_clearmask:  db      0
             ; write the patched sector back -- same 3-byte-LBA
             ; extraction + f_idewrite pattern file_setattr already uses
             mov     rf, dir_cur_lba
-            lda     rf
-            plo     r8
-            lda     rf
-            phi     r7
-            ldn     rf
-            plo     r7
-            ldi     0
-            phi     r8
-
-            mov     rf, dir_buf
-            call    f_idewrite
+            call    _dir_write_sector_from
             lbdf    ftc_err
 
             clc                         ; DF = 0, success
