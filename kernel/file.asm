@@ -130,6 +130,8 @@
             extrn   _fcb_store_fpos32
             extrn   _check_name_dotdot
             extrn   _fcb_sector_lba_and_iobuf
+            extrn   _store_fo_name
+            extrn   _resolve_fo_name
             extrn   _file_create
             extrn   _delete_located_entry
             extrn   _mark_entry_deleted
@@ -562,14 +564,7 @@ fst_ioerr:
             ; --- resolve the (possibly multi-component, possibly
             ; drive-prefixed) path -- path_resolve determines the base
             ; cluster and target drive internally now (see path.asm) ---
-            mov     ra, fo_name         ; RA = address of fo_name (scratch,
-                                        ; distinct from RF so RF is free
-                                        ; to receive the pointer value)
-            lda     ra
-            phi     rf
-            ldn     ra
-            plo     rf                  ; RF = name/path pointer
-            call    path_resolve        ; RD = parent cluster, RF = final
+            call    _resolve_fo_name    ; RD = parent cluster, RF = final
                                         ; component (in path_resolve's
                                         ; own scratch, not fo_name's
                                         ; original string), RC.0 =
@@ -1706,6 +1701,53 @@ gsn_build_ext_done:
 
             call    _fcb_load_iobuf
             mov     rf, r9
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _store_fo_name: fo_name = RF. Factored out after finding this exact
+; "mov rb,fo_name / ghi rf/str rb/inc rb/glo rf/str rb" sequence
+; duplicated verbatim at 4 call sites (_scan_dir_for_name, _find_dirent,
+; dir_create, file_rename's own old-path save) -- each stashing a
+; caller-or-locally-supplied name/path pointer into fo_name before
+; using it (directly, or via path_resolve/a directory scan).
+;
+; Args:    RF = pointer to store into fo_name (untouched otherwise)
+; Returns: nothing
+; Modifies: RB
+; ----------------------------------------------------------------
+            proc    _store_fo_name
+
+            mov     rb, fo_name
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _resolve_fo_name: load fo_name and resolve it via path_resolve.
+; Factored out after finding "mov ra,fo_name / lda ra/phi rf/ldn
+; ra/plo rf / call path_resolve" duplicated verbatim at 3 call sites
+; (file_open, dir_create, file_rename's own old-path resolution).
+;
+; Args:    none (reads fo_name)
+; Returns: same as path_resolve: RD = parent cluster, RF = final
+;          component pointer, RC.0 = resolved drive, DF = 0/1
+; Modifies: RA, RF, plus whatever path_resolve itself modifies
+; ----------------------------------------------------------------
+            proc    _resolve_fo_name
+
+            mov     ra, fo_name
+            lda     ra
+            phi     rf
+            ldn     ra
+            plo     rf
+            call    path_resolve
             rtn
 
             endp
@@ -3743,12 +3785,7 @@ idd_dotdot: db      "..",0
 
             proc    _scan_dir_for_name
 
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = name pointer
+            call    _store_fo_name
 
             mov     rb, sdn_parent
             ghi     rd
@@ -3824,20 +3861,9 @@ sdn_parent: dw      0
 ; ----------------------------------------------------------------
 
             proc    _find_dirent
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = path pointer
+            call    _store_fo_name
 
-            mov     ra, fo_name
-            lda     ra
-            phi     rf
-            ldn     ra
-            plo     rf                  ; RF = path pointer
-            call    path_resolve        ; RD = parent cluster, RF = final
-                                        ; component
+            call    _resolve_fo_name
             lbdf    fdd_err             ; bad intermediate component
 
             ldn     rf
@@ -3901,20 +3927,14 @@ fdd_err:
             ; --- resolve the (possibly multi-component, possibly
             ; drive-prefixed) path -- path_resolve determines the base
             ; cluster and target drive internally now (see path.asm) ---
-            mov     ra, fo_name
-            lda     ra
-            phi     rf
-            ldn     ra
-            plo     rf                  ; RF = path pointer
-            call    path_resolve        ; RD = parent cluster, RF = final
-                                        ; component, RC.0 = resolved
-                                        ; drive (unused here -- a new
-                                        ; directory's own entry is
-                                        ; inserted via _file_create,
-                                        ; which has no drive field of
-                                        ; its own to populate; the
-                                        ; active drive is already
-                                        ; correct for everything below)
+            call    _resolve_fo_name    ; RC.0 = resolved drive (unused
+                                        ; here -- a new directory's own
+                                        ; entry is inserted via
+                                        ; _file_create, which has no
+                                        ; drive field of its own to
+                                        ; populate; the active drive is
+                                        ; already correct for
+                                        ; everything below)
             lbdf    dcr_err             ; bad intermediate component, or
                                         ; an explicit "X:" prefix named
                                         ; an unmounted drive
@@ -3926,12 +3946,7 @@ fdd_err:
             ; which destroys the very value being saved; and the "." /
             ; ".." guard further below calls f_strcmp, which clobbers
             ; RD, so both must be safely in memory before that runs.
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = final component ptr
+            call    _store_fo_name
 
             mov     rb, dcr_parent
             ghi     rd
@@ -4461,12 +4476,7 @@ drm_err:
             ; save both incoming pointers immediately, using RB as the
             ; store-address register -- path_resolve (below) clobbers
             ; RD and needs RF free
-            mov     rb, fo_name
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; fo_name = old path pointer
+            call    _store_fo_name
 
             mov     rb, ren_new_name
             ghi     rd
