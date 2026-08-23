@@ -782,6 +782,63 @@ ed_stw_rc:
             rtn
 
 ;------------------------------------------------------------------
+; ed_cmp_rd_le / ed_cmp_r8_le: compare RD (resp. R8) against a 16-bit
+; big-endian word at a FIXED memory address, addressed via the same
+; R6 inline-operand idiom ed_ldw_*/ed_stw_* above use -- see their own
+; header comment for the full mechanism. Replaces the extremely
+; common "call ed_ldw_rX / dw ADDR / glo RD / str r2 / glo rX / sm /
+; ghi RD / str r2 / ghi rX / smb" 10-instruction/16-byte comparison
+; shape (20 occurrences before this pass) with "call ed_cmp_RD_le" +
+; "dw ADDR" (5 bytes) -- the caller's own following lbdf/lbnf is
+; UNCHANGED, since what a true/false result should DO (report an
+; error, stop a loop, skip a default, ...) differs by call site; only
+; the comparison itself, and the DF it produces, is shared.
+; Args (inline): 2 bytes = address of the word to compare against
+; Returns: DF = 1 if RD (resp. R8) <= *ADDR (no borrow), DF = 0 if
+;          RD (resp. R8) > *ADDR; RD/R8 themselves left unchanged
+; Modifies: RF, R6 (inline-operand cursor), R8 (ed_cmp_rd_le only) /
+;           R9 (ed_cmp_r8_le only) -- the OTHER of the two comparison
+;           registers, used as scratch to hold the dereferenced word
+;------------------------------------------------------------------
+ed_cmp_rd_le:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            glo     rd
+            str     r2
+            glo     r8
+            sm
+            ghi     rd
+            str     r2
+            ghi     r8
+            smb
+            rtn
+
+ed_cmp_r8_le:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            glo     r8
+            str     r2
+            glo     r9
+            sm
+            ghi     r8
+            str     r2
+            ghi     r9
+            smb
+            rtn
+
+;------------------------------------------------------------------
 ; ed_line_info: compute a line's absolute start pointer and byte
 ; length (excluding its trailing LF separator).
 ; Args:    RD = 0-based line index (must be < ed_line_count)
@@ -1538,19 +1595,9 @@ ed_bare_number:
             lbnz    ed_num_range_err
             glo     rd
             lbz     ed_num_range_err    ; n1 == 0: invalid
-
-            call    ed_ldw_r8
-            dw      ed_line_count
-
             ; line_count >= n1 ?
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
+            call    ed_cmp_rd_le
+            dw      ed_line_count
             lbnf    ed_num_range_err
 
             mov     rf, ed_cur_line
@@ -1759,18 +1806,9 @@ ed_lp_n1_given:
             glo     rd
             lbz     ed_num_range_err            ; n1 == 0: invalid
 ed_l_n1_ok:
-            call    ed_ldw_r8
-            dw      ed_line_count  ; R8 = line_count
-
             ; line_count >= n1 ?
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
+            call    ed_cmp_rd_le
+            dw      ed_line_count
             lbnf    ed_num_range_err
 
             mov     rf, ed_list_i
@@ -1976,14 +2014,6 @@ ed_list_loop:
 ed_list_finish:
             call    ed_ldw_rd
             dw      ed_list_i  ; RD = list_i (0-based "next"
-                                        ; index -- equals the 1-based
-                                        ; line number of whatever was
-                                        ; last actually shown, if
-                                        ; anything was)
-
-            call    ed_ldw_r8
-            dw      ed_list_start_i  ; R8 = starting index (0-based)
-
             ; want: skip the update iff list_i <= start_i (strict "<="
             ; test) -- staging list_i (RD) as subtrahend and loading
             ; start_i (R8) last as minuend gives D = start_i - list_i;
@@ -1994,15 +2024,9 @@ ed_list_finish:
             ; class this whole session's fixes were for (list_i ==
             ; start_i, the common "nothing shown" case, would have
             ; been misread as "something was shown").
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbdf    ed_cmdloop          ; DF=1: list_i <= start_i --
+            call    ed_cmp_rd_le
+            dw      ed_list_start_i
+            lbdf    ed_cmdloop  ; DF=1: list_i <= start_i --
                                         ; nothing was ever shown, leave
                                         ; ed_cur_line untouched
 
@@ -2412,19 +2436,10 @@ eio_wr_lf:
 eio_shift_loop:
             call    ed_ldw_rd
             dw      ed_i_shift_i
-            call    ed_ldw_r8
-            dw      ed_i_ins_idx
-
             ; ins_idx >= shift_i ?
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbdf    eio_shift_done      ; DF=1: shift_i <= ins_idx: done
+            call    ed_cmp_rd_le
+            dw      ed_i_ins_idx
+            lbdf    eio_shift_done  ; DF=1: shift_i <= ins_idx: done
 
             call    ed_ldw_rd
             dw      ed_i_shift_i
@@ -2802,16 +2817,8 @@ ed_cmd_r:
             glo     rd
             lbz     ed_num_range_err
 ed_r_n1_ok:
-            call    ed_ldw_r8
+            call    ed_cmp_rd_le
             dw      ed_line_count
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
             lbnf    ed_num_range_err
             call    ed_stw_rd
             dw      ed_r_first
@@ -2836,16 +2843,8 @@ ed_r_have_first:
             glo     rd
             lbz     ed_num_range_err
 ed_r_n2_ok:
-            call    ed_ldw_r8
+            call    ed_cmp_rd_le
             dw      ed_line_count
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
             lbnf    ed_num_range_err
 
             mov     r8, ed_r_first
@@ -2879,40 +2878,12 @@ ed_r_range_ready:
             ; first > last) is not an error -- just nothing to do
             call    ed_ldw_rd
             dw      ed_r_first
-            ; BUG FIX (2026-07-31, hardware-reported): all three checks
-            ; in this proc used to stage the wrong operand as
-            ; subtrahend, so "lbdf" fired on ">=" instead of the
-            ; strict ">" each comment claimed -- first==line_count or
-            ; first==last were wrongly treated as "empty range,
-            ; nothing to do". Fixed by swapping which value is staged
-            ; (str r2) vs. loaded last (the true minuend right before
-            ; sm), and switching lbdf->lbnf to match: DF=0 (borrow)
-            ; now correctly means the swapped minuend < the swapped
-            ; subtrahend, i.e. the original strict ">" condition.
-            call    ed_ldw_r8
-            dw      ed_line_count  ; R8 = line_count
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbnf    ed_r_report         ; DF=0: line_count < first,
-                                        ; i.e. first > line_count
-
-            call    ed_ldw_r8
-            dw      ed_r_last  ; R8 = last
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbnf    ed_r_report         ; DF=0: last < first,
+            call    ed_cmp_rd_le
+            dw      ed_line_count
+            lbnf    ed_r_report  ; DF=0: line_count < first,
+            call    ed_cmp_rd_le
+            dw      ed_r_last
+            lbnf    ed_r_report  ; DF=0: last < first,
                                         ; i.e. first > last
 
             call    ed_stw_rd
@@ -2927,17 +2898,9 @@ ed_r_range_ready:
 ed_r_loop:
             call    ed_ldw_rd
             dw      ed_r_line_idx
-            call    ed_ldw_r8
-            dw      ed_r_last  ; R8 = last
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbnf    ed_r_report         ; DF=0: last < line_idx,
+            call    ed_cmp_rd_le
+            dw      ed_r_last
+            lbnf    ed_r_report  ; DF=0: last < line_idx,
                                         ; i.e. line_idx > last -- done
                                         ; (same swap-and-lbnf fix as
                                         ; the two checks above, same
@@ -3585,16 +3548,8 @@ ecpt_have_first:
             glo     rd
             lbz     ecpt_err
 ecpt_f_ok:
-            call    ed_ldw_r8
+            call    ed_cmp_rd_le
             dw      ed_line_count
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
             lbnf    ecpt_err
 
             mov     rf, ed_have_n2
@@ -3627,16 +3582,8 @@ ecpt_have_last:
             glo     rd
             lbz     ecpt_err
 ecpt_l_ok:
-            call    ed_ldw_r8
+            call    ed_cmp_rd_le
             dw      ed_line_count
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
             lbnf    ecpt_err
 
             mov     r8, ed_c_first
@@ -3674,31 +3621,12 @@ ecpt_l_ok:
             ; inside (first,last]
             call    ed_ldw_rd
             dw      ed_i_target  ; RD = target
-            call    ed_ldw_r8
-            dw      ed_c_first  ; R8 = first
-
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbdf    ecpt_shift_yes      ; DF=1: first >= target ->
-                                        ; target <= first
-
-            call    ed_ldw_r8
-            dw      ed_c_last  ; R8 = last
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbdf    ecpt_err            ; DF=1: last >= target ->
+            call    ed_cmp_rd_le
+            dw      ed_c_first
+            lbdf    ecpt_shift_yes  ; DF=1: first >= target ->
+            call    ed_cmp_rd_le
+            dw      ed_c_last
+            lbdf    ecpt_err  ; DF=1: last >= target ->
                                         ; target inside (first,last]
 
             mov     rf, ed_c_shift
@@ -4152,33 +4080,13 @@ ed_d_validate:
             lbnz    ed_num_range_err
             glo     rd
             lbz     ed_num_range_err            ; first == 0
-
-            call    ed_ldw_r8
-            dw      ed_d_last
-
             ; last >= first ?
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
+            call    ed_cmp_rd_le
+            dw      ed_d_last
             lbnf    ed_num_range_err
-
-            call    ed_ldw_r9
-            dw      ed_line_count
-
             ; line_count >= last ?
-            glo     r8
-            str     r2
-            glo     r9
-            sm
-            ghi     r8
-            str     r2
-            ghi     r9
-            smb
+            call    ed_cmp_r8_le
+            dw      ed_line_count
             lbnf    ed_num_range_err
             call    ed_delete_range
             call    K_INMSG
@@ -4583,17 +4491,9 @@ ed_wsave_have_target:
             glo     rd
             lbz     ed_num_range_err   ; n1 == 0: invalid
 ed_wsave_n1_ok:
-            call    ed_ldw_r8
-            dw      ed_line_count  ; R8 = line_count
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbnf    ed_num_range_err   ; DF=0: line_count < n1
+            call    ed_cmp_rd_le
+            dw      ed_line_count
+            lbnf    ed_num_range_err  ; DF=0: line_count < n1
             call    ed_stw_rd
             dw      ed_w_count
             lbr     ed_wsave_have_count
@@ -4791,24 +4691,14 @@ ed_s_first_default:
             call    ed_ldw_rd
             dw      ed_cur_line  ; RD = cur_line
             inc     rd            ; RD = cur_line + 1
-
-            call    ed_ldw_r8
-            dw      ed_line_count  ; R8 = line_count
-
             ; cur_line+1 > line_count ? (already at/past the last line
             ; -- nothing left to search from here). Report "Not
             ; found." directly rather than falling into the range
             ; validator below, which is reserved for a genuinely bad
             ; EXPLICIT line number.
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
-            lbnf    ed_s_not_found      ; DF=0: line_count < cur_line+1
+            call    ed_cmp_rd_le
+            dw      ed_line_count
+            lbnf    ed_s_not_found  ; DF=0: line_count < cur_line+1
 
             call    ed_stw_rd
             dw      ed_s_first
@@ -4838,32 +4728,13 @@ ed_s_range_ready:
             ; validate: 1 <= first <= last <= line_count
             call    ed_ldw_rd
             dw      ed_s_first  ; RD = first
-            call    ed_ldw_r8
-            dw      ed_s_last  ; R8 = last
-
             ; last >= first ?
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
+            call    ed_cmp_rd_le
+            dw      ed_s_last
             lbnf    ed_num_range_err
-
-            call    ed_ldw_r9
-            dw      ed_line_count
-
             ; line_count >= last ?
-            glo     r8
-            str     r2
-            glo     r9
-            sm
-            ghi     r8
-            str     r2
-            ghi     r9
-            smb
+            call    ed_cmp_r8_le
+            dw      ed_line_count
             lbnf    ed_num_range_err
 
             ; scan lines [first-1 .. last-1] (0-based)
@@ -4877,9 +4748,6 @@ ed_s_scan_loop:
             call    ed_ldw_rd
             dw      ed_s_scan_i  ; RD = scan_i (0-based)
             inc     rd            ; RD = 1-based line number
-            call    ed_ldw_r8
-            dw      ed_s_last
-
             ; 1-based scan number > last ? -> done, not found
             ; BUG FIX (hardware-found, 2026-07-19): operands were loaded
             ; in the wrong order for a STRICT ">" comparison -- the
@@ -4894,14 +4762,8 @@ ed_s_scan_loop:
             ; computing "last - scan" instead (DF=1 iff last>=scan,
             ; i.e. scan<=last) and branching away only when DF=0
             ; (scan>last, a genuine strict inequality).
-            glo     rd
-            str     r2
-            glo     r8
-            sm
-            ghi     rd
-            str     r2
-            ghi     r8
-            smb
+            call    ed_cmp_rd_le
+            dw      ed_s_last
             lbnf    ed_s_not_found
 
             call    ed_ldw_rd
