@@ -1757,7 +1757,7 @@ ed_lp_n1_given:
             ghi     rd
             lbnz    ed_l_n1_ok
             glo     rd
-            lbz     ed_l_err            ; n1 == 0: invalid
+            lbz     ed_num_range_err            ; n1 == 0: invalid
 ed_l_n1_ok:
             call    ed_ldw_r8
             dw      ed_line_count  ; R8 = line_count
@@ -1771,7 +1771,7 @@ ed_l_n1_ok:
             str     r2
             ghi     r8
             smb
-            lbnf    ed_l_err
+            lbnf    ed_num_range_err
 
             mov     rf, ed_list_i
             dec     rd            ; RD = n1 - 1 (0-based start)
@@ -1791,7 +1791,7 @@ ed_l_n1_ok:
             ghi     rd
             lbnz    ed_l_n2_ok
             glo     rd
-            lbz     ed_l_err            ; n2 == 0: invalid
+            lbz     ed_num_range_err            ; n2 == 0: invalid
 ed_l_n2_ok:
             ; line_count >= n2 ?
             glo     rd
@@ -1802,7 +1802,7 @@ ed_l_n2_ok:
             str     r2
             ghi     r8
             smb
-            lbnf    ed_l_err
+            lbnf    ed_num_range_err
 
             call    ed_stw_rd
             dw      ed_list_last
@@ -1816,11 +1816,6 @@ ed_l_single:
             call    ed_stw_rd
             dw      ed_list_last
             lbr     ed_list_start
-
-ed_l_err:
-            call    K_INMSG
-            db      "Line number out of range.",13,10,0
-            lbr     ed_cmdloop
 
 ;------------------------------------------------------------------
 ; ed_list_clamp_last: given RD = first (1-based; may legitimately be
@@ -2065,7 +2060,7 @@ ed_i_use_cur:
 
 ed_i_validate:
             call    ed_validate_insert_target
-            lbdf    ed_i_err
+            lbdf    ed_num_range_err
 
             call    K_INMSG
             db      "Insert (. to end):",13,10,0
@@ -2122,7 +2117,7 @@ ed_i_not_dot:
             str     rf
 
             call    ed_insert_one
-            lbdf    ed_i_toolong
+            lbdf    ed_edit_toolong
 
             call    ed_ldw_rd
             dw      ed_i_target
@@ -2132,15 +2127,7 @@ ed_i_not_dot:
 
             lbr     ed_i_loop
 
-ed_i_toolong:
-            call    K_INMSG
-            db      "Buffer full.",13,10,0
 ed_i_done:
-            lbr     ed_cmdloop
-
-ed_i_err:
-            call    K_INMSG
-            db      "Line number out of range.",13,10,0
             lbr     ed_cmdloop
 
 ;------------------------------------------------------------------
@@ -2590,7 +2577,7 @@ ed_t_use_cur:
 
 ed_t_validate:
             call    ed_validate_insert_target
-            lbdf    ed_i_err            ; reuse I/A's own message
+            lbdf    ed_num_range_err            ; reuse I/A's own message
 
             ; --- open the file (reusing ed_fcb/ed_iobuf) ---
             call    ed_ldw_ra
@@ -2719,9 +2706,7 @@ ed_t_ioerr:
 ed_t_toolong:
             mov     rd, ed_fcb
             call    K_FILE_CLOSE
-            call    K_INMSG
-            db      "Buffer full.",13,10,0
-            lbr     ed_cmdloop
+            lbr     ed_edit_toolong
 
 ed_t_notfound:
             call    K_INMSG
@@ -2815,7 +2800,7 @@ ed_cmd_r:
             ghi     rd
             lbnz    ed_r_n1_ok
             glo     rd
-            lbz     ed_r_err
+            lbz     ed_num_range_err
 ed_r_n1_ok:
             call    ed_ldw_r8
             dw      ed_line_count
@@ -2827,7 +2812,7 @@ ed_r_n1_ok:
             str     r2
             ghi     r8
             smb
-            lbnf    ed_r_err
+            lbnf    ed_num_range_err
             call    ed_stw_rd
             dw      ed_r_first
             lbr     ed_r_have_first
@@ -2849,7 +2834,7 @@ ed_r_have_first:
             ghi     rd
             lbnz    ed_r_n2_ok
             glo     rd
-            lbz     ed_r_err
+            lbz     ed_num_range_err
 ed_r_n2_ok:
             call    ed_ldw_r8
             dw      ed_line_count
@@ -2861,7 +2846,7 @@ ed_r_n2_ok:
             str     r2
             ghi     r8
             smb
-            lbnf    ed_r_err
+            lbnf    ed_num_range_err
 
             mov     r8, ed_r_first
             lda     r8
@@ -2877,7 +2862,7 @@ ed_r_n2_ok:
             str     r2
             ghi     rd
             smb
-            lbnf    ed_r_err            ; n2 < first: invalid
+            lbnf    ed_num_range_err            ; n2 < first: invalid
 
             call    ed_stw_rd
             dw      ed_r_last
@@ -2964,7 +2949,7 @@ ed_r_loop:
                                         ; as "past the end")
 
             call    ed_r_process_line
-            lbdf    ed_r_toolong
+            lbdf    ed_edit_toolong
 
             call    ed_ldw_rd
             dw      ed_r_line_idx
@@ -2986,19 +2971,9 @@ ed_r_report:
             db      " replacement(s) made.",13,10,0
             lbr     ed_cmdloop
 
-ed_r_toolong:
-            call    K_INMSG
-            db      "Buffer full.",13,10,0
-            lbr     ed_cmdloop
-
 ed_r_usage:
             call    K_INMSG
             db      "Usage: R oldtext,newtext",13,10,0
-            lbr     ed_cmdloop
-
-ed_r_err:
-            call    K_INMSG
-            db      "Line number out of range.",13,10,0
             lbr     ed_cmdloop
 
 ;------------------------------------------------------------------
@@ -3754,7 +3729,7 @@ ed_cmd_c:
             lbnf    ed_c_have_shift
             xri     2
             lbz     ed_c_usage
-            lbr     ed_c_err
+            lbr     ed_num_range_err
 
 ed_c_have_shift:
             ; --- count: default 1 ---
@@ -3826,19 +3801,9 @@ ed_c_done:
             str     rf
             lbr     ed_cmdloop
 
-ed_c_toolong:
-            call    K_INMSG
-            db      "Buffer full.",13,10,0
-            lbr     ed_cmdloop
-
 ed_c_usage:
             call    K_INMSG
             db      "Usage: [first],[last],target[,count]C",13,10,0
-            lbr     ed_cmdloop
-
-ed_c_err:
-            call    K_INMSG
-            db      "Line number out of range.",13,10,0
             lbr     ed_cmdloop
 
 ;------------------------------------------------------------------
@@ -4006,7 +3971,7 @@ ed_c_copy_done:
             str     rf
 
             call    ed_insert_one
-            lbdf    ed_c_toolong
+            lbdf    ed_edit_toolong
 
             call    ed_ldw_rd
             dw      ed_c_ins_pos
@@ -4053,7 +4018,7 @@ ed_cmd_m:
             lbnf    ed_m_ready
             xri     2
             lbz     ed_m_usage
-            lbr     ed_m_err
+            lbr     ed_num_range_err
 
 ed_m_ready:
             call    ed_c_setup_pass
@@ -4124,11 +4089,6 @@ ed_m_usage:
             db      "Usage: [first],[last]target M",13,10,0
             lbr     ed_cmdloop
 
-ed_m_err:
-            call    K_INMSG
-            db      "Line number out of range.",13,10,0
-            lbr     ed_cmdloop
-
 ;==================================================================
 ; D - delete
 ;==================================================================
@@ -4189,9 +4149,9 @@ ed_d_validate:
             call    ed_ldw_rd
             dw      ed_d_first
             ghi     rd
-            lbnz    ed_d_err
+            lbnz    ed_num_range_err
             glo     rd
-            lbz     ed_d_err            ; first == 0
+            lbz     ed_num_range_err            ; first == 0
 
             call    ed_ldw_r8
             dw      ed_d_last
@@ -4205,7 +4165,7 @@ ed_d_validate:
             str     r2
             ghi     r8
             smb
-            lbnf    ed_d_err
+            lbnf    ed_num_range_err
 
             call    ed_ldw_r9
             dw      ed_line_count
@@ -4219,15 +4179,10 @@ ed_d_validate:
             str     r2
             ghi     r9
             smb
-            lbnf    ed_d_err
+            lbnf    ed_num_range_err
             call    ed_delete_range
             call    K_INMSG
             db      "Deleted.",13,10,0
-            lbr     ed_cmdloop
-
-ed_d_err:
-            call    K_INMSG
-            db      "Line number out of range.",13,10,0
             lbr     ed_cmdloop
 
 ;------------------------------------------------------------------
@@ -4626,7 +4581,7 @@ ed_wsave_have_target:
             ghi     rd
             lbnz    ed_wsave_n1_ok
             glo     rd
-            lbz     ed_wsave_rangeerr   ; n1 == 0: invalid
+            lbz     ed_num_range_err   ; n1 == 0: invalid
 ed_wsave_n1_ok:
             call    ed_ldw_r8
             dw      ed_line_count  ; R8 = line_count
@@ -4638,7 +4593,7 @@ ed_wsave_n1_ok:
             str     r2
             ghi     r8
             smb
-            lbnf    ed_wsave_rangeerr   ; DF=0: line_count < n1
+            lbnf    ed_num_range_err   ; DF=0: line_count < n1
             call    ed_stw_rd
             dw      ed_w_count
             lbr     ed_wsave_have_count
@@ -4758,11 +4713,6 @@ ed_wsave_openerr:
             ldi     1
             rtn
 
-ed_wsave_rangeerr:
-            call    K_INMSG
-            db      "Line number out of range.",13,10,0
-            lbr     ed_cmdloop
-
 ed_wsave_no_name:
             ; always returns to the prompt regardless of W/E -- a
             ; missing filename with no fallback is trivially
@@ -4825,7 +4775,7 @@ ed_cmd_s:
             ghi     rd
             lbnz    ed_s_first_ok
             glo     rd
-            lbz     ed_s_err            ; n1 == 0: invalid
+            lbz     ed_num_range_err            ; n1 == 0: invalid
 ed_s_first_ok:
             call    ed_stw_rd
             dw      ed_s_first
@@ -4900,7 +4850,7 @@ ed_s_range_ready:
             str     r2
             ghi     r8
             smb
-            lbnf    ed_s_err
+            lbnf    ed_num_range_err
 
             call    ed_ldw_r9
             dw      ed_line_count
@@ -4914,7 +4864,7 @@ ed_s_range_ready:
             str     r2
             ghi     r9
             smb
-            lbnf    ed_s_err
+            lbnf    ed_num_range_err
 
             ; scan lines [first-1 .. last-1] (0-based)
             call    ed_ldw_rd
@@ -5040,11 +4990,6 @@ ed_s_not_found:
 ed_s_no_text:
             call    K_INMSG
             db      "Search text required.",13,10,0
-            lbr     ed_cmdloop
-
-ed_s_err:
-            call    K_INMSG
-            db      "Line number out of range.",13,10,0
             lbr     ed_cmdloop
 
 ;------------------------------------------------------------------
