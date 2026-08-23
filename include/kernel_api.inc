@@ -61,10 +61,12 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $4300       ; user programs load here (see kernel.inc;
-                                    ; == KERN_LOAD in boot/mbr.asm by design --
-                                    ; krnboot's own sector is dead once boot
-                                    ; completes, so program loads reuse it)
+PROG_BASE:      equ     $4400       ; user programs load here (see kernel.inc;
+                                    ; == KERN_LOAD in boot/mbr.asm again as of
+                                    ; 2026-08-23 -- moved back up from $4300,
+                                    ; which left the RUN_*-relay region below
+                                    ; PROG_BASE overlapping live kernel code;
+                                    ; see kernel.inc's own PROG_BASE comment)
 LOADER_ARGS:    equ     PROG_BASE-4 ; word 0 = mem_base, word 1 = mem_top
 
 ; LINE_BUF/RUN_ARGC/RUN_ARGV_TABLE/RUN_PATH: the shell-as-a-program

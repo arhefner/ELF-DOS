@@ -76,10 +76,42 @@
 ; kernel's own "Highest address" against PROG_BASE (this file), and
 ; the kernel's sector-rounded on-disk size against KERN_LOAD
 ; (boot/mbr.asm) -- they are two separate checks again, not one.
-PROG_BASE:      equ     $4300       ; user programs load here -- a
-                                    ; separate address from KERN_LOAD
-                                    ; (boot/mbr.asm, still $4400) as
-                                    ; of 2026-08-01, see above
+;
+; MOVED BACK to $4400 (2026-08-23): the $4300 move above was checking
+; the WRONG invariant. "Highest address < PROG_BASE" isn't sufficient
+; -- RUN_PATH/RUN_ARGV_TABLE/RUN_ARGC/RUN_REDIR_*/RUN_ERRORLEVEL/
+; RUN_BATCH_ECHO_OFF/LOADER_ARGS all live at fixed PROG_BASE-N offsets
+; (down to PROG_BASE-110, RUN_ERRORLEVEL) in the gap BELOW PROG_BASE --
+; the real constraint is "Highest address < PROG_BASE-110", with real
+; margin beyond that. By the time the kernel reached Highest=$42e4,
+; the $4300 gap (28 bytes before PROG_BASE) was 82 bytes short of that
+; -- the kernel's own compiled code (mod_load/mod_release/icall, the
+; batch-module loading machinery) had grown down INTO the RUN_PATH/
+; RUN_ARGV_TABLE region. Since RUN_PATH is rewritten by the shell's
+; hand-off protocol on EVERY command, every command silently corrupted
+; mod_load's own instructions -- invisible until something actually
+; CALLED into it, which only happens when a .bat script starts
+; (K_BATCH_START -> batch_mod_load -> mod_load): a wild jump into
+; whatever garbage a prior command's resolved path happened to leave
+; there, hanging with no console output whatsoever. Confirmed directly
+; by decoding the real -r-relaxed link's symbol table: RUN_PATH
+; ($429a-$42d9) fell entirely inside mod_load ($40ea-$42bf) and
+; mod_release/icall ($42c0-$42d9). This is the SAME bug the user hit
+; and never root-caused on the exe_flag branch -- "it happens when the
+; margin gets small" was the right instinct, just against the wrong
+; boundary (PROG_BASE, not PROG_BASE-110). $4400 (== KERN_LOAD again,
+; the exact configuration hardware-confirmed from 2026-07-31 to
+; 2026-08-02) restores real headroom: ~174 bytes between Highest
+; address and RUN_ERRORLEVEL as of this move. tools/check_kernel_
+; margin.py was also fixed to check the RUN_*-region floor directly,
+; not just PROG_BASE, so this exact bug class can't silently reappear.
+; Reclaiming this RAM for programs again needs a real kernel size-
+; reduction pass (freeing bytes, not just relabeling the boundary) --
+; not attempted here, since this fix is about stopping live corruption
+; on the current build, not re-litigating the space tradeoff.
+PROG_BASE:      equ     $4400       ; user programs load here -- back
+                                    ; to == KERN_LOAD (boot/mbr.asm,
+                                    ; $4400) as of 2026-08-23, see above
 
 ; $0080-$00FF: the ROM's small boot-time stack lives here (see
 ; boot/mbr.asm) but is dead once the kernel sets up its own stack at

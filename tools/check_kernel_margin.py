@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 #
-# check_kernel_margin.py - guard against a specific, previously-real bug:
-# a "ds" (uninitialized) buffer that happens to be the last thing placed
-# in the whole kernel link, with nothing after it anywhere, never gets
-# counted in Link/02's own "Highest address" tracking (that tracking only
-# advances when a byte is actually written -- a "ds" reservation never
-# writes anything). If that ever happens in the kernel image itself, the
-# kernel's real footprint would be larger than what "Highest address"
-# reports, silently eating into the margin before PROG_BASE.
+# check_kernel_margin.py - guards against two related, both previously-
+# real bugs, both about the kernel's own "Highest address" silently
+# growing somewhere it shouldn't:
+#
+# (1) A "ds" (uninitialized) buffer that happens to be the last thing
+# placed in the whole kernel link, with nothing after it anywhere, never
+# gets counted in Link/02's own "Highest address" tracking (that
+# tracking only advances when a byte is actually written -- a "ds"
+# reservation never writes anything). If that ever happens in the kernel
+# image itself, the kernel's real footprint would be larger than what
+# "Highest address" reports, silently eating into the margin before
+# PROG_BASE.
 #
 # This exact bug hit kernel/batch_mod.asm for real (its own trailing
 # "ds"-declared buffer, batch_goto_label, was 32 bytes past the module's
@@ -16,6 +20,24 @@
 # linked last and ends in real code, not a "ds" -- but that's a fact
 # about today's link order, not a guarantee, so this check runs on every
 # kernel build rather than being trusted once and forgotten.
+#
+# (2) "Highest address < PROG_BASE" is NOT the real safety invariant --
+# a family of fixed relay structures (RUN_PATH, RUN_ARGV_TABLE, RUN_ARGC,
+# RUN_REDIR_*, RUN_ERRORLEVEL, RUN_BATCH_ECHO_OFF, LOADER_ARGS -- see
+# include/kernel.inc) live at fixed "PROG_BASE-N" offsets in the gap
+# BELOW PROG_BASE, down to PROG_BASE-110 (RUN_ERRORLEVEL). If the
+# kernel's own Highest address ever grows past that floor, the kernel's
+# own compiled code silently overlaps memory the shell rewrites on
+# EVERY command (RUN_PATH's hand-off protocol) -- invisible until
+# something actually calls into the corrupted code. This happened for
+# real (2026-08-23): PROG_BASE had been moved to $4300 for more program
+# RAM, "Highest address" (28 bytes before PROG_BASE, reported as
+# healthy) was actually 82 bytes PAST RUN_ERRORLEVEL -- every command
+# corrupted mod_load/mod_release/icall (the batch-module loader), which
+# only became visible as a silent hang the first time a .bat script
+# tried to start. Fixed by moving PROG_BASE back to $4400 and adding
+# this second check so "Highest address vs PROG_BASE alone" can never
+# again be mistaken for the real invariant.
 #
 # What it does: re-links the kernel object files with "-s" to get every
 # public symbol's real address, finds every "label: ds SIZE" declaration
@@ -156,6 +178,33 @@ def eval_expr(text, equs, _seen=None):
     return result
 
 
+PROG_BASE_REF_RE = re.compile(r"\bPROG_BASE\b")
+
+
+def collect_prog_base_relative_floor(equs):
+    """Return (floor_addr, floor_name) -- the lowest address reached by
+    any 'NAME: equ EXPR' whose EXPR textually references PROG_BASE
+    (excluding PROG_BASE's own definition), evaluated via eval_expr.
+    This is the real ceiling the kernel's own Highest address must stay
+    below -- not PROG_BASE itself, which several bytes of fixed relay
+    structures (RUN_PATH, RUN_ARGV_TABLE, RUN_ERRORLEVEL, etc.) already
+    sit below. Returns (None, None) if no such constant is found (would
+    itself be a sign this check's own assumptions have gone stale)."""
+    floor_addr, floor_name = None, None
+    for name, raw in equs.items():
+        if name == "PROG_BASE":
+            continue
+        if not PROG_BASE_REF_RE.search(raw):
+            continue
+        try:
+            addr = eval_expr(raw, equs)
+        except ValueError:
+            continue
+        if floor_addr is None or addr < floor_addr:
+            floor_addr, floor_name = addr, name
+    return floor_addr, floor_name
+
+
 def collect_ds_buffers(asm_paths):
     """Return [(name, size_text, source_path), ...] for every top-level
     'label: ds SIZE' declaration found in the given files."""
@@ -283,6 +332,33 @@ def main():
         print(f"check_kernel_margin: {status} -- tightest buffer is "
               f"{worst_name}, {worst_margin} bytes of real content after "
               f"it before Highest address.")
+
+    # Check (2): Highest address vs. the real floor -- the lowest
+    # PROG_BASE-relative fixed relay address (RUN_ERRORLEVEL as of this
+    # writing), not PROG_BASE itself. See the module docstring for why
+    # this is the invariant that actually matters.
+    floor_addr, floor_name = collect_prog_base_relative_floor(equs)
+    if floor_addr is None:
+        print("  WARNING: no PROG_BASE-relative 'equ' constant found -- "
+              "can't verify the Highest-address-vs-relay-region "
+              "invariant. This check's own assumptions may be stale.")
+        failed = True
+    else:
+        region_margin = floor_addr - highest
+        region_status = "OK" if region_margin >= threshold else "FAILED"
+        if region_margin < threshold:
+            failed = True
+            print(f"  FAIL: Highest address {highest:04x} is only "
+                  f"{region_margin} bytes before {floor_name} "
+                  f"({floor_addr:04x}), the lowest PROG_BASE-relative "
+                  f"relay address. The kernel's own code/data may be "
+                  f"overlapping memory the shell rewrites on every "
+                  f"command (RUN_PATH et al) -- this is a live "
+                  f"memory-corruption risk, not just a growth-margin "
+                  f"warning.")
+        print(f"check_kernel_margin: {region_status} -- {region_margin} "
+              f"bytes between Highest address ({highest:04x}) and "
+              f"{floor_name} ({floor_addr:04x}), the relay-region floor.")
 
     sys.exit(1 if failed else 0)
 
