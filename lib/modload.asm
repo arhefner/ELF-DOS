@@ -46,6 +46,7 @@
 #include    include/modformat.inc
 
             extrn   ml_fcb_ptr
+            extrn   _ml_close_fcb
             extrn   ml_header
             extrn   ml_code_size
             extrn   ml_body_size
@@ -376,12 +377,7 @@ ml_fixup_have_more:
             lbr     ml_fixup_loop
 
 ml_fixup_done:
-            mov     rb, ml_fcb_ptr
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = caller's FCB
-            call    K_FILE_CLOSE
+            call    _ml_close_fcb
 
             mov     rf, ml_base
             lda     rf
@@ -399,22 +395,11 @@ ml_fail_release_close:
             call    ml_reserve_size     ; RC = the same size originally
                                         ; requested from K_HIMEM_RESERVE
             call    K_HIMEM_RELEASE
-            mov     rb, ml_fcb_ptr
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = caller's FCB
-            call    K_FILE_CLOSE
-            stc
-            rtn
+            ; falls through into ml_fail_close_only's own close+fail
+            ; tail -- byte-for-byte identical, no branch needed
 
 ml_fail_close_only:
-            mov     rb, ml_fcb_ptr
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = caller's FCB
-            call    K_FILE_CLOSE
+            call    _ml_close_fcb
             stc
             rtn
 
@@ -445,6 +430,27 @@ ml_reserve_size:
             ghi     rc
             adci    0
             phi     rc                  ; RC.hi += carry
+            rtn
+
+            endp
+
+;------------------------------------------------------------------
+; _ml_close_fcb: close the caller's own FCB (ml_fcb_ptr). Factored
+; out of mod_load after finding this exact "dereference ml_fcb_ptr
+; into RD, call K_FILE_CLOSE" sequence duplicated at all 3 of its
+; exit paths (success, and both failure tails).
+; Args:    none
+; Returns: nothing (K_FILE_CLOSE's own DF/D aren't meaningful here)
+; Modifies: RB, RD (plus whatever K_FILE_CLOSE itself modifies)
+;------------------------------------------------------------------
+            proc    _ml_close_fcb
+
+            mov     rb, ml_fcb_ptr
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = caller's FCB
+            call    K_FILE_CLOSE
             rtn
 
             endp
