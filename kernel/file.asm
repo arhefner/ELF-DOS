@@ -125,6 +125,10 @@
             extrn   _fcb_load_iobuf
             extrn   _fcb_store_cclust
             extrn   _fcb_store_boff
+            extrn   _fcb_load_fsize32
+            extrn   _fcb_load_fpos32
+            extrn   _fcb_store_fpos32
+            extrn   _check_name_dotdot
             extrn   _file_create
             extrn   _delete_located_entry
             extrn   _mark_entry_deleted
@@ -1562,6 +1566,96 @@ gsn_build_ext_done:
             inc     rf
             glo     r8
             str     rf
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _fcb_load_fsize32/_fcb_load_fpos32/_fcb_store_fpos32: the 32-bit
+; (4-byte, big-endian) siblings of the accessors just above --
+; factored out the same way, after finding the "load/store FCB_FSIZE
+; or FCB_FPOS as a full 32-bit value" shape duplicated verbatim
+; (always into/out of the same R9:R8 register pair) across
+; file_read/file_write/file_seek.
+;
+; Args:    RB = FCB base pointer (all three)
+;          _fcb_store_fpos32: R9:R8 = new FCB_FPOS value (R9=high word)
+; Returns: _fcb_load_fsize32/_fcb_load_fpos32: R9:R8 = the field
+;          (R9=high word, R8=low word)
+; Modifies: RF, R9, R8
+; ----------------------------------------------------------------
+            proc    _fcb_load_fsize32
+
+            mov     rf, rb
+            add16   rf, FCB_FSIZE
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            rtn
+
+            endp
+
+            proc    _fcb_load_fpos32
+
+            mov     rf, rb
+            add16   rf, FCB_FPOS
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            rtn
+
+            endp
+
+            proc    _fcb_store_fpos32
+
+            mov     rf, rb
+            add16   rf, FCB_FPOS
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            inc     rf
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _check_name_dotdot: dereference a 2-byte pointer variable (e.g.
+; fo_name, ren_new_name) into RD and check it against "." / "..".
+; Factored out after finding "mov rf,<ptr-var> / lda rf/phi rd/ldn
+; rf/plo rd / call _is_dot_or_dotdot" duplicated verbatim at 6 call
+; sites (dir_create, dir_remove x2, file_rename x2, file_setattr,
+; file_touch) -- the caller's own preceding "mov rf,<ptr-var>" line
+; is unchanged, only the dereference+check is shared.
+;
+; Args:    RF = address of a 2-byte pointer variable naming the
+;          candidate string
+; Returns: DF = 0/1, from _is_dot_or_dotdot
+; Modifies: RF, RD
+; ----------------------------------------------------------------
+            proc    _check_name_dotdot
+
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    _is_dot_or_dotdot
             rtn
 
             endp
@@ -3810,11 +3904,7 @@ fdd_err:
             ; region, not a normal cluster-chain directory), so the
             ; collision scan below wouldn't otherwise catch this there
             mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            call    _is_dot_or_dotdot
+            call    _check_name_dotdot
             lbdf    dcr_err
 
             ; reload the parent cluster fresh from memory -- RD has
@@ -4158,11 +4248,7 @@ dcr_err:
             ; resolved final component on success), so this produces
             ; the exact same outcome as the original pre-scan check.
             mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            call    _is_dot_or_dotdot
+            call    _check_name_dotdot
             lbdf    drm_err
 
             ; must BE a directory
@@ -4364,11 +4450,7 @@ ren_check_sep:
 ren_check_sep_done:
 
             mov     rf, ren_new_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            call    _is_dot_or_dotdot
+            call    _check_name_dotdot
             lbdf    ren_err             ; new name is "." or ".."
 
             ; --- resolve the OLD path and locate its entry ---
@@ -4408,11 +4490,7 @@ ren_check_sep_done:
             ; parent -- so the reject has to happen regardless of
             ; whether the search succeeds. fo_name is still valid here.
             mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            call    _is_dot_or_dotdot
+            call    _check_name_dotdot
             lbdf    ren_err
 
             ; --- capture attr/cluster/size now, from file_dirent (a
@@ -4714,11 +4792,7 @@ fst_buf:        dw      0
             ; match for either name, so the reject has to happen
             ; regardless of whether the search itself succeeded)
             mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            call    _is_dot_or_dotdot
+            call    _check_name_dotdot
             lbdf    fsa_err
 
             ; new_attr = (old_attr & ~clear_mask) | set_mask -- the
@@ -4811,11 +4885,7 @@ fsa_clearmask:  db      0
             ; reject "." and ".." as the target -- same reasoning and
             ; placement as file_setattr's own guard
             mov     rf, fo_name
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            call    _is_dot_or_dotdot
+            call    _check_name_dotdot
             lbdf    ftc_err
 
             call    rtc_refresh
@@ -4937,16 +5007,7 @@ fread_check_eof:
             ; "R7/R8/R9/RD are scratch, recomputed fresh each
             ; iteration" contract -- none of the 4 need to survive
             ; past this block except as already planned below.
-            mov     rf, rb
-            add16   rf, FCB_FSIZE
-            lda     rf
-            phi     r9                  ; R9 = FSIZE high word
-            lda     rf
-            plo     r9
-            lda     rf
-            phi     r8                  ; R8 = FSIZE low word
-            ldn     rf
-            plo     r8
+            call    _fcb_load_fsize32
 
             mov     rf, rb
             add16   rf, FCB_FPOS
@@ -5156,16 +5217,7 @@ fread_copy_done:
             ; (first into R9's own low byte, then that byte's own
             ; carry-out into R9's high byte) -- matches the idiom
             ; already used elsewhere in this codebase (e.g. dir.asm).
-            mov     rf, rb
-            add16   rf, FCB_FPOS
-            lda     rf
-            phi     r9                  ; R9 = FPOS high word
-            lda     rf
-            plo     r9
-            lda     rf
-            phi     r8                  ; R8 = FPOS low word
-            ldn     rf
-            plo     r8
+            call    _fcb_load_fpos32
 
             add16   r8, r7              ; R8 += chunk; DF = carry-out
 
@@ -5176,19 +5228,7 @@ fread_copy_done:
             adci    0
             phi     r9                  ; R9:R8 = FPOS + chunk
 
-            mov     rf, rb
-            add16   rf, FCB_FPOS
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf
-            inc     rf
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_FPOS (full 32-bit) updated
+            call    _fcb_store_fpos32
 
             ; RC -= chunk
             glo     r7
@@ -5645,16 +5685,7 @@ fwrite_copy_done:
             ; with FSIZE); the grow-check just below reads both fields
             ; back from memory via a backward byte-walk instead of
             ; holding two full 32-bit values in registers at once.
-            mov     rf, rb
-            add16   rf, FCB_FPOS
-            lda     rf
-            phi     r9                  ; R9 = FPOS high word
-            lda     rf
-            plo     r9
-            lda     rf
-            phi     r8                  ; R8 = FPOS low word
-            ldn     rf
-            plo     r8
+            call    _fcb_load_fpos32
 
             add16   r8, r7              ; R8 += chunk; DF = carry-out
                                         ; (ADD16 only READS r7, chunk
@@ -5667,19 +5698,7 @@ fwrite_copy_done:
             adci    0
             phi     r9                  ; R9:R8 = new FPOS
 
-            mov     rf, rb
-            add16   rf, FCB_FPOS
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf
-            inc     rf
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_FPOS (full 32-bit) updated
+            call    _fcb_store_fpos32
 
             ; if FCB_FPOS now reaches or exceeds FCB_FSIZE, the file
             ; grew -- update FCB_FSIZE and flag the directory entry
@@ -6090,16 +6109,7 @@ fsk_target_cur:
             phi     rb
             ldn     rf
             plo     rb                  ; RB = FCB base
-            mov     rf, rb
-            add16   rf, FCB_FPOS
-            lda     rf
-            phi     r9
-            lda     rf
-            plo     r9
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R9:R8 = FPOS (full 32-bit) = base
+            call    _fcb_load_fpos32
             lbr     fsk_add_base
 
 fsk_target_end:
@@ -6108,16 +6118,7 @@ fsk_target_end:
             phi     rb
             ldn     rf
             plo     rb                  ; RB = FCB base
-            mov     rf, rb
-            add16   rf, FCB_FSIZE
-            lda     rf
-            phi     r9
-            lda     rf
-            plo     r9
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R9:R8 = FSIZE (full 32-bit) = base
+            call    _fcb_load_fsize32
 
 fsk_add_base:
             ; target = base(R9:R8) + offset(fsk_off_hi:fsk_off_lo),
@@ -6203,16 +6204,7 @@ fsk_range_check:
             phi     rb
             ldn     rf
             plo     rb                  ; RB = FCB base
-            mov     rf, rb
-            add16   rf, FCB_FSIZE
-            lda     rf
-            phi     r9
-            lda     rf
-            plo     r9
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R9:R8 = FSIZE (full 32-bit)
+            call    _fcb_load_fsize32
 
             mov     rf, fsk_target
             lda     rf
