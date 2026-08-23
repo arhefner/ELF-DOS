@@ -179,11 +179,8 @@ start:
             lbr     ed_have_filename
 
 ed_no_filename:
-            mov     rf, ed_filename_ptr
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf                  ; ed_filename_ptr = 0 (NULL --
+            call    ed_zero_word
+            dw      ed_filename_ptr  ; ed_filename_ptr = 0 (NULL --
                                         ; ed_open_file below skips the
                                         ; whole open attempt when it
                                         ; sees this; E will refuse to
@@ -214,19 +211,13 @@ ed_have_filename:
             ; targets line 1, the only valid insertion point (1 ==
             ; line_count+1 when line_count is 0), with no special-
             ; casing needed anywhere else
-            mov     rf, ed_line_count
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
-            mov     rf, ed_text_len
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
-            mov     rf, ed_cur_line
-            ldi     0
-            str     rf
+            call    ed_zero_word
+            dw      ed_line_count
+            call    ed_zero_word
+            dw      ed_text_len
+            call    ed_stb_const
+            db      0
+            dw      ed_cur_line
             inc     rf
             ldi     1
             str     rf
@@ -475,9 +466,9 @@ egb_have_data:
             call    ed_stw_rc
             dw      ed_rdbuf_len  ; ed_rdbuf_len = RC
 
-            mov     rf, ed_rdbuf_pos
-            ldi     0
-            str     rf
+            call    ed_stb_const
+            db      0
+            dw      ed_rdbuf_pos
             inc     rf
             ldi     0
             str     rf                  ; ed_rdbuf_pos = 0
@@ -836,6 +827,49 @@ ed_cmp_r8_le:
             str     r2
             ghi     r9
             smb
+            rtn
+
+;------------------------------------------------------------------
+; ed_zero_word: zero the 16-bit word at a FIXED memory address,
+; addressed via the same R6 inline-operand idiom as ed_ldw_*/
+; ed_stw_*/ed_cmp_* above. Replaces "mov rf, ADDR / ldi 0 / str rf /
+; inc rf / str rf" (11 bytes, 15 occurrences -- always a variable's
+; own zero-initialization) with "call ed_zero_word" + "dw ADDR" (5
+; bytes).
+; Args (inline): 2 bytes = address of the word to zero
+; Returns: nothing
+; Modifies: RF (scratch), R6 (inline-operand cursor)
+;------------------------------------------------------------------
+ed_zero_word:
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; ed_stb_const: store a constant BYTE (also inline) to a FIXED memory
+; address (inline), same R6 idiom -- two inline operands consumed in
+; order (the value byte, then the 2-byte address). Replaces "mov rf,
+; ADDR / ldi VALUE / str rf" (9 bytes) with "call ed_stb_const" +
+; "db VALUE" + "dw ADDR" (6 bytes).
+; Args (inline): 1 byte = the value to store; 2 bytes = address
+; Returns: nothing
+; Modifies: RF (scratch), R6 (inline-operand cursor)
+;------------------------------------------------------------------
+ed_stb_const:
+            lda     r6
+            plo     r9
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            glo     r9
+            str     rf
             rtn
 
 ;------------------------------------------------------------------
@@ -1908,9 +1942,9 @@ elcl_done:
             rtn
 
 ed_list_start:
-            mov     rf, ed_list_page_count
-            ldi     0
-            str     rf                  ; reset the page counter --
+            call    ed_stb_const
+            db      0
+            dw      ed_list_page_count  ; reset the page counter --
                                         ; once, here, before the loop
                                         ; begins (NOT inside the loop
                                         ; itself, which also reaches
@@ -1993,9 +2027,9 @@ ed_list_loop:
                                         ; iff count >= threshold
             lbnf    ed_list_loop        ; not yet a full page
 
-            mov     rf, ed_list_page_count
-            ldi     0
-            str     rf                  ; reset the page counter
+            call    ed_stb_const
+            db      0
+            dw      ed_list_page_count  ; reset the page counter
 
             call    K_READ              ; D = key pressed (blocking) --
                                         ; no prompt printed, not echoed
@@ -2607,23 +2641,14 @@ ed_t_validate:
 
             ; ed_getbyte's own buffered-read state is stale from the
             ; INITIAL load -- must not be trusted here
-            mov     rf, ed_rdbuf_pos
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
-            mov     rf, ed_rdbuf_len
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_rdbuf_pos
+            call    ed_zero_word
+            dw      ed_rdbuf_len
 
 ed_t_line_loop:
-            mov     rf, ed_t_line_len
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_t_line_len
 
 ed_t_byte_loop:
             call    ed_getbyte
@@ -2889,11 +2914,8 @@ ed_r_range_ready:
             call    ed_stw_rd
             dw      ed_r_line_idx  ; ed_r_line_idx = first
 
-            mov     rf, ed_r_count
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_r_count
 
 ed_r_loop:
             call    ed_ldw_rd
@@ -3206,19 +3228,13 @@ ed_r_process_line:
             dec     rd            ; RD = 0-based index
             call    ed_line_info        ; ed_li_ptr/ed_li_len set
 
-            mov     rf, ed_r_out_len
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
-            mov     rf, ed_r_changed
-            ldi     0
-            str     rf
-            mov     rf, ed_r_src_pos
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_r_out_len
+            call    ed_stb_const
+            db      0
+            dw      ed_r_changed
+            call    ed_zero_word
+            dw      ed_r_src_pos
 
 ed_rpl_loop:
             ; remaining = li_len - src_pos
@@ -3263,9 +3279,9 @@ ed_rpl_loop:
             call    ed_r_append_block
             lbdf    ed_rpl_full
 
-            mov     rf, ed_r_changed
-            ldi     1
-            str     rf
+            call    ed_stb_const
+            db      1
+            dw      ed_r_changed
 
             call    ed_ldw_rd
             dw      ed_r_src_pos
@@ -3662,16 +3678,16 @@ ecpt_l_ok:
             lbdf    ecpt_err  ; DF=1: last >= target ->
                                         ; target inside (first,last]
 
-            mov     rf, ed_c_shift
-            ldi     0
-            str     rf
+            call    ed_stb_const
+            db      0
+            dw      ed_c_shift
             clc
             rtn
 
 ecpt_shift_yes:
-            mov     rf, ed_c_shift
-            ldi     1
-            str     rf
+            call    ed_stb_const
+            db      1
+            dw      ed_c_shift
             clc
             rtn
 
@@ -3697,9 +3713,9 @@ ed_c_have_shift:
             mov     rf, ed_have_n4
             ldn     rf
             lbnz    ed_c_count_explicit
-            mov     rf, ed_c_count
-            ldi     0
-            str     rf
+            call    ed_stb_const
+            db      0
+            dw      ed_c_count
             inc     rf
             ldi     1
             str     rf
@@ -3717,11 +3733,8 @@ ed_c_count_explicit:
 ed_c_ready:
             call    ed_c_setup_pass
 
-            mov     rf, ed_c_k
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_c_k
 
 ed_c_outer:
             call    ed_ldw_rd
@@ -3792,11 +3805,8 @@ ed_c_setup_pass:
             call    ed_stw_r9
             dw      ed_c_blocklen
 
-            mov     rf, ed_c_n
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_c_n
 
             mov     rf, ed_c_ins_pos
             mov     rd, ed_i_target
@@ -3824,11 +3834,8 @@ ed_c_setup_pass:
 ;          exactly how far it got before that, if ever inspected)
 ;------------------------------------------------------------------
 ed_c_copy_block:
-            mov     rf, ed_c_i
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_c_i
 
 ed_c_inner:
             call    ed_ldw_rd
@@ -4550,11 +4557,8 @@ ed_wsave_have_count:
             call    K_FILE_OPEN
             lbdf    ed_wsave_openerr
 
-            mov     rf, ed_save_i
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_save_i
 
 ed_wsave_loop:
             call    ed_ldw_rd
@@ -4897,11 +4901,8 @@ ed_s_no_text:
 ; Returns: DF = 0 if found, DF = 1 if not
 ;------------------------------------------------------------------
 ed_line_contains:
-            mov     rf, ed_lc_outer
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_lc_outer
 
 elc_outer_loop:
             ; remaining = haystack_len - outer (can't borrow: outer
@@ -4937,11 +4938,8 @@ elc_outer_loop:
             smb
             lbnf    elc_not_found       ; DF=0: remaining < needle_len
 
-            mov     rf, ed_lc_inner
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
+            call    ed_zero_word
+            dw      ed_lc_inner
 
 elc_inner_loop:
             call    ed_ldw_rd
