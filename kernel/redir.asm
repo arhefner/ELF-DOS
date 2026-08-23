@@ -80,6 +80,7 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   _himem_reserve
             extrn   _himem_release
             extrn   _is_nul_device
+            extrn   _redir_close_out_if_open
 
 ; same-file cross-proc data references (required even within the same
 ; file -- see CLAUDE.md gotcha #6)
@@ -387,6 +388,56 @@ ind_no:
             endp
 
 ; ----------------------------------------------------------------
+; _redir_close_out_if_open: close redir_out_handle (via file_close)
+; if it's genuinely open (redir_out_active set AND redir_out_null
+; clear -- a NUL redirect never opened a real FCB, so file_close-ing
+; it would operate on a bogus/stale index), then unconditionally
+; clear both redir_out_active and redir_out_null. Factored out after
+; finding this exact 18-line sequence duplicated verbatim at both of
+; its call sites (_redir_setup's own error-unwind path, and
+; _redir_teardown's own output half) -- unlike those two sites'
+; original code, this version always clears both flags at the end
+; rather than skipping the clear entirely when redir_out_active was
+; already 0: harmless (an already-0 write is a no-op) and marginally
+; safer (redir_out_null can never carry stale value forward from a
+; previous command once this returns, matching this project's own
+; standing "always reset shared state up front" preference).
+;
+; Args:    none
+; Returns: nothing
+; Modifies: R7, R8, R9, RA, RD, RF
+; ----------------------------------------------------------------
+            proc    _redir_close_out_if_open
+
+            mov     rf, redir_out_active
+            ldn     rf
+            lbz     rcoo_clear          ; not active: nothing to
+                                        ; close, still clear below
+                                        ; (harmless no-op if already 0)
+
+            mov     rf, redir_out_null
+            ldn     rf
+            lbnz    rcoo_clear          ; NUL: nothing to close
+
+            mov     ra, redir_out_handle
+            lda     ra
+            phi     rd
+            ldn     ra
+            plo     rd                  ; RD = the FCB pointer
+            call    file_close
+
+rcoo_clear:
+            mov     rf, redir_out_active
+            ldi     0
+            str     rf
+            mov     rf, redir_out_null
+            ldi     0
+            str     rf
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; _redir_setup: open whichever of RUN_REDIR_OUT/RUN_REDIR_IN the
 ; shell's tokenizer set, right before run_loop runs the resolved
 ; command. A no-op (DF=0) if neither is set -- the common case, only
@@ -628,32 +679,10 @@ rs_err_undo_reserve:
 
 rs_err_maybe_close_out:
             ; close output if it was opened above, so a failure here
-            ; never leaves anything half-open -- but only if it's a
-            ; real FCB (NUL output never opened one, so file_close-ing
-            ; redir_out_handle here would operate on a bogus/stale
-            ; index)
-            mov     rf, redir_out_active
-            ldn     rf
-            lbz     rs_err
-
-            mov     rf, redir_out_null
-            ldn     rf
-            lbnz    rs_err_out_clear    ; NUL: nothing to close
-
-            mov     ra, redir_out_handle
-            lda     ra
-            phi     rd
-            ldn     ra
-            plo     rd                  ; RD = the FCB pointer
-            call    file_close
-
-rs_err_out_clear:
-            mov     rf, redir_out_active
-            ldi     0
-            str     rf
-            mov     rf, redir_out_null
-            ldi     0
-            str     rf
+            ; never leaves anything half-open -- see
+            ; _redir_close_out_if_open's own header for the real/NUL
+            ; distinction
+            call    _redir_close_out_if_open
 
 rs_err:
             stc
@@ -685,30 +714,7 @@ rs_ok:
 ; ----------------------------------------------------------------
             proc    _redir_teardown
 
-            mov     rf, redir_out_active
-            ldn     rf
-            lbz     rt_in
-
-            mov     rf, redir_out_null
-            ldn     rf
-            lbnz    rt_out_clear        ; NUL: nothing was opened,
-                                        ; don't file_close a bogus
-                                        ; handle
-
-            mov     ra, redir_out_handle
-            lda     ra
-            phi     rd
-            ldn     ra
-            plo     rd                  ; RD = the FCB pointer
-            call    file_close
-
-rt_out_clear:
-            mov     rf, redir_out_active
-            ldi     0
-            str     rf
-            mov     rf, redir_out_null
-            ldi     0
-            str     rf
+            call    _redir_close_out_if_open
 
 rt_in:
             mov     rf, redir_in_active
