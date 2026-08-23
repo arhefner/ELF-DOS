@@ -129,6 +129,7 @@
             extrn   _fcb_load_fpos32
             extrn   _fcb_store_fpos32
             extrn   _check_name_dotdot
+            extrn   _fcb_sector_lba_and_iobuf
             extrn   _file_create
             extrn   _delete_located_entry
             extrn   _mark_entry_deleted
@@ -1656,6 +1657,55 @@ gsn_build_ext_done:
             ldn     rf
             plo     rd
             call    _is_dot_or_dotdot
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _fcb_sector_lba_and_iobuf: compute the on-disk LBA of the sector
+; currently addressed by (FCB_CCLUST,FCB_CSECT), then load this FCB's
+; own I/O buffer pointer. Factored out of file_read/file_write after
+; finding this exact ~17-line "cluster_to_lba + add FCB_CSECT +
+; _fcb_load_iobuf + mov rf,r9" sequence duplicated verbatim at 3 call
+; sites (file_read's own sector-load, file_write's read-modify-write
+; load, file_write's own write-back) -- each site's own surrounding
+; push/pop register-protection wrapper and the final f_ideread/
+; f_idewrite call themselves differ (by design: the wrapper protects
+; different registers at each site, and read vs write is a genuinely
+; different final call), so only this common middle section moved.
+;
+; Args:    RB = FCB base pointer
+; Returns: R7:R8 = target sector's LBA; RF = this FCB's own I/O
+;          buffer pointer (== R9, matching what every call site
+;          already did with it via "mov rf, r9" right after)
+; Modifies: R7, R8, R9, RD, RF (matches the union of everything
+;          _fcb_load_cclust/_cluster_to_lba/_fcb_load_iobuf already
+;          modify -- RB itself is read-only throughout, confirmed by
+;          re-reading each of the 3 original call sites before this
+;          was extracted)
+; ----------------------------------------------------------------
+            proc    _fcb_sector_lba_and_iobuf
+
+            call    _fcb_load_cclust
+            call    _cluster_to_lba     ; R7/R8 = LBA of first sector
+                                        ; of cluster
+
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            ldn     rf                  ; D = FCB_CSECT
+            str     r2
+            glo     r7
+            add
+            plo     r7
+            ghi     r7
+            adci    0
+            phi     r7
+            glo     r8
+            adci    0
+            plo     r8              ; R7:R8 = target sector's LBA
+
+            call    _fcb_load_iobuf
+            mov     rf, r9
             rtn
 
             endp
@@ -5091,28 +5141,7 @@ fread_remaining_done:
             push    rb
             push    rc
 
-            call    _fcb_load_cclust
-            call    _cluster_to_lba     ; R7/R8 = LBA of first sector of cluster
-
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldn     rf                  ; D = FCB_CSECT
-            str     r2
-            glo     r7
-            add
-            plo     r7
-            ghi     r7
-            adci    0
-            phi     r7
-            glo     r8
-            adci    0
-            plo     r8
-
-            ; R7/R8 hold the target LBA (f_ideread's own arg) -- R9 is
-            ; free here to stage this FCB's own IOBUF pointer before
-            ; moving it into RF for the call
-            call    _fcb_load_iobuf
-            mov     rf, r9
+            call    _fcb_sector_lba_and_iobuf
             call    f_ideread
             lbdf    fread_ioerr_cleanup
 
@@ -5512,28 +5541,7 @@ fwrite_have_more:
             push    rb
             push    rc
 
-            call    _fcb_load_cclust
-            call    _cluster_to_lba     ; R7/R8 = LBA of first sector of cluster
-
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldn     rf                  ; D = FCB_CSECT
-            str     r2
-            glo     r7
-            add
-            plo     r7
-            ghi     r7
-            adci    0
-            phi     r7
-            glo     r8
-            adci    0
-            plo     r8
-
-            ; R7/R8 hold the target LBA (f_ideread's own arg) -- R9 is
-            ; free here to stage this FCB's own IOBUF pointer before
-            ; moving it into RF for the call
-            call    _fcb_load_iobuf
-            mov     rf, r9
+            call    _fcb_sector_lba_and_iobuf
             call    f_ideread
             ; consolidated (2026-08-01 size-reduction pass): the
             ; success continuation right below and the old
@@ -5634,28 +5642,7 @@ fwrite_copy_done:
             push    rb
             push    rc
 
-            call    _fcb_load_cclust
-            call    _cluster_to_lba     ; R7/R8 = LBA of first sector of cluster (temporary, restored below)
-
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldn     rf                  ; D = FCB_CSECT
-            str     r2
-            glo     r7
-            add
-            plo     r7
-            ghi     r7
-            adci    0
-            phi     r7
-            glo     r8
-            adci    0
-            plo     r8
-
-            ; R7/R8 hold the target LBA (f_idewrite's own arg) -- R9 is
-            ; free here to stage this FCB's own IOBUF pointer before
-            ; moving it into RF for the call
-            call    _fcb_load_iobuf
-            mov     rf, r9
+            call    _fcb_sector_lba_and_iobuf
             call    f_idewrite
             ; consolidated (2026-08-01 size-reduction pass), same
             ; reasoning as the f_ideread block above: the success
