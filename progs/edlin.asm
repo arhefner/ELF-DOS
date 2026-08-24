@@ -166,16 +166,8 @@ start:
             phi     rf
             ldn     rb
             plo     rf                  ; RF = argv[1] (filename)
-
-            ; stash the filename pointer -- the string itself stays
-            ; valid in LINE_BUF for our whole run, since we never call
-            ; K_INPUTL on that buffer (see header)
-            mov     rb, ed_filename_ptr
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb
+            call    ed_stw_rf_via_rb
+            dw      ed_filename_ptr
             lbr     ed_have_filename
 
 ed_no_filename:
@@ -1004,6 +996,45 @@ ed_ldw_r9_via_r8:
             rtn
 
 ;------------------------------------------------------------------
+; ed_stw_rf_via_rb / ed_stw_rd_via_rb: like ed_stw_rd above, but
+; store RF (resp. RD) itself -- using RB (never RF or RD) as internal
+; scratch for the inline-operand address, since the value being
+; stored is exactly the register that would otherwise be at risk.
+; Replaces "mov rb, ADDR / ghi rX / str rb / inc rb / glo rX / str
+; rb" (11 bytes, 9 occurrences: 5 storing RF -- typically a filename
+; or parse-cursor pointer that must itself survive -- and 4 storing
+; RD, in ed_parse_range's own multi-slot n1..n4 capture, where RF is
+; simultaneously live as ITS OWN parse cursor) with "call
+; ed_stw_rX_via_rb" + "dw ADDR" (5 bytes).
+; Args (inline): 2 bytes = address to store to
+; Returns: nothing
+; Modifies: RB (scratch -- NOT RF or RD), R6 (inline-operand cursor)
+;------------------------------------------------------------------
+ed_stw_rf_via_rb:
+            lda     r6
+            phi     rb
+            lda     r6
+            plo     rb
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb
+            rtn
+
+ed_stw_rd_via_rb:
+            lda     r6
+            phi     rb
+            lda     r6
+            plo     rb
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+            rtn
+
+;------------------------------------------------------------------
 ; ed_zero_word: zero the 16-bit word at a FIXED memory address,
 ; addressed via the same R6 inline-operand idiom as ed_ldw_*/
 ; ed_stw_*/ed_cmp_* above. Replaces "mov rf, ADDR / ldi 0 / str rf /
@@ -1437,12 +1468,8 @@ ed_parse_range:
             mov     rb, ed_have_n1
             ldi     1
             str     rb
-            mov     rb, ed_n1
-            ghi     rd
-            str     rb
-            inc     rb
-            glo     rd
-            str     rb
+            call    ed_stw_rd_via_rb
+            dw      ed_n1
 
 epr_check1:
             ldn     rf
@@ -1456,12 +1483,8 @@ epr_check1:
             mov     rb, ed_have_n2
             ldi     1
             str     rb
-            mov     rb, ed_n2
-            ghi     rd
-            str     rb
-            inc     rb
-            glo     rd
-            str     rb
+            call    ed_stw_rd_via_rb
+            dw      ed_n2
 
 epr_check2:
             ldn     rf
@@ -1475,12 +1498,8 @@ epr_check2:
             mov     rb, ed_have_n3
             ldi     1
             str     rb
-            mov     rb, ed_n3
-            ghi     rd
-            str     rb
-            inc     rb
-            glo     rd
-            str     rb
+            call    ed_stw_rd_via_rb
+            dw      ed_n3
 
 epr_check3:
             ldn     rf
@@ -1495,12 +1514,8 @@ epr_check3:
             mov     rb, ed_have_n4
             ldi     1
             str     rb
-            mov     rb, ed_n4
-            ghi     rd
-            str     rb
-            inc     rb
-            glo     rd
-            str     rb
+            call    ed_stw_rd_via_rb
+            dw      ed_n4
 
 epr_done:
             rtn
@@ -2625,13 +2640,8 @@ ed_cmd_t:
             call    f_ltrim             ; skip spaces before the name
             ldn     rf
             lbz     ed_t_usage          ; nothing after T: no filename
-
-            mov     rb, ed_t_filename_ptr
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; stash the filename pointer --
+            call    ed_stw_rf_via_rb
+            dw      ed_t_filename_ptr  ; stash the filename pointer --
                                         ; everything below uses RF
                                         ; freely as scratch, same as
                                         ; every other command here
@@ -2988,12 +2998,8 @@ ed_r_usage:
 ;          old-text field is empty after stripping)
 ;------------------------------------------------------------------
 ed_r_parse_args:
-            mov     rb, ed_r_old_ptr
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; ed_r_old_ptr = RF (field
+            call    ed_stw_rf_via_rb
+            dw      ed_r_old_ptr  ; ed_r_old_ptr = RF (field
                                         ; start, before stripping)
 
             ldi     0
@@ -3060,12 +3066,8 @@ erpa_s1_found:
             str     r9
 
             inc     rf                  ; skip the comma
-            mov     rb, ed_r_new_ptr
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; ed_r_new_ptr = RF (new
+            call    ed_stw_rf_via_rb
+            dw      ed_r_new_ptr  ; ed_r_new_ptr = RF (new
                                         ; field start) -- stashed to
                                         ; memory NOW, before the
                                         ; ed_r_strip_quotes call below
@@ -4292,14 +4294,8 @@ ed_wsave_common:
                                         ; optional filename
             ldn     rf
             lbz     ed_wsave_fallback   ; nothing here: fall back to
-                                        ; ed_filename_ptr
-
-            mov     rb, ed_w_filename_ptr
-            ghi     rf
-            str     rb
-            inc     rb
-            glo     rf
-            str     rb                  ; stash the EXPLICIT filename
+            call    ed_stw_rf_via_rb
+            dw      ed_w_filename_ptr  ; stash the EXPLICIT filename
                                         ; pointer -- everything below
                                         ; uses RF freely as scratch
             lbr     ed_wsave_have_target
