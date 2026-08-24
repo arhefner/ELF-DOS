@@ -584,27 +584,7 @@ ed_cur_line_has_bytes:
 
             call    ed_ldw_rd
             dw      ed_text_len  ; RD = ed_text_len
-
-            ; BUG FIX (2026-07-31, hardware-reported): a plain sm/smb
-            ; here (subtrahend=start_offset, minuend=text_len) yields
-            ; DF=1 for text_len >= start_offset, not the strict ">"
-            ; this function's own contract needs -- when they're
-            ; EQUAL (an empty trailing line, the exact case this
-            ; function exists to detect), the old code wrongly
-            ; reported "has bytes", causing a spurious blank line to
-            ; be appended every time a file ending in a real trailing
-            ; newline was loaded. Fixed by also requiring the
-            ; computed difference to be nonzero.
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     r9
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     r9                  ; R9 = text_len - start_offset,
+            call    ed_sub_rd_r8_to_r9  ; R9 = text_len - start_offset,
                                         ; DF=1 iff text_len >= start_offset
             lbnf    echb_empty          ; DF=0: text_len < start_offset --
                                         ; shouldn't normally happen, but
@@ -911,6 +891,51 @@ ed_copy_word:
             rtn
 
 ;------------------------------------------------------------------
+; ed_cmp_rd_r9: compare two already-loaded registers -- RD against
+; R9 -- the same shape ed_cmp_rd_r8 above covers for R8, needed
+; separately since R8/R9 are two genuinely different registers with
+; no way to parameterize which one a plain (non-inline-operand)
+; routine reads. 4 occurrences, every one immediately followed by a
+; bare lbdf/lbnf with no result saved.
+; Args:    RD, R9 = the two values to compare
+; Returns: DF = 1 if RD >= R9 (no borrow), DF = 0 if RD < R9; RD/R9
+;          unchanged
+;------------------------------------------------------------------
+ed_cmp_rd_r9:
+            glo     r9
+            str     r2
+            glo     rd
+            sm
+            ghi     r9
+            str     r2
+            ghi     rd
+            smb
+            rtn
+
+;------------------------------------------------------------------
+; ed_sub_rd_r8_to_r9: R9 = RD - R8, a plain register-register 16-bit
+; subtract keeping the actual difference -- the same shape
+; ed_sub_rd_r8_to_rc above covers for a result kept in RC, needed
+; separately since the caller wants the difference in R9 specifically
+; at these 3 sites. 3 occurrences.
+; Args:    RD, R8 = minuend, subtrahend
+; Returns: R9 = RD - R8; DF = 1 if RD >= R8 (no borrow); RD/R8
+;          unchanged
+;------------------------------------------------------------------
+ed_sub_rd_r8_to_r9:
+            glo     r8
+            str     r2
+            glo     rd
+            sm
+            plo     r9
+            ghi     r8
+            str     r2
+            ghi     rd
+            smb
+            phi     r9
+            rtn
+
+;------------------------------------------------------------------
 ; ed_zero_word: zero the 16-bit word at a FIXED memory address,
 ; addressed via the same R6 inline-operand idiom as ed_ldw_*/
 ; ed_stw_*/ed_cmp_* above. Replaces "mov rf, ADDR / ldi 0 / str rf /
@@ -981,15 +1006,7 @@ ed_line_info:
 
             call    ed_ldw_r9
             dw      ed_line_count
-
-            glo     r9
-            str     r2
-            glo     rd
-            sm
-            ghi     r9
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r9
             lbdf    eli_use_textlen     ; DF=1: index+1 >= line_count
 
             shl16   rd                  ; RD = (index+1) * 2
@@ -2876,15 +2893,7 @@ ed_r_n2_ok:
             phi     r9
             ldn     r8
             plo     r9                  ; R9 = first (already resolved
-                                        ; above, explicit or default)
-            glo     r9
-            str     r2
-            glo     rd
-            sm
-            ghi     r9
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r9
             lbnf    ed_num_range_err            ; n2 < first: invalid
 
             call    ed_stw_rd
@@ -3241,16 +3250,7 @@ ed_rpl_loop:
             dw      ed_li_len
             call    ed_ldw_r8
             dw      ed_r_src_pos
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     r9
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     r9                  ; R9 = remaining
+            call    ed_sub_rd_r8_to_r9  ; R9 = remaining
 
             call    ed_ldw_r8
             dw      ed_r_old_len  ; R8 = old_len
@@ -3614,14 +3614,7 @@ ecpt_l_ok:
             phi     r9
             ldn     r8
             plo     r9                  ; R9 = first
-            glo     r9
-            str     r2
-            glo     rd
-            sm
-            ghi     r9
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r9
             lbnf    ecpt_err            ; last < first
 
             ; --- target: required, no default ---
@@ -3741,16 +3734,7 @@ ed_c_setup_pass:
             dw      ed_c_last
             call    ed_ldw_r8
             dw      ed_c_first
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     r9
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     r9
+            call    ed_sub_rd_r8_to_r9
             inc     r9
             call    ed_stw_r9
             dw      ed_c_blocklen
@@ -4065,15 +4049,7 @@ ed_delete_range:
 
             call    ed_ldw_r9
             dw      ed_line_count
-
-            glo     r9
-            str     r2
-            glo     rd
-            sm
-            ghi     r9
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r9
             lbdf    ed_d_use_textlen    ; DF=1: last >= line_count
 
             shl16   rd
