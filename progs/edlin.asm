@@ -96,10 +96,19 @@ ED_RDBUF_LEN:   equ     512         ; ed_getbyte's own read-ahead
 ED_PAGE_LINES:  equ     23          ; how many lines print before a
                                     ; pause; overridden by ROWS-1 if
                                     ; ROWS is set, see start's own env-
-                                    ; reading block -- this ONLY
-                                    ; controls pause frequency, not L's
-                                    ; own default starting line (see
-                                    ; ED_DEFAULT_LOOKBACK below).
+                                    ; reading block. AS OF 2026-08-24
+                                    ; this ALSO drives L's own default
+                                    ; starting line (ed_page_lines/2
+                                    ; lines before cur_line, computed
+                                    ; at runtime in ed_cmd_l) -- the
+                                    ; 2026-07-31 decision to decouple
+                                    ; the two (a fixed, ROWS-independent
+                                    ; 11-line lookback instead) was
+                                    ; reversed at the user's own
+                                    ; explicit request: L with no
+                                    ; explicit range should genuinely
+                                    ; center on cur_line for whatever
+                                    ; page size is actually in effect.
                                     ; REVERTED (2026-07-31, user's own
                                     ; direct correction after testing
                                     ; the plain-ROWS version): a full
@@ -120,20 +129,6 @@ ED_PAGE_LINES:  equ     23          ; how many lines print before a
                                     ; to do with the old "-- More --"
                                     ; visible-prompt text at all -- nice
                                     ; try, wrong reason.
-ED_DEFAULT_LOOKBACK: equ 11         ; L with no explicit range starts
-                                    ; this many lines before cur_line,
-                                    ; matching real edlin's own fixed
-                                    ; behavior -- a FIXED constant,
-                                    ; deliberately NOT derived from
-                                    ; ed_page_lines (2026-07-31,
-                                    ; corrected on the user's own
-                                    ; direct instruction: the original
-                                    ; implementation used page_lines/2
-                                    ; here, so a ROWS-driven pause-
-                                    ; frequency change also silently
-                                    ; changed the default lookback --
-                                    ; the two are unrelated settings
-                                    ; and must not be coupled)
 
             org     PROG_BASE
 
@@ -1896,13 +1891,21 @@ ed_cmd_l:
             ldn     rf
             lbnz    ed_lp_n1_given      ; explicit range: shared path
 
-            ; default first = cur_line - ED_DEFAULT_LOOKBACK (a fixed
-            ; constant, deliberately NOT ed_page_lines/2 -- see that
-            ; equ's own comment for why), clamped >= 1
+            ; default first = cur_line - (ed_page_lines / 2), clamped
+            ; >= 1 -- scaled to the CURRENT page size (2026-08-24,
+            ; reverting the 2026-07-31 fixed-lookback decision at the
+            ; user's own explicit request: L with no explicit range
+            ; should genuinely center on cur_line for whatever ROWS
+            ; currently produces, not assume a fixed screen height).
+            ; Integer division via a single SHR (ed_page_lines is
+            ; always a plain byte, 0-255) -- floor, the natural
+            ; reading of "centered."
+            mov     rf, ed_page_lines
+            ldn     rf
+            shr                         ; D = ed_page_lines / 2 (floor)
+            plo     r9
             ldi     0
-            phi     r9
-            ldi     ED_DEFAULT_LOOKBACK
-            plo     r9                  ; R9 = fixed lookback offset
+            phi     r9                  ; R9 = lookback offset
             call    ed_ldw_rd_via_r8
             dw      ed_cur_line  ; RD = cur_line
 
