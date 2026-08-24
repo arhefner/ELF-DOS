@@ -94,6 +94,89 @@ investigation. If continuous paging on a bare `P`/`L` turns out to be
 the desired behavior, that's a real design change to discuss, not a bug
 fix.
 
+## L/P design fix (2026-08-24) -- the user's own FreeDOS-backed pushback
+
+The "not a regression, working as designed" conclusion above turned out
+to be right as far as it went, but the design itself was wrong. The
+user came back with real FreeDOS documentation and asked for three
+specific, deliberate reversals of the 2026-07-31 decisions this file's
+own comments already documented at length -- each one confirmed
+explicitly before implementing, and each one a real design change, not
+a bug fix, kept as its own separate, clearly-labeled commit on top of
+the size-reduction work above:
+
+1. **`ED_DEFAULT_LOOKBACK` (a fixed `11`) reverted to `ed_page_lines/2`,
+   computed at runtime.** L's own default starting line now genuinely
+   scales with whatever `ROWS` currently produces for the page size,
+   instead of assuming a fixed screen height. Interestingly, this is
+   itself a *second* reversal -- `ED_PAGE_LINES`'s own comment already
+   recorded that the *original* implementation (before 2026-07-31) used
+   `page_lines/2`, and it was deliberately decoupled into a fixed
+   constant at the user's own earlier request; this change simply
+   un-reverses that. Implemented as a single `SHR` on `ed_page_lines`
+   (a plain 0-255 byte) -- floor division, the natural reading of
+   "centered."
+2. **`ed_list_clamp_last`'s "no end given" default changed from
+   `first + page_lines - 1` (cap to exactly one page) to `line_count`
+   (the rest of the buffer).** This is the change that actually fixes
+   the reported symptom: with the range always capped to one page, the
+   pause-and-continue mechanism in `ed_list_loop` -- already correct for
+   a genuinely multi-page range -- could never have anything left to
+   continue to, since the pause always coincided with the very end of
+   the range. The routine shrank to a thin wrapper reading `ed_line_count`
+   directly; it keeps its old `(first in, last out)` signature purely to
+   avoid touching either of its two call sites, even though `first` is
+   no longer read.
+3. **The silent "any key but Ctrl-C continues" pause replaced with a
+   real, visible `"Continue (Y/N)? "` prompt**, following `ed_cmd_q`'s
+   own already-hardware-proven Y/N-confirmation idiom exactly (`K_READ`,
+   stash via `plo rc` before the `mov` that would clobber `D`, echo via
+   `K_TTY`, print CRLF, fold case, anything but `Y`/`y` stops). Ctrl-C is
+   no longer special-cased -- per the user's own explicit "I don't need
+   Ctrl-C to stop the listing," it just falls through to the same
+   "anything but Y" stop path as every other non-continue key.
+
+**The `ED_PAGE_LINES` `ROWS-1` holdback was re-examined, not assumed
+unchanged**, since the original 2026-07-31 reasoning for it was written
+specifically for the *silent* pause design being replaced here. Traced
+through concretely: printing exactly `ed_page_lines` (`=ROWS-1`) content
+lines leaves the terminal's cursor on the last, still-blank row --
+exactly where the new prompt text lands, with no scroll needed to show
+it. The screen only scrolls once the user actually answers and presses
+Enter, which is the natural point for that to happen, not a surprise
+that pushes unread content away before it's been seen. A plain `ROWS`
+(no holdback) would instead force that same scroll *before* the prompt
+even printed, silently losing the page's own first line the instant the
+pause fired. Conclusion: `ROWS-1` stays correct, now for a related but
+different reason than the one originally written down -- both the old
+and new reasoning are preserved in the code's own comment for history.
+
+**Verification for this pass**: since none of these three changes are
+mechanical transforms (unlike the earlier size-reduction commits), each
+was traced by hand against concrete register values rather than just
+diff-reviewed, and the full rewritten pipeline was mechanically traced
+against four scenarios before any of it was trusted: a file shorter
+than one page (no pause ever fires), a file of exactly one page (the
+pause fires once, right at the end, and answering Y correctly finds
+nothing left and ends cleanly with no spurious second prompt), a
+genuinely multi-page file (the pause fires mid-listing and Y correctly
+resumes printing the next batch), and a range whose final page is a
+partial page (no pause after that last short batch, since the top-of-
+loop range check fires before the per-line pause-threshold check gets a
+chance to). Full D-clobber/self-overwrite/gotcha-18/duplicate-label/
+self-referential-call/register-name-as-symbol sweeps clean at every
+commit; clean `make`+`make progs`+`make test` (0 errors/warnings) at
+every commit; `bin/edlin` ends this pass at 12904 bytes (up from 12860
+after part 2's own routine-shrink, and up 13 bytes net from the branch's
+pre-design-fix baseline of 12891 -- the visible prompt's own new code
+costs slightly more than `ed_list_clamp_last`'s simplification saved).
+
+**Still build-verified only, not hardware-tested** -- this needs its own
+fresh hardware round; see the updated checklist below, which now
+specifically calls for the explicit multi-line-range scenario (the one
+path neither this pass nor the original investigation could exercise
+without real hardware).
+
 ## What changed, and why
 
 `progs/edlin.asm` is a large, flat (no `proc`/`endp`) file full of small,
@@ -329,29 +412,36 @@ boundaries, no-match search have all been real historical bug sources):
    one line right up against the character-length cap.
 3. **`L`** with no range (whole file), a single-line range `L n`, and a
    two-number range `L n1,n2` -- including `n1==n2` and a range that's
-   exactly the first line or exactly the last line. **Specifically add
-   an explicit two-number range spanning MORE than one page** (e.g.
-   `L 1,50` on a file with 50+ lines, `ed_page_lines` defaults to 23) --
-   this is the one path the 2026-08-24 L/P investigation traced only on
-   paper (no hardware access here), not the bare-`L`/`P` single-page
-   case, which was independently confirmed to always end at the pause
-   by design, not as a bug. Confirm the pause fires partway through and
-   a non-Ctrl-C keypress correctly resumes printing the REMAINING lines
-   (not just returns to the prompt), and that Ctrl-C during that pause
-   stops early and updates `ed_cur_line` to whatever was last shown.
+   exactly the first line or exactly the last line. **This section was
+   rewritten after the 2026-08-24 design fix -- L/P's own default range
+   now spans the rest of the buffer, not one page, and the pause is a
+   real, visible `"Continue (Y/N)? "` prompt, not a silent any-key
+   design.** On a file spanning several pages, confirm a BARE `L` (no
+   args) shows a page centered on `cur_line` (starting `ed_page_lines/2`
+   lines before it, clamped to line 1), pauses with the visible prompt
+   once a full page has printed, and that typing `Y`/`y` correctly
+   resumes printing the REMAINING lines through to the end of the
+   buffer (not just one page) -- repeating through however many pauses
+   the file needs. Confirm `N` (or any other key) stops immediately and
+   updates `ed_cur_line` to whatever was last actually shown. Also
+   specifically test an explicit two-number range spanning more than
+   one page (e.g. `L 1,50` on a file with 50+ lines, `ed_page_lines`
+   defaults to 23) the same way, and confirm a range whose last page is
+   a PARTIAL page does NOT show a spurious extra pause/prompt after
+   that final short batch.
 4. **Bare-number single-line edit**: edit the *first* line, the *last*
    line, and (if buffer has exactly one line) the only line -- confirm
    Enter-alone leaves it unchanged and real replacement text works,
    including text that grows the line significantly.
-5. **`P`** (page) -- confirm a BARE `P` (no args) shows one page and
-   returns to the prompt on any key (this is the CORRECT, by-design
-   behavior confirmed during the 2026-08-24 investigation below, not a
-   bug -- a bare `P`/`L` is intentionally capped to exactly one page,
-   matching real MS-DOS/FreeDOS EDLIN's "type P again for the next
-   page" convention); then confirm a SECOND bare `P` right after
-   continues from where the first left off (`ed_cur_line` should have
-   advanced); and confirm a page boundary at exactly the last line
-   doesn't hang waiting for a nonexistent next page.
+5. **`P`** (page) -- same rewritten expectations as `L` above: a BARE
+   `P` (no args) starts AT `cur_line` (not centered, that's `L`'s own
+   distinction) and now also continues through the WHOLE REST OF THE
+   BUFFER via the same visible `Y`/`N` pause, not just one page. Confirm
+   a SECOND bare `P` run to completion, then invoked again right after,
+   starts fresh from `cur_line`'s own now-advanced position (matching
+   `ed_cur_line`'s update from the first run); and confirm a range
+   ending at exactly the last line doesn't show a spurious pause/prompt
+   with nothing left to continue to.
 6. **`A`** (append, if present) with the file at/near buffer capacity, to
    exercise `ed_edit_toolong`'s consolidated "Buffer full." path.
 7. **`T`** (transfer another file in) -- both a normal insert and a
