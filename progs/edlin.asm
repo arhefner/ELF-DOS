@@ -968,6 +968,42 @@ ed_lines_lookup_r9:
             rtn
 
 ;------------------------------------------------------------------
+; ed_ldw_rd_via_r8 / ed_ldw_r9_via_r8: like ed_ldw_rd/ed_ldw_r9
+; above, but use R8 (never RF) as internal scratch for the inline-
+; operand address -- for call sites where RF itself already holds a
+; live value that must survive the call (e.g. ed_parse_lineref's own
+; parse cursor; see that routine's own header comment establishing
+; "R8, never RF" as its own scratch convention for exactly this
+; reason). Replaces "mov r8, ADDR / lda r8 / phi rX / ldn r8 / plo
+; rX" (10 bytes, 10 occurrences: 6 into RD, 4 into R9) with "call
+; ed_ldw_rX_via_r8" + "dw ADDR" (5 bytes).
+; Args (inline): 2 bytes = address of the word to load
+; Returns: RD (resp. R9) = the word's value
+; Modifies: R8 (scratch -- NOT RF), R6 (inline-operand cursor)
+;------------------------------------------------------------------
+ed_ldw_rd_via_r8:
+            lda     r6
+            phi     r8
+            lda     r6
+            plo     r8
+            lda     r8
+            phi     rd
+            ldn     r8
+            plo     rd
+            rtn
+
+ed_ldw_r9_via_r8:
+            lda     r6
+            phi     r8
+            lda     r6
+            plo     r8
+            lda     r8
+            phi     r9
+            ldn     r8
+            plo     r9
+            rtn
+
+;------------------------------------------------------------------
 ; ed_zero_word: zero the 16-bit word at a FIXED memory address,
 ; addressed via the same R6 inline-operand idiom as ed_ldw_*/
 ; ed_stw_*/ed_cmp_* above. Replaces "mov rf, ADDR / ldi 0 / str rf /
@@ -1516,41 +1552,26 @@ ed_parse_lineref:
 
 epl_cur:
             inc     rf                  ; consume '.'
-            mov     r8, ed_cur_line
-            lda     r8
-            phi     rd
-            ldn     r8
-            plo     rd                  ; RD = ed_cur_line
+            call    ed_ldw_rd_via_r8
+            dw      ed_cur_line  ; RD = ed_cur_line
             lbr     epl_modifier
 
 epl_last:
             inc     rf                  ; consume '$'
-            mov     r8, ed_line_count
-            lda     r8
-            phi     rd
-            ldn     r8
-            plo     rd                  ; RD = ed_line_count
+            call    ed_ldw_rd_via_r8
+            dw      ed_line_count  ; RD = ed_line_count
             lbr     epl_modifier
 
 epl_onepast:
             inc     rf                  ; consume '#'
-            mov     r8, ed_line_count
-            lda     r8
-            phi     rd
-            ldn     r8
-            plo     rd
+            call    ed_ldw_rd_via_r8
+            dw      ed_line_count
             inc     rd            ; RD = ed_line_count + 1
             lbr     epl_modifier
 
 epl_bare_sign:
-            ; RF is NOT advanced here -- the sign itself is still
-            ; unconsumed, and epl_modifier below (reached via
-            ; fallthrough) is what recognizes and consumes it
-            mov     r8, ed_cur_line
-            lda     r8
-            phi     rd
-            ldn     r8
-            plo     rd                  ; RD = ed_cur_line
+            call    ed_ldw_rd_via_r8
+            dw      ed_cur_line  ; RD = ed_cur_line
 
 epl_modifier:
             ldn     rf
@@ -1597,11 +1618,8 @@ epl_plus:
             phi     rd
             plo     rd                  ; no digits after '+': offset=0
 epl_plus_reload:
-            mov     r8, ed_lineref_base
-            lda     r8
-            phi     r9
-            ldn     r8
-            plo     r9                  ; R9 = base (reloaded from
+            call    ed_ldw_r9_via_r8
+            dw      ed_lineref_base  ; R9 = base (reloaded from
                                         ; memory, undoing whatever
                                         ; ed_parse_uint left behind)
 
@@ -1643,11 +1661,8 @@ epl_minus:
             phi     rd
             plo     rd                  ; no digits after '-': offset=0
 epl_minus_reload:
-            mov     r8, ed_lineref_base
-            lda     r8
-            phi     r9
-            ldn     r8
-            plo     r9                  ; R9 = base (reloaded from
+            call    ed_ldw_r9_via_r8
+            dw      ed_lineref_base  ; R9 = base (reloaded from
                                         ; memory)
 
 epl_minus_sub:
@@ -1866,12 +1881,8 @@ ed_cmd_l:
             phi     r9
             ldi     ED_DEFAULT_LOOKBACK
             plo     r9                  ; R9 = fixed lookback offset
-
-            mov     r8, ed_cur_line
-            lda     r8
-            phi     rd
-            ldn     r8
-            plo     rd                  ; RD = cur_line
+            call    ed_ldw_rd_via_r8
+            dw      ed_cur_line  ; RD = cur_line
 
             glo     r9
             str     r2
@@ -1901,14 +1912,8 @@ ed_cmd_p:
             mov     rf, ed_have_n1
             ldn     rf
             lbnz    ed_lp_n1_given      ; explicit range: shared path
-
-            ; default first = cur_line (always already >= 1, no clamp
-            ; needed)
-            mov     r8, ed_cur_line
-            lda     r8
-            phi     rd
-            ldn     r8
-            plo     rd
+            call    ed_ldw_rd_via_r8
+            dw      ed_cur_line
             ghi     rd
             phi     r8
             glo     rd
@@ -2891,12 +2896,8 @@ ed_r_n2_ok:
             call    ed_cmp_rd_le
             dw      ed_line_count
             lbnf    ed_num_range_err
-
-            mov     r8, ed_r_first
-            lda     r8
-            phi     r9
-            ldn     r8
-            plo     r9                  ; R9 = first (already resolved
+            call    ed_ldw_r9_via_r8
+            dw      ed_r_first  ; R9 = first (already resolved
             call    ed_cmp_rd_r9
             lbnf    ed_num_range_err            ; n2 < first: invalid
 
@@ -3612,12 +3613,8 @@ ecpt_l_ok:
             call    ed_cmp_rd_le
             dw      ed_line_count
             lbnf    ecpt_err
-
-            mov     r8, ed_c_first
-            lda     r8
-            phi     r9
-            ldn     r8
-            plo     r9                  ; R9 = first
+            call    ed_ldw_r9_via_r8
+            dw      ed_c_first  ; R9 = first
             call    ed_cmp_rd_r9
             lbnf    ecpt_err            ; last < first
 
