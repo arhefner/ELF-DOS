@@ -871,6 +871,46 @@ ed_sub_rd_r8_to_rc:
             rtn
 
 ;------------------------------------------------------------------
+; ed_copy_word: copy a 16-bit big-endian word from one FIXED memory
+; address to another, both addressed via inline operands -- the
+; single most common shape in this whole file before this pass, "mov
+; rf, DST / mov rd, SRC / lda rd / str rf / inc rf / ldn rd / str rf"
+; (17 bytes: two 6-byte NW-form movs plus the 5-byte copy itself),
+; found 25 times (every one a plain memory-to-memory word copy with
+; both addresses known at compile time -- excludes the one further
+; occurrence in ed_insert_one whose destination is a COMPUTED array
+; element address, ed_lines+offset, not a fixed symbol, which stays
+; inline). Replaces it with "call ed_copy_word" + "dw SRC" + "dw DST"
+; (7 bytes) -- inline operands read in that order (source address
+; first, then destination), matching the routine's own read sequence
+; below, not the original code's mov-destination-first ordering (the
+; two are independent -- only the routine's own consumption order and
+; what this transform emits need to agree with each other).
+; Args (inline): 2 bytes = source address; 2 bytes = destination
+;                address
+; Returns: nothing
+; Modifies: RD, RF (left at src+1, dst+1 respectively -- the same
+;           final position the original inline copy always left them
+;           at, confirmed unused by any caller before converting),
+;           R6 (inline-operand cursor)
+;------------------------------------------------------------------
+ed_copy_word:
+            lda     r6
+            phi     rd
+            lda     r6
+            plo     rd
+            lda     r6
+            phi     rf
+            lda     r6
+            plo     rf
+            lda     rd
+            str     rf
+            inc     rf
+            ldn     rd
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
 ; ed_zero_word: zero the 16-bit word at a FIXED memory address,
 ; addressed via the same R6 inline-operand idiom as ed_ldw_*/
 ; ed_stw_*/ed_cmp_* above. Replaces "mov rf, ADDR / ldi 0 / str rf /
@@ -1674,14 +1714,9 @@ ed_bare_number:
             call    ed_cmp_rd_le
             dw      ed_line_count
             lbnf    ed_num_range_err
-
-            mov     rf, ed_cur_line
-            mov     rd, ed_n1
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n1
+            dw      ed_cur_line
 
             call    ed_ldw_rd
             dw      ed_n1
@@ -1756,14 +1791,9 @@ ed_bare_number:
             dw      ed_d_last
 
             call    ed_delete_range
-
-            mov     rf, ed_cur_line
-            mov     rd, ed_n1
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf                  ; cur_line = n1 (the edited
+            call    ed_copy_word
+            dw      ed_n1
+            dw      ed_cur_line  ; cur_line = n1 (the edited
                                         ; line's final position)
 
             lbr     ed_cmdloop
@@ -2121,24 +2151,15 @@ ed_cmd_i:
             mov     rf, ed_have_n1
             ldn     rf
             lbz     ed_i_use_cur
-
-            mov     rf, ed_i_target
-            mov     rd, ed_n1
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n1
+            dw      ed_i_target
             lbr     ed_i_validate
 
 ed_i_use_cur:
-            mov     rf, ed_i_target
-            mov     rd, ed_cur_line
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_cur_line
+            dw      ed_i_target
 
 ed_i_validate:
             call    ed_validate_insert_target
@@ -2401,14 +2422,9 @@ eio_have_off:
             inc     rd
             glo     r8
             str     rd
-
-            mov     rf, ed_i_wr_count
-            mov     rd, ed_i_text_len
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_i_text_len
+            dw      ed_i_wr_count
 
 eio_wr_loop:
             call    ed_ldw_rd
@@ -2552,14 +2568,9 @@ eio_shift_done:
             phi     rc
             call    ed_stw_rc
             dw      ed_text_len
-
-            mov     rf, ed_cur_line
-            mov     rd, ed_i_target
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_i_target
+            dw      ed_cur_line
 
             clc
             rtn
@@ -2602,24 +2613,15 @@ ed_cmd_t:
             mov     rf, ed_have_n1
             ldn     rf
             lbz     ed_t_use_cur
-
-            mov     rf, ed_i_target
-            mov     rd, ed_n1
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n1
+            dw      ed_i_target
             lbr     ed_t_validate
 
 ed_t_use_cur:
-            mov     rf, ed_i_target
-            mov     rd, ed_cur_line
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_cur_line
+            dw      ed_i_target
 
 ed_t_validate:
             call    ed_validate_insert_target
@@ -3560,24 +3562,15 @@ ed_cm_parse_target:
             mov     rf, ed_have_n1
             ldn     rf
             lbz     ecpt_first_cur
-
-            mov     rf, ed_c_first
-            mov     rd, ed_n1
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n1
+            dw      ed_c_first
             lbr     ecpt_have_first
 
 ecpt_first_cur:
-            mov     rf, ed_c_first
-            mov     rd, ed_cur_line
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_cur_line
+            dw      ed_c_first
 
 ecpt_have_first:
             call    ed_ldw_rd
@@ -3594,24 +3587,15 @@ ecpt_f_ok:
             mov     rf, ed_have_n2
             ldn     rf
             lbz     ecpt_last_cur
-
-            mov     rf, ed_c_last
-            mov     rd, ed_n2
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n2
+            dw      ed_c_last
             lbr     ecpt_have_last
 
 ecpt_last_cur:
-            mov     rf, ed_c_last
-            mov     rd, ed_cur_line
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_cur_line
+            dw      ed_c_last
 
 ecpt_have_last:
             call    ed_ldw_rd
@@ -3644,14 +3628,9 @@ ecpt_l_ok:
             mov     rf, ed_have_n3
             ldn     rf
             lbz     ecpt_usage
-
-            mov     rf, ed_i_target
-            mov     rd, ed_n3
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n3
+            dw      ed_i_target
 
             call    ed_validate_insert_target
             lbdf    ecpt_err
@@ -3712,13 +3691,9 @@ ed_c_have_shift:
             lbr     ed_c_ready
 
 ed_c_count_explicit:
-            mov     rf, ed_c_count
-            mov     rd, ed_n4
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n4
+            dw      ed_c_count
 
 ed_c_ready:
             call    ed_c_setup_pass
@@ -3745,17 +3720,9 @@ ed_c_outer:
             lbr     ed_c_outer
 
 ed_c_done:
-            ; cur_line = wherever the insert loop left ed_c_ins_pos --
-            ; one past the very last line inserted, matching this
-            ; file's own established "cur_line follows the insert
-            ; target" convention
-            mov     rf, ed_cur_line
-            mov     rd, ed_c_ins_pos
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_c_ins_pos
+            dw      ed_cur_line
             lbr     ed_cmdloop
 
 ed_c_usage:
@@ -3790,14 +3757,9 @@ ed_c_setup_pass:
 
             call    ed_zero_word
             dw      ed_c_n
-
-            mov     rf, ed_c_ins_pos
-            mov     rd, ed_i_target
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_i_target
+            dw      ed_c_ins_pos
 
             rtn
 
@@ -3890,22 +3852,12 @@ ed_c_copy_have:
 ed_c_copy_done:
             ldi     0
             str     rf                  ; NUL-terminate
-
-            mov     rf, ed_i_target
-            mov     rd, ed_c_ins_pos
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
-
-            mov     rf, ed_i_text_len
-            mov     rd, ed_li_len
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_c_ins_pos
+            dw      ed_i_target
+            call    ed_copy_word
+            dw      ed_li_len
+            dw      ed_i_text_len
 
             mov     rf, ed_i_source_buf
             ldi     high ed_line_scratch
@@ -4017,15 +3969,9 @@ ed_m_last_noshift:
             dw      ed_d_last
 
             call    ed_delete_range
-
-            ; cur_line follows the insert target, same as C
-            mov     rf, ed_cur_line
-            mov     rd, ed_c_ins_pos
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_c_ins_pos
+            dw      ed_cur_line
             lbr     ed_cmdloop
 
 ed_m_usage:
@@ -4041,53 +3987,31 @@ ed_cmd_d:
             mov     rf, ed_have_n1
             ldn     rf
             lbz     ed_d_use_cur
-
-            mov     rf, ed_d_first
-            mov     rd, ed_n1
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n1
+            dw      ed_d_first
 
             mov     rf, ed_have_n2
             ldn     rf
             lbz     ed_d_last_eq_first
-
-            mov     rf, ed_d_last
-            mov     rd, ed_n2
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_n2
+            dw      ed_d_last
             lbr     ed_d_validate
 
 ed_d_last_eq_first:
-            mov     rf, ed_d_last
-            mov     rd, ed_d_first
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_d_first
+            dw      ed_d_last
             lbr     ed_d_validate
 
 ed_d_use_cur:
-            mov     rf, ed_d_first
-            mov     rd, ed_cur_line
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
-            mov     rf, ed_d_last
-            mov     rd, ed_cur_line
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_cur_line
+            dw      ed_d_first
+            call    ed_copy_word
+            dw      ed_cur_line
+            dw      ed_d_last
 
 ed_d_validate:
             call    ed_ldw_rd
@@ -4674,13 +4598,9 @@ ed_s_first_done:
             lbr     ed_s_range_ready
 
 ed_s_last_default:
-            mov     rf, ed_s_last
-            mov     rd, ed_line_count
-            lda     rd
-            str     rf
-            inc     rf
-            ldn     rd
-            str     rf
+            call    ed_copy_word
+            dw      ed_line_count
+            dw      ed_s_last
 
 ed_s_range_ready:
             ; validate: 1 <= first <= last <= line_count
