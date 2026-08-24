@@ -1064,7 +1064,14 @@ ed_zero_word:
 ; "db VALUE" + "dw ADDR" (6 bytes).
 ; Args (inline): 1 byte = the value to store; 2 bytes = address
 ; Returns: nothing
-; Modifies: RF (scratch), R6 (inline-operand cursor)
+; Modifies: RF (scratch), R9.0 (scratch -- stages the value byte
+;           across the 2-byte address read; found undocumented here
+;           during the L/P hardware-regression investigation, 2026-
+;           08-24 -- checked all 9 call sites in this file and none
+;           currently depend on R9 surviving, but any future call
+;           site needs to know this before assuming otherwise, per
+;           this project's own standing gotcha #10), R6 (inline-
+;           operand cursor)
 ;------------------------------------------------------------------
 ed_stb_const:
             lda     r6
