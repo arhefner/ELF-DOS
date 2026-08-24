@@ -109,26 +109,51 @@ ED_PAGE_LINES:  equ     23          ; how many lines print before a
                                     ; explicit range should genuinely
                                     ; center on cur_line for whatever
                                     ; page size is actually in effect.
-                                    ; REVERTED (2026-07-31, user's own
-                                    ; direct correction after testing
-                                    ; the plain-ROWS version): a full
-                                    ; screen's worth with NOTHING held
-                                    ; back is wrong even with the pause
-                                    ; itself silent -- printing the
-                                    ; terminal's own next line of
-                                    ; output (the "*" prompt after
-                                    ; Ctrl-C, or the next page) once
+                                    ;
+                                    ; The ROWS-1 (not plain ROWS) sizing
+                                    ; itself is UNCHANGED and still
+                                    ; correctly justified with the real,
+                                    ; visible "Continue (Y/N)? " prompt
+                                    ; ed_list_loop's own pause block
+                                    ; reintroduced 2026-08-24 (see that
+                                    ; block's own header comment) --
+                                    ; traced carefully rather than
+                                    ; assumed, since the ORIGINAL
+                                    ; reasoning below was written for a
+                                    ; SILENT pause, not this one:
+                                    ; printing ed_page_lines(=ROWS-1)
+                                    ; content lines leaves the cursor on
+                                    ; the terminal's own LAST row, still
+                                    ; blank -- exactly where the prompt
+                                    ; text now lands, with no scroll
+                                    ; needed to show it. The screen only
+                                    ; scrolls once the user actually
+                                    ; answers and presses Enter, which
+                                    ; is the natural, expected point for
+                                    ; it to happen (matching ordinary
+                                    ; terminal behavior at the bottom of
+                                    ; any full screen), not a surprise
+                                    ; that pushes unread content away
+                                    ; before the user has seen it. A
+                                    ; plain ROWS (no holdback) would
+                                    ; instead force that same scroll
+                                    ; BEFORE the prompt ever printed,
+                                    ; silently losing the page's own
+                                    ; first line the moment the pause
+                                    ; fires -- so ROWS-1 stays correct,
+                                    ; just for a related but distinct
+                                    ; reason than the one originally
+                                    ; written down for the silent design.
+                                    ; ORIGINAL 2026-07-31 REASONING,
+                                    ; kept for history: "a full screen's
+                                    ; worth with NOTHING held back is
+                                    ; wrong even with the pause itself
+                                    ; silent -- printing the terminal's
+                                    ; own next line of output... once
                                     ; the screen is already completely
                                     ; full forces the TERMINAL to auto-
                                     ; scroll, which pushes whatever was
-                                    ; on the top row off-screen. Holding
-                                    ; back one line keeps the bottom
-                                    ; row blank, so that scroll never
-                                    ; needs to happen and the top of
-                                    ; the page stays visible. Nothing
-                                    ; to do with the old "-- More --"
-                                    ; visible-prompt text at all -- nice
-                                    ; try, wrong reason.
+                                    ; on the top row off-screen."
 
             org     PROG_BASE
 
@@ -2105,13 +2130,28 @@ ed_list_loop:
             call    ed_stw_rd
             dw      ed_list_i
 
-            ; --- pause every ed_page_lines lines, fully silent (no
-            ; "-- More --" text, no key echo) -- redesigned 2026-07-31
-            ; per hardware testing/explicit request, replacing the
-            ; more.asm-style visible prompt this was originally
-            ; modeled on. Any key EXCEPT Ctrl-C ($03) continues at the
-            ; same line; Ctrl-C stops the listing early via the same
-            ; ed_list_finish exit reaching the end normally uses. ---
+            ; --- pause every ed_page_lines lines, with a real, visible
+            ; "Continue (Y/N)? " prompt -- REINTRODUCED 2026-08-24 at
+            ; the user's own explicit request, reversing the 2026-07-31
+            ; "silent pause, any key but Ctrl-C continues" redesign.
+            ; With ed_list_clamp_last's own default now spanning the
+            ; REST OF THE BUFFER (see its header comment above) rather
+            ; than a single page, this prompt is what actually lets a
+            ; bare L/P keep going past one page -- previously that case
+            ; could never reach this point with anything left to show,
+            ; which is what made the original bug report ("P: any key
+            ; returns to the prompt") look like a bug rather than the
+            ; single-page-cap design it actually was. Follows ed_cmd_q's
+            ; own already-hardware-proven Y/N-confirmation pattern
+            ; exactly: K_READ, stash the key via plo rc BEFORE the mov
+            ; that would otherwise clobber D (gotcha #4), echo it via
+            ; K_TTY (this DOES echo, unlike the retired silent design),
+            ; print CRLF, fold case, and treat anything but Y/y as
+            ; "stop." No separate Ctrl-C special case is needed any
+            ; more -- the user's own explicit note ("I don't need
+            ; Ctrl-C to stop the listing") -- since Ctrl-C, like every
+            ; other non-Y key, already falls through to the same stop
+            ; path below. ---
             mov     rf, ed_list_page_count
             ldn     rf
             adi     1
@@ -2130,11 +2170,27 @@ ed_list_loop:
             db      0
             dw      ed_list_page_count  ; reset the page counter
 
-            call    K_READ              ; D = key pressed (blocking) --
-                                        ; no prompt printed, not echoed
-            xri     3                   ; Ctrl-C?
-            lbz     ed_list_finish      ; stop early -- same exit as
-                                        ; reaching the end of the range
+            call    K_INMSG
+            db      "Continue (Y/N)? ",0
+            call    K_READ              ; D = key pressed (blocking)
+            plo     rc                  ; stash (mov below clobbers D)
+            mov     rf, ed_key
+            glo     rc
+            str     rf
+
+            mov     rf, ed_key
+            ldn     rf                  ; D = char (reloaded)
+            call    K_TTY               ; echo it
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, ed_key
+            ldn     rf
+            ani     $DF
+            xri     'Y'
+            lbnz    ed_list_finish      ; anything but Y/y: stop --
+                                        ; same exit as reaching the end
+                                        ; of the range
 
             lbr     ed_list_loop
 
