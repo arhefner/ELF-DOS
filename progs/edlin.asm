@@ -573,13 +573,7 @@ ed_finish_line:
 ed_cur_line_has_bytes:
             call    ed_ldw_rd
             dw      ed_line_count  ; RD = ed_line_count
-            shl16   rd
-            mov     rf, ed_lines
-            add16   rf, rd
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = ed_lines[ed_line_count]
+            call    ed_lines_lookup_r8  ; R8 = ed_lines[ed_line_count]
                                         ; (this line's own start offset)
 
             call    ed_ldw_rd
@@ -936,6 +930,44 @@ ed_sub_rd_r8_to_r9:
             rtn
 
 ;------------------------------------------------------------------
+; ed_lines_lookup_r8 / ed_lines_lookup_r9: R8 (resp. R9) =
+; ed_lines[RD] -- look up a line's own start-offset from the line
+; table by 0-based index. Unlike ed_ldw_*/ed_stw_*/ed_cmp_*, this
+; needs no inline operand at all: ed_lines itself is a single, fixed,
+; well-known symbol, not something that varies per call site, so it's
+; simply hardcoded into the routine body. Replaces the 7-instruction/
+; 26-byte "shl16 rd / mov rf, ed_lines / add16 rf, rd / lda rf / phi
+; rX / ldn rf / plo rX" shape (8 occurrences, 3 into R8 and 5 into R9)
+; with a plain 3-byte call.
+; Args:    RD = 0-based line index (must be < ed_line_count)
+; Returns: R8 (resp. R9) = ed_lines[RD]
+; Modifies: RD (destroyed -- ends up holding index*2, not the
+;           original index; every one of the 8 sites converted was
+;           individually confirmed to reload RD fresh before its own
+;           next real use, never relying on it surviving this call),
+;           RF (scratch)
+;------------------------------------------------------------------
+ed_lines_lookup_r8:
+            shl16   rd
+            mov     rf, ed_lines
+            add16   rf, rd
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            rtn
+
+ed_lines_lookup_r9:
+            shl16   rd
+            mov     rf, ed_lines
+            add16   rf, rd
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            rtn
+
+;------------------------------------------------------------------
 ; ed_zero_word: zero the 16-bit word at a FIXED memory address,
 ; addressed via the same R6 inline-operand idiom as ed_ldw_*/
 ; ed_stw_*/ed_cmp_* above. Replaces "mov rf, ADDR / ldi 0 / str rf /
@@ -988,14 +1020,7 @@ ed_stb_const:
 ed_line_info:
             call    ed_stw_rd
             dw      ed_li_idx
-
-            shl16   rd                  ; RD = index * 2
-            mov     rf, ed_lines
-            add16   rf, rd
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = start offset
+            call    ed_lines_lookup_r8  ; R8 = start offset
 
             call    ed_stw_r8
             dw      ed_li_start_off
@@ -1008,14 +1033,7 @@ ed_line_info:
             dw      ed_line_count
             call    ed_cmp_rd_r9
             lbdf    eli_use_textlen     ; DF=1: index+1 >= line_count
-
-            shl16   rd                  ; RD = (index+1) * 2
-            mov     rf, ed_lines
-            add16   rf, rd
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = end offset
+            call    ed_lines_lookup_r9  ; R9 = end offset
             lbr     eli_have_end
 
 eli_use_textlen:
@@ -2362,14 +2380,7 @@ ed_insert_one:
             dw      ed_line_count
             call    ed_cmp_rd_r8
             lbdf    eio_use_textlen     ; DF=1: ins_idx >= line_count
-
-            shl16   rd
-            mov     rf, ed_lines
-            add16   rf, rd
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_lines_lookup_r9
             lbr     eio_have_off
 
 eio_use_textlen:
@@ -2508,14 +2519,7 @@ eio_shift_loop:
             call    ed_ldw_rd
             dw      ed_i_shift_i
             dec     rd            ; RD = src_index (shift_i - 1)
-
-            shl16   rd
-            mov     rf, ed_lines
-            add16   rf, rd
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = ed_lines[shift_i-1]
+            call    ed_lines_lookup_r9  ; R9 = ed_lines[shift_i-1]
 
             call    ed_ldw_r8
             dw      ed_i_shift
@@ -4031,13 +4035,7 @@ ed_delete_range:
             call    ed_ldw_rd
             dw      ed_d_first
             dec     rd
-            shl16   rd
-            mov     rf, ed_lines
-            add16   rf, rd
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
+            call    ed_lines_lookup_r8
             call    ed_stw_r8
             dw      ed_d_start_off
 
@@ -4051,14 +4049,7 @@ ed_delete_range:
             dw      ed_line_count
             call    ed_cmp_rd_r9
             lbdf    ed_d_use_textlen    ; DF=1: last >= line_count
-
-            shl16   rd
-            mov     rf, ed_lines
-            add16   rf, rd
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
+            call    ed_lines_lookup_r9
             lbr     ed_d_have_end
 
 ed_d_use_textlen:
@@ -4138,13 +4129,7 @@ ed_d_shift_loop:
 
             call    ed_ldw_rd
             dw      ed_d_shift_src
-            shl16   rd
-            mov     rf, ed_lines
-            add16   rf, rd
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = ed_lines[shift_src]
+            call    ed_lines_lookup_r9  ; R9 = ed_lines[shift_src]
 
             call    ed_ldw_r8
             dw      ed_d_removed
