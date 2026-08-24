@@ -846,6 +846,31 @@ ed_cmp_rd_r8:
             rtn
 
 ;------------------------------------------------------------------
+; ed_sub_rd_r8_to_rc: RC = RD - R8, a plain register-register 16-bit
+; subtract keeping the actual difference (not just DF) -- the same
+; "glo r8 / str r2 / glo rd / sm / plo rc / ghi r8 / str r2 / ghi rd /
+; smb / phi rc" 10-instruction/10-byte shape ed_cmp_rd_r8 above is a
+; truncated (result-discarding) version of, found 6 times computing a
+; real byte-count/length difference (e.g. "capacity remaining",
+; "bytes removed"). "call ed_sub_rd_r8_to_rc" (3 bytes) replaces it.
+; Args:    RD, R8 = minuend, subtrahend
+; Returns: RC = RD - R8; DF = 1 if RD >= R8 (no borrow); RD/R8
+;          unchanged
+;------------------------------------------------------------------
+ed_sub_rd_r8_to_rc:
+            glo     r8
+            str     r2
+            glo     rd
+            sm
+            plo     rc
+            ghi     r8
+            str     r2
+            ghi     rd
+            smb
+            phi     rc
+            rtn
+
+;------------------------------------------------------------------
 ; ed_zero_word: zero the 16-bit word at a FIXED memory address,
 ; addressed via the same R6 inline-operand idiom as ed_ldw_*/
 ; ed_stw_*/ed_cmp_* above. Replaces "mov rf, ADDR / ldi 0 / str rf /
@@ -2243,17 +2268,7 @@ ed_insert_one:
             dw      ed_buf_end
             call    ed_ldw_r8
             dw      ed_buf_start
-
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     rc
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     rc                  ; RC = total capacity
+            call    ed_sub_rd_r8_to_rc  ; RC = total capacity
 
             call    ed_ldw_rd
             dw      ed_text_len
@@ -2352,16 +2367,7 @@ eio_have_off:
             dw      ed_text_len
             call    ed_ldw_r8
             dw      ed_i_ins_off
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     rc
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     rc
+            call    ed_sub_rd_r8_to_rc
             call    ed_stw_rc
             dw      ed_mv_count
 
@@ -4203,16 +4209,7 @@ ed_d_have_end:
             dw      ed_text_len
             call    ed_ldw_r8
             dw      ed_d_end_off
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     rc
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     rc
+            call    ed_sub_rd_r8_to_rc
             call    ed_stw_rc
             dw      ed_mv_count
 
@@ -4295,17 +4292,7 @@ ed_d_shift_done:
             dw      ed_d_last
             call    ed_ldw_r8
             dw      ed_d_first
-
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     rc
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     rc
+            call    ed_sub_rd_r8_to_rc
             inc     rc            ; RC = deleted-line count
 
             call    ed_ldw_rd
@@ -4330,17 +4317,7 @@ ed_d_shift_done:
             dw      ed_text_len
             call    ed_ldw_r8
             dw      ed_d_removed
-
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     rc
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     rc
+            call    ed_sub_rd_r8_to_rc
 
             call    ed_stw_rc
             dw      ed_text_len
@@ -4856,17 +4833,7 @@ elc_outer_loop:
             dw      ed_li_len  ; RD = haystack_len
             call    ed_ldw_r8
             dw      ed_lc_outer  ; R8 = outer
-
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            plo     rc
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            phi     rc                  ; RC = remaining
+            call    ed_sub_rd_r8_to_rc  ; RC = remaining
 
             call    ed_ldw_r9
             dw      ed_s_text_len  ; R9 = needle_len
