@@ -495,17 +495,8 @@ ed_append_byte:
 
             call    ed_ldw_r8
             dw      ed_buf_end  ; R8 = ed_buf_end
-
-            ; DF=1 if write position >= ed_buf_end (no room)
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            lbdf    eab_full
+            call    ed_cmp_rd_r8        ; DF=1 if write position >=
+            lbdf    eab_full            ; ed_buf_end (no room)
 
             mov     rf, rd
             glo     r9
@@ -826,6 +817,31 @@ ed_cmp_r8_le:
             ghi     r8
             str     r2
             ghi     r9
+            smb
+            rtn
+
+;------------------------------------------------------------------
+; ed_cmp_rd_r8: compare two ALREADY-LOADED registers (no inline
+; operand, no memory access at all) -- RD against R8. Replaces the
+; plain 8-instruction/8-byte "glo r8 / str r2 / glo rd / sm / ghi r8 /
+; str r2 / ghi rd / smb" comparison shape (11 occurrences, every one
+; immediately followed by a bare lbdf/lbnf with no result saved) with
+; "call ed_cmp_rd_r8" (3 bytes) -- the caller's own following
+; lbdf/lbnf is unchanged, exactly like ed_cmp_rd_le/ed_cmp_r8_le
+; above, just with no address to resolve since both operands are
+; already sitting in registers.
+; Args:    RD, R8 = the two values to compare
+; Returns: DF = 1 if RD >= R8 (no borrow), DF = 0 if RD < R8; RD/R8
+;          unchanged (only ever read via glo/ghi, never written)
+;------------------------------------------------------------------
+ed_cmp_rd_r8:
+            glo     r8
+            str     r2
+            glo     rd
+            sm
+            ghi     r8
+            str     r2
+            ghi     rd
             smb
             rtn
 
@@ -1921,16 +1937,7 @@ ed_list_clamp_last:
             phi     r8
             ldn     r9
             plo     r8                  ; R8 = line_count
-
-            ; candidate (RD) >= line_count (R8) ?
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8        ; candidate (RD) >= line_count (R8) ?
             lbnf    elcl_done           ; DF=0: candidate < line_count,
                                         ; keep RD as-is
 
@@ -1970,15 +1977,7 @@ ed_list_loop:
             dw      ed_list_i
             call    ed_ldw_r8
             dw      ed_list_last
-
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8
             lbdf    ed_list_finish      ; list_i >= list_last: done
 
             call    ed_ldw_rd
@@ -2308,15 +2307,7 @@ ed_insert_one:
             ; : ed_text_len
             call    ed_ldw_r8
             dw      ed_line_count
-
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8
             lbdf    eio_use_textlen     ; DF=1: ins_idx >= line_count
 
             shl16   rd
@@ -3326,14 +3317,7 @@ ed_rpl_copy_rest:
             dw      ed_r_src_pos
             call    ed_ldw_r8
             dw      ed_li_len
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8
             lbdf    ed_rpl_done         ; DF=1: src_pos >= li_len
 
             call    ed_ldw_r8
@@ -3741,14 +3725,7 @@ ed_c_outer:
             dw      ed_c_k
             call    ed_ldw_r8
             dw      ed_c_count
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8
             lbdf    ed_c_done           ; DF=1: k >= count
 
             call    ed_c_copy_block     ; always returns DF=0 -- see
@@ -3842,14 +3819,7 @@ ed_c_inner:
             dw      ed_c_i
             call    ed_ldw_r8
             dw      ed_c_blocklen
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8
             lbdf    ed_c_inner_done     ; DF=1: i >= blocklen
 
             call    ed_ldw_rd
@@ -4266,16 +4236,7 @@ ed_d_shift_loop:
             dw      ed_d_shift_src
             call    ed_ldw_r8
             dw      ed_line_count
-
-            ; shift_src >= line_count ?
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8        ; shift_src >= line_count ?
             lbdf    ed_d_shift_done
 
             call    ed_ldw_rd
@@ -4391,16 +4352,7 @@ ed_d_shift_done:
 
             call    ed_ldw_r8
             dw      ed_d_first
-
-            ; line_count >= first ?
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8        ; line_count >= first ?
             lbdf    ed_d_cur_is_first
 
             ghi     rd
@@ -4565,15 +4517,7 @@ ed_wsave_loop:
             dw      ed_save_i
             call    ed_ldw_r8
             dw      ed_w_count
-
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
+            call    ed_cmp_rd_r8
             lbdf    ed_wsave_done       ; DF=1: save_i >= count -- done
                                         ; (0-based counter against a
                                         ; COUNT -- >= is the correct
@@ -4946,17 +4890,8 @@ elc_inner_loop:
             dw      ed_lc_inner  ; RD = inner
             call    ed_ldw_r8
             dw      ed_s_text_len
-
-            ; inner >= needle_len ? -> every byte matched
-            glo     r8
-            str     r2
-            glo     rd
-            sm
-            ghi     r8
-            str     r2
-            ghi     rd
-            smb
-            lbdf    elc_match
+            call    ed_cmp_rd_r8        ; inner >= needle_len ? -> every
+            lbdf    elc_match           ; byte matched
 
             ; haystack[outer+inner] == needle[inner] ?
             ;
