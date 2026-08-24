@@ -31,6 +31,69 @@ real 1802 hardware. Treat "build-verified, not hardware-tested" as the
 expected, normal state of this branch, not a caveat to downplay. See the
 test checklist at the end before trusting this on real hardware.
 
+## Hardware round (2026-08-24) and the L/P investigation
+
+The branch got its first real hardware round. Most of it passed cleanly:
+`dir`/`ls`/`xcopy`/`touch`/`cd`/`pwd`/`edlin`, several batch scripts, and
+I/O redirection all "looked good." Two commands, `L` and `P`, were
+reported as misbehaving:
+
+- **P**: "It prints a page of text, but then the cursor is just sitting
+  on a blank line at the bottom. When I press any key it prints a
+  prompt" -- i.e. any keypress, not just Ctrl-C, was ending the listing
+  and returning to the `*` prompt.
+- **L**: "similar, but I can't determine exactly how it decides what
+  line to start with."
+
+This was investigated exhaustively -- the entire `ed_cmd_l`/`ed_cmd_p`
+default-line computation, `ed_list_clamp_last`, `ed_parse_range`/`ed_
+parse_lineref` (the `+n`/`-n` relative-reference parser), `ed_list_
+start`/`ed_list_loop`/`ed_list_finish`'s own pause-and-continue
+mechanic, `ed_bare_number`'s insert-then-delete single-line edit, and
+**every one of the 25 occurrences of the new `ed_copy_word` helper**,
+cross-referenced as a full multiset against `main`'s original inline
+copies (every one matches in both content and source/destination
+polarity -- zero drift, no argument-order bugs anywhere). Every register
+a new helper documents as scratch was checked against what its actual
+callers in this file need to survive across it.
+
+**Conclusion: this was not a regression.** The behavior is byte-for-byte
+identical to `main`'s pre-existing, already-hardware-confirmed
+(2026-07-31) design -- confirmed not just by source-level tracing but by
+directly decoding the final `-r`-relaxed linked binary at the `ed_list_
+loop`/`ed_list_finish`/`K_READ`-pause region: every branch target
+matches its label's real linked address exactly, with zero drift from
+relaxation. What's actually happening: a bare `P` or `L` (no explicit
+line range) is capped to exactly ONE page by design, matching real
+MS-DOS/FreeDOS EDLIN -- you type `P`/`L` again to see the next page,
+rather than one invocation paging continuously. Because the range is
+capped to exactly one page, the internal pause-and-continue mechanism
+(which exists to handle an EXPLICIT multi-line range like `L 1,50`)
+always coincides with the very end of that range for a bare invocation
+-- so any keypress, not just Ctrl-C, correctly returns to the prompt,
+because there's genuinely nothing left in the range to show. The
+explicit-multi-line-range continuation path (where the pause SHOULD
+resume printing further lines) was traced numerically too (e.g.
+`list_i=23 < list_last=50` after the first pause correctly falls
+through to print line 24 onward) and found correct.
+
+The one real, if currently non-symptomatic, issue found along the way
+(commit `1cd9ce9`): `ed_stb_const` stages its inline constant byte in
+`R9.0` across the 2-byte address read, but its header only documented
+`RF`/`R6` as modified. All 9 call sites in this file were checked --
+none currently depend on `R9` surviving the call -- so the fix is pure
+documentation (zero instruction/byte change, confirmed via an unchanged
+`Code Generated` count), closing a real gap before it can bite a future
+caller.
+
+**Not fully confident about**: whether the design itself (single page
+per bare invocation, no continuous auto-paging) actually matches what
+the user wants day-to-day -- that's a legitimate UX question, separate
+from "is the code correct," and outside the scope of a regression
+investigation. If continuous paging on a bare `P`/`L` turns out to be
+the desired behavior, that's a real design change to discuss, not a bug
+fix.
+
 ## What changed, and why
 
 `progs/edlin.asm` is a large, flat (no `proc`/`endp`) file full of small,
@@ -266,14 +329,29 @@ boundaries, no-match search have all been real historical bug sources):
    one line right up against the character-length cap.
 3. **`L`** with no range (whole file), a single-line range `L n`, and a
    two-number range `L n1,n2` -- including `n1==n2` and a range that's
-   exactly the first line or exactly the last line.
+   exactly the first line or exactly the last line. **Specifically add
+   an explicit two-number range spanning MORE than one page** (e.g.
+   `L 1,50` on a file with 50+ lines, `ed_page_lines` defaults to 23) --
+   this is the one path the 2026-08-24 L/P investigation traced only on
+   paper (no hardware access here), not the bare-`L`/`P` single-page
+   case, which was independently confirmed to always end at the pause
+   by design, not as a bug. Confirm the pause fires partway through and
+   a non-Ctrl-C keypress correctly resumes printing the REMAINING lines
+   (not just returns to the prompt), and that Ctrl-C during that pause
+   stops early and updates `ed_cur_line` to whatever was last shown.
 4. **Bare-number single-line edit**: edit the *first* line, the *last*
    line, and (if buffer has exactly one line) the only line -- confirm
    Enter-alone leaves it unchanged and real replacement text works,
    including text that grows the line significantly.
-5. **`P`** (page) -- confirm it actually pauses and that a page boundary
-   at exactly the last line doesn't hang waiting for a nonexistent next
-   page.
+5. **`P`** (page) -- confirm a BARE `P` (no args) shows one page and
+   returns to the prompt on any key (this is the CORRECT, by-design
+   behavior confirmed during the 2026-08-24 investigation below, not a
+   bug -- a bare `P`/`L` is intentionally capped to exactly one page,
+   matching real MS-DOS/FreeDOS EDLIN's "type P again for the next
+   page" convention); then confirm a SECOND bare `P` right after
+   continues from where the first left off (`ed_cur_line` should have
+   advanced); and confirm a page boundary at exactly the last line
+   doesn't hang waiting for a nonexistent next page.
 6. **`A`** (append, if present) with the file at/near buffer capacity, to
    exercise `ed_edit_toolong`'s consolidated "Buffer full." path.
 7. **`T`** (transfer another file in) -- both a normal insert and a
