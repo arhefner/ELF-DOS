@@ -2026,46 +2026,26 @@ ed_l_single:
             lbr     ed_list_start
 
 ;------------------------------------------------------------------
-; ed_list_clamp_last: given RD = first (1-based; may legitimately be
-; line_count+1, e.g. an empty file -- that just yields an empty list),
-; compute RD = min(first + page_lines - 1, line_count) -- L/P's own
-; "no explicit end line" default, a single page starting at first.
-; Args:    RD = first
-; Returns: RD = last
+; ed_list_clamp_last: L/P's own "no explicit end line" default range
+; is now the REST OF THE BUFFER (RD = ed_line_count), not a single
+; page (2026-08-24, reversing the 2026-07-31 "cap to first+page_
+; lines-1" decision at the user's own explicit request). This is
+; what actually connects the pause-and-continue mechanic in
+; ed_list_loop below -- which was already correct for a genuinely
+; multi-page range -- to the common bare-invocation case: previously
+; the range was ALWAYS capped to exactly one page for a bare L/P, so
+; there was structurally never anything left for the pause to
+; continue TO. Kept as its own named routine, with the SAME (first
+; in, last out) call signature both of its call sites already use,
+; even though the incoming RD (first) is no longer read -- minimizes
+; the diff at both call sites and keeps the routine's own purpose
+; ("what should L/P's own last line default to") in one place.
+; Args:    RD = first (ignored)
+; Returns: RD = ed_line_count
 ;------------------------------------------------------------------
 ed_list_clamp_last:
-            ghi     rd
-            phi     r8
-            glo     rd
-            plo     r8                  ; R8 = first (stashed across
-                                        ; the page_lines read below)
-            mov     r9, ed_page_lines
-            ldn     r9
-            plo     r9
-            ldi     0
-            phi     r9                  ; R9 = page_lines (16-bit)
-
-            ghi     r8
-            phi     rd
-            glo     r8
-            plo     rd                  ; RD = first (restored)
-            add16   rd, r9
-            dec     rd            ; RD = first + page_lines - 1
-
-            mov     r9, ed_line_count
-            lda     r9
-            phi     r8
-            ldn     r9
-            plo     r8                  ; R8 = line_count
-            call    ed_cmp_rd_r8        ; candidate (RD) >= line_count (R8) ?
-            lbnf    elcl_done           ; DF=0: candidate < line_count,
-                                        ; keep RD as-is
-
-            ghi     r8
-            phi     rd
-            glo     r8
-            plo     rd                  ; RD = line_count (clamped)
-elcl_done:
+            call    ed_ldw_rd
+            dw      ed_line_count
             rtn
 
 ed_list_start:
