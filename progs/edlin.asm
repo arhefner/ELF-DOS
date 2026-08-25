@@ -2917,11 +2917,14 @@ eti_full:
 ;
 ; [#][,#]Roldtext,newtext -- replace every occurrence of oldtext with
 ; newtext on every line in [first,last]. Either field may optionally
-; be wrapped in matching '...'/"..." quotes (stripped, NOT escape-
-; processed -- see the roadmap note on why escapes were deliberately
-; left out: this project's own size budget matters more on a 32K
-; board than typing a raw control byte into a search string). oldtext
-; may not be empty (rejected outright -- an empty needle would match
+; be wrapped in matching '...'/"..." quotes (stripped), and either may
+; contain backslash escape sequences (\t, \x41, \^J, etc. -- processed
+; whether or not the field was quoted; see ed_unescape_field's own
+; header comment further below for the full grammar) so a control
+; byte can be
+; typed into the search/replacement text directly. oldtext (after
+; quote-stripping and escape processing) may not be empty (rejected
+; outright -- an empty needle would match
 ; at every position forever). Default range, matching real edlin
 ; exactly: omitting the first line number starts at cur_line+1 (NOT
 ; cur_line itself, unlike every other command here); omitting the
@@ -3067,12 +3070,13 @@ ed_r_usage:
 
 ;------------------------------------------------------------------
 ; ed_r_parse_args: parse "oldtext,newtext" (each optionally wrapped
-; in matching '...'/"..." quotes -- stripped, NOT escape-processed)
-; at RF, up to the line's own terminating NUL. The delimiting comma
-; must be unquoted -- a comma inside a quoted field is part of that
-; field's own text. RF is never trusted to survive the internal
-; ed_r_strip_quotes calls -- every position needed afterward is
-; re-derived from memory first.
+; in matching '...'/"..." quotes -- both stripped, then backslash-
+; escape-processed, via ed_unescape_field; see its own header comment
+; for the full escape grammar) at RF, up to the line's own terminating
+; NUL. The delimiting comma must be unquoted -- a comma inside a
+; quoted field is part of that field's own text. RF is never trusted
+; to survive the internal ed_unescape_field calls -- every position
+; needed afterward is re-derived from memory first.
 ; Args:    RF = start of R's argument text (right after the 'R')
 ; Returns: DF = 0 with ed_r_old_ptr/len and ed_r_new_ptr/len set;
 ;          DF = 1 on error (no unquoted comma found at all, or the
@@ -3151,12 +3155,12 @@ erpa_s1_found:
             dw      ed_r_new_ptr  ; ed_r_new_ptr = RF (new
                                         ; field start) -- stashed to
                                         ; memory NOW, before the
-                                        ; ed_r_strip_quotes call below
+                                        ; ed_unescape_field call below
                                         ; can clobber RF
 
             mov     rb, ed_r_old_ptr
             mov     r9, ed_r_old_len
-            call    ed_r_strip_quotes
+            call    ed_unescape_field
 
             mov     r9, ed_r_old_len
             lda     r9
@@ -3202,7 +3206,7 @@ erpa_s2_end:
 
             mov     rb, ed_r_new_ptr
             mov     r9, ed_r_new_len
-            call    ed_r_strip_quotes
+            call    ed_unescape_field
 
             clc
             rtn
@@ -3212,15 +3216,107 @@ erpa_err:
             rtn
 
 ;------------------------------------------------------------------
-; ed_r_strip_quotes: given a (ptr,len) pair stored at the two memory
-; addresses passed in, strip a matching leading/trailing quote pair
-; ('...' or "...") if present -- adjusts both fields in place. No
-; effect if the field isn't quoted (or is too short to be). Shared by
-; both the old-text and new-text fields.
+; ed_unescape_field: given a (ptr,len) pair stored at the two memory
+; addresses passed in, (1) strip a matching leading/trailing quote
+; pair ('...' or "...") if present, then (2) process backslash escape
+; sequences ANYWHERE in the (now quote-stripped) field -- adjusts
+; both fields in place. Renamed from the original ed_r_strip_quotes
+; (2026-08-24) once escape processing was added on top of its
+; existing quote-stripping -- the old name no longer described its
+; full scope. Shared by R's old/new-text fields and S's search text.
+;
+; Design decision, confirmed deliberate: escapes are recognized
+; whether or not the field was quoted at all -- \t works equally in
+; `Rold\ttext,new` and `R'old\ttext',new`. Real FreeDOS documents the
+; grammar as a property of the text itself, not of quoting, and this
+; keeps the two phases (quote-strip, then escape-scan) simple and
+; independent rather than needing the scanner to remember whether it
+; started inside a quote.
+;
+; Escape grammar, verbatim from FreeDOS's own edlin documentation --
+; this is the authoritative reference and every form below matches it
+; exactly:
+;   \a  BEL   (7,  $07)      \b  backspace (8,  $08)
+;   \e  ESC   (27, $1B)      \f  form feed (12, $0C)
+;   \t  tab   (9,  $09)      \v  vertical tab (11, $0B)
+;   \"  "     ($22)          \'  '  ($27)
+;   \.  .     (literal period)     \\  \  (literal backslash)
+;   \xXX   2 hex digits (case-insensitive), e.g. \x41 -> 'A'
+;   \dNNN  exactly 3 DECIMAL digits, e.g. \d065 -> 'A'
+;   \OOO   exactly 3 OCTAL digits (each 0-7, no leading letter --
+;          distinguished from \d purely by its first digit being in
+;          0-7 with no 'd'/'D'/'x'/'X'/'^' immediately after the
+;          backslash), e.g. \101 -> 'A' (101 octal = 65 decimal)
+;   \^C    control character via caret-notation, e.g. \^J -> linefeed
+;          (10, $0A) -- the caret's own following character is folded
+;          case-insensitive (both \^j and \^J work) and accepts the
+;          FULL real ASCII control-notation range, $40-$5F (@ through
+;          _), not just A-Z -- so \^@ -> NUL (0) and \^_ -> US (31)
+;          both work too, matching real terminal caret-notation
+;          convention rather than an arbitrarily narrower subset.
+;
+; \xXX/\dNNN/\OOO's own edge-case decisions (all deliberate, since the
+; grammar itself doesn't specify them): \dNNN with a value >255 (e.g.
+; \d999) wraps via plain 8-bit truncation (\d999 -> byte 999&$FF =
+; $E7) -- \OOO can never exceed 255 (\377 octal = 255 decimal, the
+; max representable in 3 octal digits), so no wraparound question
+; arises there. Every one of \x/\d/\O requires EXACTLY the stated
+; digit count, checked against the field's own real remaining length
+; (never reading past the field's own end) -- one digit short (e.g.
+; \x4 with nothing after, or at the very end of the field) is treated
+; as malformed, not a shorter match.
+;
+; Malformed/unrecognized escapes (a trigger character not in the
+; table above, or a multi-char form whose required digits/letter
+; don't validate) fall back to the SAFE default: copy the backslash
+; and whatever single character follows it through UNCHANGED, as
+; plain literal text -- never an error, so no input that used to work
+; as plain text before this feature existed can newly fail. A lone
+; trailing backslash at the very end of the field (nothing follows it
+; at all) is likewise treated as a literal backslash, matching this
+; exact edge case's own established precedent in progs/shell.asm's
+; own tokenizer.
+;
+; Mechanics: two passes, in place, using the same read-cursor/write-
+; cursor convention already established in this file (and in
+; progs/shell.asm's own tokenizer) -- every escape form collapses 2+
+; source bytes into exactly 1 output byte (quote characters themselves
+; are dropped entirely too), so the write cursor never exceeds the
+; read cursor and the whole operation needs no separate buffer.
+;
+; Verification: independently simulated in Python before any of this
+; assembly was trusted -- first a plain value-level reference model
+; (all 13 forms, both quote styles, mixed-case hex/octal/control
+; letters, every malformed/edge case above, and a plain no-escape
+; string as a pure regression check), then a from-scratch mechanical
+; 1802 instruction-level simulator executing the LITERAL planned
+; instruction sequence (not a re-derived model of intent) across the
+; same cases plus targeted boundary values -- both passed clean before
+; this was written into the real file. The mechanical simulator alone
+; caught one real bug the value-level model could not have: the
+; shared fallback path (below) originally re-read the escape trigger
+; character (c2) from R9, trusting it to still hold the value captured
+; at dispatch time -- but euf_hexdigit/euf_dec_accum/euf_do_ctrl all
+; legitimately reuse R9 as their own internal scratch on the way to a
+; possible fallback (e.g. \x4g: digit1='4' validates and calls into
+; euf_hexdigit, clobbering R9, before digit2='g' fails and falls back
+; -- the fallback then read euf_hexdigit's own leftover scratch value
+; instead of the real 'x'). Fixed by having the fallback re-derive c2
+; fresh from *(RF+1) -- RF itself is provably unmodified up to that
+; point on every path into the fallback -- rather than ever trusting
+; R9 to have survived. A second, purely design-time bug (not shipped)
+; was also caught before any assembly was written: an early draft
+; considered using R8 as euf_hexdigit's own internal scratch, which
+; would have collided with R8's role here as END (the field's own
+; upper scan bound, live across the whole outer loop) -- moved to R9
+; instead, which is safe since euf_hexdigit is only ever reached after
+; c2 (also normally kept in R9) has already served its dispatch
+; purpose for that call.
+;
 ; Args:    RB = address of the 2-byte pointer field
 ;          R9 = address of the 2-byte length field
 ;------------------------------------------------------------------
-ed_r_strip_quotes:
+ed_unescape_field:
             mov     ra, rb              ; stash the ORIGINAL field
             mov     rc, r9              ; addresses -- needed for the
                                         ; write-back at the end, since
@@ -3232,13 +3328,13 @@ ed_r_strip_quotes:
             ldn     r9
             plo     rd                  ; RD = len
             ghi     rd
-            lbnz    ersq_check          ; high byte nonzero: len is
+            lbnz    euf_check           ; high byte nonzero: len is
                                         ; way more than 2, definitely
                                         ; long enough
             glo     rd
             smi     2
-            lbnf    ersq_done           ; len < 2: can't be quoted
-ersq_check:
+            lbnf    euf_strip_done      ; len < 2: can't be quoted
+euf_check:
             lda     rb
             phi     r8
             ldn     rb
@@ -3248,13 +3344,13 @@ ersq_check:
             ldn     rf
             plo     r7                  ; R7.0 = first char
             xri     $27
-            lbz     ersq_is_quote
+            lbz     euf_is_quote
             glo     r7
             xri     $22
-            lbz     ersq_is_quote
-            lbr     ersq_done           ; first char isn't a quote
+            lbz     euf_is_quote
+            lbr     euf_strip_done      ; first char isn't a quote
 
-ersq_is_quote:
+euf_is_quote:
             mov     rf, r8
             add16   rf, rd
             dec     rf                  ; RF = last char's address
@@ -3262,37 +3358,21 @@ ersq_is_quote:
             str     r2
             glo     r7
             xor
-            lbnz    ersq_done           ; last char != first char
+            lbnz    euf_strip_done      ; last char != first char
 
             inc     r8            ; ptr++
             dec     rd
             dec     rd            ; len -= 2
 
-            ; BUG FIX (self-review during this size-reduction pass,
-            ; caught before ever hardware-testing): RA/RC here are
-            ; RUNTIME POINTER VALUES (the caller's own output pointer/
-            ; length cells, whose addresses the caller already loaded
-            ; into RA/RC before calling), not symbolic addresses -- a
-            ; genuine "mov rf, ra" / "mov rf, rc" register-to-register
-            ; copy (RF := whatever RA/RC currently point at). An
-            ; earlier, overly-generic version of the mechanical STORE-
-            ; pattern transform script (used to introduce ed_stw_*
-            ; elsewhere in this file) matched this exact site by
-            ; mistake -- its address-extraction regex accepted ANY
-            ; non-whitespace token after "mov rf,", including a bare
-            ; register name, producing "call ed_stw_r8 / dw ra". Since
-            ; ed_stw_*'s whole inline-operand mechanism only works for
-            ; a real, compile-time-constant address, "dw ra" silently
-            ; assembled to the literal 2-byte value $000A (RA's own
-            ; register INDEX, confirmed via direct .lst byte decode --
-            ; NOT its runtime contents), which would have corrupted
-            ; this store into writing through address $000A instead of
-            ; wherever RA actually points. Caught by a dedicated post-
-            ; hoc scan of every ed_ldw_*/ed_stw_*/ed_cmp_* call site's
-            ; own "dw" operand for a register-name false match -- the
-            ; only such instance found in this file (2 of the 333
-            ; converted sites, both here). Reverted to this original,
-            ; correct register-indirect form.
+            ; RA/RC here are RUNTIME POINTER VALUES (the caller's own
+            ; output pointer/length cells, whose addresses the caller
+            ; already loaded into RA/RC before calling), not symbolic
+            ; addresses -- a genuine "mov rf, ra" / "mov rf, rc"
+            ; register-to-register copy. See the git history for this
+            ; exact site's own earlier gotcha (a mechanical transform
+            ; script once mismatched this for an ed_stw_* inline-
+            ; operand call, which needs a real compile-time-constant
+            ; address, not a runtime register value).
             mov     rf, ra
             ghi     r8
             str     rf
@@ -3307,8 +3387,487 @@ ersq_is_quote:
             glo     rd
             str     rf
 
-ersq_done:
+euf_strip_done:
+            ; --- phase 2: escape-scan the (now quote-stripped) field,
+            ; in place, from ed_r_old_ptr/len-style (ptr,len) cells
+            ; whose ADDRESSES are still in RA (ptr cell) / RC (len
+            ; cell) from phase 1 above ---
+            lda     ra
+            phi     r8
+            ldn     ra
+            plo     r8                  ; R8 = field ptr (P)
+
+            mov     r7, rc
+            lda     r7
+            phi     r9
+            ldn     r7
+            plo     r9                  ; R9 = field len (L)
+
+            ghi     r8
+            phi     rf
+            glo     r8
+            plo     rf                  ; RF = read cursor = P
+            ghi     r8
+            phi     rb
+            glo     r8
+            plo     rb                  ; RB = write cursor = P
+
+            mov     r7, euf_start_ptr
+            ghi     rb
+            str     r7
+            inc     r7
+            glo     rb
+            str     r7                  ; euf_start_ptr = P (saved so
+                                        ; euf_scan_done below can
+                                        ; recompute the final length
+                                        ; as write_cursor - P)
+
+            add16   r8, r9              ; R8 = END = P + L
+
+euf_loop:
+            glo     r8
+            str     r2
+            glo     rf
+            sm
+            ghi     r8
+            str     r2
+            ghi     rf
+            smb
+            lbdf    euf_scan_done       ; RF >= END: done
+
+            ldn     rf
+            xri     $5C                 ; '\'
+            lbnz    euf_copy1           ; not a backslash: plain copy
+
+            mov     r7, rf
+            add16   r7, 2
+            glo     r7
+            str     r2
+            glo     r8
+            sm
+            ghi     r7
+            str     r2
+            ghi     r8
+            smb
+            lbnf    euf_trailing_bs     ; RF+2 > END: no byte after
+                                        ; the backslash at all
+
+            mov     r7, rf
+            add16   r7, 1
+            ldn     r7
+            plo     r9                  ; R9.0 = c2 (the escape
+                                        ; trigger character)
+
+            mov     ra, euf_simple_table
+euf_simple_scan:
+            lda     ra
+            lbz     euf_check_x         ; table exhausted, 0
+                                        ; terminator hit
+            str     r2
+            glo     r9
+            xor
+            lbz     euf_simple_hit
+            inc     ra                  ; skip this entry's output
+                                        ; byte, advance to next trigger
+            lbr     euf_simple_scan
+
+euf_simple_hit:
+            lda     ra                  ; output byte for this trigger
+            str     rb
+            inc     rb
+            add16   rf, 2               ; consumed backslash + trigger
+            lbr     euf_loop
+
+euf_check_x:
+            glo     r9
+            ani     $DF                 ; fold to uppercase for the
+            xri     'X'                 ; case-insensitive \x/\X check
+            lbz     euf_do_hex
+
+            glo     r9
+            ani     $DF
+            xri     'D'
+            lbz     euf_do_dec
+
+            glo     r9
+            call    euf_decdigit        ; is c2 itself a 0-9 digit?
+            lbnf    euf_check_caret     ; not a digit at all: not \O
+            smi     8
+            lbdf    euf_check_caret     ; digit is 8 or 9: not octal,
+                                        ; not \O either
+            lbr     euf_do_oct
+
+euf_check_caret:
+            glo     r9
+            xri     '^'
+            lbz     euf_do_ctrl
+
+euf_fallback_2:
+            ; Malformed/unrecognized escape -- copy the backslash and
+            ; the trigger character through unchanged as literal text.
+            ; c2 is deliberately RE-DERIVED here from *(RF+1) rather
+            ; than trusted in R9 -- see this routine's own header
+            ; comment for why (euf_hexdigit/euf_dec_accum/euf_do_ctrl
+            ; all legitimately reuse R9 as scratch on the way here).
+            ; RF itself is guaranteed unmodified up to this point --
+            ; every path into this label runs before any add16 rf,K.
+            ldi     $5C
+            str     rb
+            inc     rb
+            mov     r7, rf
+            add16   r7, 1
+            ldn     r7
+            str     rb
+            inc     rb
+            add16   rf, 2
+            lbr     euf_loop
+
+euf_do_hex:
+            ; \xXX: need exactly 4 bytes total (\, x, and 2 hex
+            ; digits) still within the field
+            mov     r7, rf
+            add16   r7, 4
+            glo     r7
+            str     r2
+            glo     r8
+            sm
+            ghi     r7
+            str     r2
+            ghi     r8
+            smb
+            lbnf    euf_fallback_2      ; RF+4 > END: not enough room
+
+            mov     r7, rf
+            add16   r7, 2
+            ldn     r7
+            call    euf_hexdigit
+            lbnf    euf_fallback_2
+            plo     ra                  ; RA.0 = digit1 value
+
+            mov     r7, rf
+            add16   r7, 3
+            ldn     r7
+            call    euf_hexdigit
+            lbnf    euf_fallback_2
+
+            str     r2                  ; stage digit2
+            glo     ra
+            shl
+            shl
+            shl
+            shl                         ; D = digit1 << 4
+            or                          ; D = (digit1<<4) | digit2
+            str     rb
+            inc     rb
+            add16   rf, 4
+            lbr     euf_loop
+
+euf_do_dec:
+            ; \dNNN: need exactly 5 bytes total (\, d, 3 decimal
+            ; digits) still within the field
+            mov     r7, rf
+            add16   r7, 5
+            glo     r7
+            str     r2
+            glo     r8
+            sm
+            ghi     r7
+            str     r2
+            ghi     r8
+            smb
+            lbnf    euf_fallback_2
+
+            ldi     0
+            phi     rd
+            plo     rd                  ; RD = 0 (running value)
+
+            mov     r7, rf
+            add16   r7, 2
+            ldn     r7
+            call    euf_decdigit
+            lbnf    euf_fallback_2
+            call    euf_dec_accum       ; RD = RD*10 + digit
+
+            mov     r7, rf
+            add16   r7, 3
+            ldn     r7
+            call    euf_decdigit
+            lbnf    euf_fallback_2
+            call    euf_dec_accum
+
+            mov     r7, rf
+            add16   r7, 4
+            ldn     r7
+            call    euf_decdigit
+            lbnf    euf_fallback_2
+            call    euf_dec_accum
+
+            glo     rd                  ; low byte only -- deliberate
+                                        ; 8-bit truncation for a value
+                                        ; > 255 (see header comment)
+            str     rb
+            inc     rb
+            add16   rf, 5
+            lbr     euf_loop
+
+euf_do_oct:
+            ; \OOO: need exactly 4 bytes total (\ + 3 octal digits,
+            ; NO letter -- c2 itself is already the first octal digit,
+            ; already confirmed 0-7 by the dispatch check above) still
+            ; within the field
+            mov     r7, rf
+            add16   r7, 4
+            glo     r7
+            str     r2
+            glo     r8
+            sm
+            ghi     r7
+            str     r2
+            ghi     r8
+            smb
+            lbnf    euf_fallback_2
+
+            ldi     0
+            phi     rd
+            plo     rd                  ; RD = 0 (running value)
+
+            glo     r9                  ; digit1 = c2 (already
+                                        ; confirmed 0-7 by dispatch)
+            call    euf_oct_accum       ; RD = RD*8 + digit
+
+            mov     r7, rf
+            add16   r7, 2
+            ldn     r7
+            call    euf_decdigit
+            lbnf    euf_fallback_2
+            smi     8
+            lbdf    euf_fallback_2      ; digit2 is 8 or 9: not octal
+            adi     8                   ; undo the smi 8 to recover
+                                        ; the real digit value
+            call    euf_oct_accum
+
+            mov     r7, rf
+            add16   r7, 3
+            ldn     r7
+            call    euf_decdigit
+            lbnf    euf_fallback_2
+            smi     8
+            lbdf    euf_fallback_2      ; digit3 is 8 or 9: not octal
+            adi     8
+            call    euf_oct_accum
+
+            glo     rd                  ; \377 (max) = 255, always
+                                        ; fits in one byte -- no
+                                        ; truncation possible here
+            str     rb
+            inc     rb
+            add16   rf, 4
+            lbr     euf_loop
+
+euf_do_ctrl:
+            ; \^C: need exactly 3 bytes total (\, ^, and the control
+            ; letter/character) still within the field
+            mov     r7, rf
+            add16   r7, 3
+            glo     r7
+            str     r2
+            glo     r8
+            sm
+            ghi     r7
+            str     r2
+            ghi     r8
+            smb
+            lbnf    euf_fallback_2
+
+            mov     r7, rf
+            add16   r7, 2
+            ldn     r7
+            ani     $DF                 ; case-fold c3 (safe -- every
+                                        ; letter in the real $40-$5F
+                                        ; control-notation range is
+                                        ; already uppercase-shaped, and
+                                        ; the non-letter members of
+                                        ; that range are untouched by
+                                        ; this mask too)
+            plo     r9                  ; R9.0 = folded c3
+
+            smi     $40
+            lbnf    euf_fallback_2      ; folded c3 < $40: out of range
+            smi     $20
+            lbdf    euf_fallback_2      ; folded c3 >= $60: out of
+                                        ; range ($40+$20=$60)
+
+            glo     r9
+            xri     $40                 ; @ through _ ($40-$5F) maps
+                                        ; to control codes $00-$1F
+            str     rb
+            inc     rb
+            add16   rf, 3
+            lbr     euf_loop
+
+euf_trailing_bs:
+            ; single backslash with nothing (or not enough) after it
+            ; -- treated as a literal backslash
+            ldi     $5C
+            str     rb
+            inc     rb
+            add16   rf, 1
+            lbr     euf_loop
+
+euf_copy1:
+            ldn     rf
+            str     rb
+            inc     rb
+            add16   rf, 1
+            lbr     euf_loop
+
+euf_scan_done:
+            mov     r7, euf_start_ptr
+            lda     r7
+            phi     r8
+            ldn     r7
+            plo     r8                  ; R8 = P (reloaded)
+
+            mov     rd, rb              ; RD = final write cursor
+            call    ed_sub_rd_r8_to_r9  ; R9 = RD - R8 = new_len
+                                        ; (already-existing shared
+                                        ; helper -- see its own header
+                                        ; comment above)
+
+            ghi     r9
+            str     rc
+            inc     rc
+            glo     r9
+            str     rc                  ; write new_len back through
+                                        ; the caller's own length cell
+
             rtn
+
+;------------------------------------------------------------------
+; euf_hexdigit: is D a valid hex digit (0-9, A-F, a-f)? Case-
+; insensitive. Used only from euf_do_hex.
+; Args:    D = candidate character
+; Returns: DF = 1 and D = numeric value (0-15) if valid;
+;          DF = 0 (D undefined) if not
+; Modifies: R7, R9 (internal scratch -- deliberately NOT R8, which is
+;          END, live across the whole outer scan loop this is called
+;          from; R9 is safe since by the time this runs, c2's own
+;          dispatch role in R9 is already finished for this call)
+;------------------------------------------------------------------
+euf_hexdigit:
+            plo     r7                  ; stash the original char
+            smi     '0'
+            lbnf    euf_hexd_bad
+            plo     r9
+            smi     10
+            lbnf    euf_hexd_decimal    ; '0'-'9'
+            glo     r7
+            smi     'A'
+            lbnf    euf_hexd_bad
+            plo     r9
+            smi     6
+            lbnf    euf_hexd_upper      ; 'A'-'F'
+            glo     r7
+            smi     'a'
+            lbnf    euf_hexd_bad
+            plo     r9
+            smi     6
+            lbdf    euf_hexd_bad
+            glo     r9                  ; 'a'-'f'
+            adi     10
+            stc
+            rtn
+euf_hexd_upper:
+            glo     r9
+            adi     10
+            stc
+            rtn
+euf_hexd_decimal:
+            glo     r9
+            stc
+            rtn
+euf_hexd_bad:
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; euf_decdigit: is D a valid decimal digit (0-9)? Used from
+; euf_do_dec/euf_do_oct (both need "is this byte a 0-9 digit" --
+; euf_do_oct additionally range-checks the result down to 0-7 itself,
+; since 8/9 are decimal-valid but not octal-valid).
+; Args:    D = candidate character
+; Returns: DF = 1 and D = numeric value (0-9) if valid;
+;          DF = 0 (D undefined) if not
+; Modifies: R7
+;------------------------------------------------------------------
+euf_decdigit:
+            smi     '0'
+            lbnf    euf_decd_bad
+            plo     r7
+            smi     10
+            lbdf    euf_decd_bad
+            glo     r7
+            stc
+            rtn
+euf_decd_bad:
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; euf_dec_accum: RD = RD*10 + D, via RD*8 + RD*2 + D (shift-based,
+; no multiply instruction on this CPU). Used from euf_do_dec, once
+; per decimal digit.
+; Args:    D = digit value to accumulate (0-9); RD = running value
+; Returns: RD = RD*10 + D
+; Modifies: R7, R9, RD
+;------------------------------------------------------------------
+euf_dec_accum:
+            plo     r7                  ; stash the digit
+            ldi     0
+            phi     r7                  ; R7 = digit (zero-extended)
+            mov     r9, rd
+            shl16   r9
+            shl16   r9
+            shl16   r9                  ; R9 = RD*8
+            shl16   rd                  ; RD = RD*2
+            add16   rd, r9              ; RD = RD*2 + RD*8 = RD*10
+            add16   rd, r7              ; RD = RD*10 + digit
+            rtn
+
+;------------------------------------------------------------------
+; euf_oct_accum: RD = RD*8 + D. Used from euf_do_oct, once per octal
+; digit -- simpler than euf_dec_accum since ×8 is a pure shift with
+; no ×2 term to add in.
+; Args:    D = digit value to accumulate (0-7); RD = running value
+; Returns: RD = RD*8 + D
+; Modifies: R7, RD
+;------------------------------------------------------------------
+euf_oct_accum:
+            plo     r7                  ; stash the digit
+            ldi     0
+            phi     r7                  ; R7 = digit (zero-extended)
+            shl16   rd
+            shl16   rd
+            shl16   rd                  ; RD = RD*8
+            add16   rd, r7              ; RD = RD*8 + digit
+            rtn
+
+; euf_simple_table: (trigger char, output byte) pairs for the 10
+; single-character escapes, 0-terminated.
+euf_simple_table:
+            db      'a', $07
+            db      'b', $08
+            db      'e', $1B
+            db      'f', $0C
+            db      't', $09
+            db      'v', $0B
+            db      $22, $22            ; \" -> "
+            db      $27, $27            ; \' -> '
+            db      '.', '.'
+            db      $5C, $5C            ; \\ -> \
+            db      0
+
+euf_start_ptr:  dw      0
 
 ;------------------------------------------------------------------
 ; ed_r_process_line: replace every occurrence of ed_r_old_ptr/len
@@ -4545,19 +5104,26 @@ ed_wsave_no_name:
 
 ; [range][?]S<text> -- case-sensitive literal substring search,
 ; matching FreeDOS edlin's own "[#][,#][?]s$" syntax (2026-07-20).
-; Range defaults to (cur_line+1, line_count) -- NOT the whole file --
-; so a plain "S" naturally continues forward from wherever the last
-; match (or edit) left cur_line; "Not found." if cur_line is already
-; the last line, rather than a range error. An explicit [n] still
-; searches from n to the end, same as before. Stops at and displays
-; the FIRST matching line in range, setting cur_line to it; "Not
-; found." if nothing matches. With the "?" flag, prompts "O.K.? "
-; after landing on a match -- answering Y stops there (same as the
-; no-"?" case); anything else resumes searching from the next line
-; through the end of the same range, so "1?sfoo" then repeated
-; "N" answers steps through every occurrence until "Not found." (no
-; need to remember/retype the search text, since a bare "S" always
-; means "search again from here" once cur_line has advanced).
+; text may optionally be wrapped in matching '...'/"..." quotes
+; (stripped) and/or contain backslash escape sequences (2026-08-24 --
+; previously S had no quote/escape support at all, unlike R; now
+; shares the same ed_unescape_field logic R's own oldtext/newtext
+; fields use -- see its own header comment above for the full
+; grammar), so a control byte or a substring containing a leading/
+; trailing space can be searched for directly. Range defaults to
+; (cur_line+1, line_count) -- NOT the whole file -- so a plain "S"
+; naturally continues forward from wherever the last match (or edit)
+; left cur_line; "Not found." if cur_line is already the last line,
+; rather than a range error. An explicit [n] still searches from n to
+; the end, same as before. Stops at and displays the FIRST matching
+; line in range, setting cur_line to it; "Not found." if nothing
+; matches. With the "?" flag, prompts "O.K.? " after landing on a
+; match -- answering Y stops there (same as the no-"?" case); anything
+; else resumes searching from the next line through the end of the
+; same range, so "1?sfoo" then repeated "N" answers steps through
+; every occurrence until "Not found." (no need to remember/retype the
+; search text, since a bare "S" always means "search again from here"
+; once cur_line has advanced).
 ed_cmd_s:
             inc     rf                  ; skip the 'S' letter itself
             call    f_ltrim             ; skip an optional space before
@@ -4581,6 +5147,11 @@ ed_cmd_s:
                                         ; code below reuses RD heavily
             call    ed_stw_r8
             dw      ed_s_text_len
+
+            mov     rb, ed_s_text_ptr   ; strip quotes + process
+            mov     r9, ed_s_text_len   ; escapes in place -- same
+            call    ed_unescape_field   ; call R's own fields already
+                                        ; go through (ed_r_parse_args)
 
             ; first = have_n1 ? n1 : 1
             mov     rf, ed_have_n1

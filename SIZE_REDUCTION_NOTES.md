@@ -216,6 +216,103 @@ nothing rather than erroring; n2 given as 0 or out of range still hits
 the existing, unmodified error path. Sweeps and full build clean;
 `bin/edlin` 12904->12919 bytes (+15).
 
+## R/S backslash escape sequences (2026-08-24) -- new functionality, not a fix
+
+Coordinator-directed follow-on to the L/P work above, once this branch had
+freed real size elsewhere: R's oldtext/newtext fields have always stripped
+matching `'...'`/`"..."` quotes but never processed escape sequences inside
+them (the routine's own old header comment explicitly attributed this to
+"this project's own size budget"); S had **no** quote/escape support at
+all. Both now share one extended routine, renamed
+`ed_r_strip_quotes` -> `ed_unescape_field` to describe its widened scope
+(every call site and header comment updated to match).
+
+**Grammar, taken verbatim from FreeDOS's own edlin documentation** (the
+authoritative reference for this feature -- see `ed_unescape_field`'s own
+header comment in `progs/edlin.asm` for the full table): `\a` `\b` `\e`
+`\f` `\t` `\v` `\"` `\'` `\.` `\\` (10 single-character forms), `\xXX`
+(2 hex digits, case-insensitive), `\dNNN` (exactly 3 DECIMAL digits),
+`\OOO` (exactly 3 OCTAL digits, no leading letter), `\^C` (caret-notation
+control character, e.g. `\^J` -> linefeed).
+
+**Design decisions left to my own judgment (per the coordinator's own
+explicit delegation), documented here and in the routine's own header:**
+- **Escapes apply regardless of quoting.** `\t` works equally in
+  `Rold\ttext,new` and `R'old\ttext',new` -- FreeDOS documents the grammar
+  as a property of the text itself, not of quoting, and this keeps the
+  two phases (quote-strip, then escape-scan) simple and independent.
+- **`\dNNN` overflow (>255) wraps via plain 8-bit truncation** (`\d999` ->
+  `999 & $FF` = `$E7`). `\OOO` can never overflow (`\377` octal = 255
+  decimal, the max representable in 3 octal digits), so no wraparound
+  question arises there.
+- **`\^C` accepts the FULL real ASCII control-notation range, `$40`-`$5F`
+  (`@` through `_`), not just `A`-`Z`**, and folds case-insensitively
+  (`\^j` and `\^J` both work) -- matches real terminal caret-notation
+  convention (`\^@` -> NUL, `\^_` -> US) rather than an arbitrarily
+  narrower letters-only subset.
+- **Unrecognized/malformed escapes fall back to the safe default**: copy
+  the backslash and whatever single character follows it through
+  unchanged, as plain literal text -- never an error, so no input that
+  used to work as plain text before this feature existed can newly fail.
+  A trailing lone backslash (nothing follows it at all) is likewise a
+  literal backslash, matching this exact edge case's own established
+  precedent in `progs/shell.asm`'s own tokenizer.
+
+**Mechanics**: the same in-place read-cursor/write-cursor convention
+already established in this file and in `progs/shell.asm`'s own
+tokenizer -- every escape form collapses 2+ source bytes into exactly 1
+output byte (quote characters are dropped entirely too), so the write
+cursor never exceeds the read cursor and no separate buffer is needed.
+
+**Verification, held to at least the rigor of the L/P design fix above,
+per the coordinator's own explicit instruction** (this is comparable in
+scope/risk to `progs/shell.asm`'s own quote/escape tokenizer, which had 2
+real hardware-found bugs despite extensive review at the time):
+1. An independent Python **value-level** reference model of the complete
+   grammar (all 13 forms, both quote styles, mixed-case hex/octal/control
+   letters, an unrecognized escape, a trailing lone backslash, boundary
+   values for `\x`/`\d`/`\O`, and a plain no-escape string as a pure
+   regression check) -- confirmed matching the spec exactly before any
+   assembly was trusted.
+2. A from-scratch **mechanical 1802 instruction-level simulator**
+   (`GLO`/`GHI`/`PLO`/`PHI`/`SM`/`SMB`/`ADD`/`ADC`/`SHL`/`SHLC`/`ADD16`/
+   `SUB16`/`CALL`/`RTN` with real `D`/`DF` semantics) executing the
+   LITERAL planned instruction sequence -- not a re-derived model of
+   intent -- across all 58 of the same cases. This second layer is what
+   actually caught the two real bugs below; the value-level model alone
+   would not have.
+3. A full manual register-liveness re-trace of the whole routine against
+   a fresh read, after both simulator layers passed clean.
+
+**Two real bugs found and fixed before this ever reached the real
+project file:**
+1. **Design-time only, never assembled**: an early draft planned to use
+   `R8` as `euf_hexdigit`'s own internal scratch -- would have collided
+   with `R8`'s role as `END` (the field's own upper scan bound, live
+   across the whole outer loop `euf_hexdigit` is called from). Moved to
+   `R9` instead before ever writing the routine.
+2. **A real, load-bearing bug caught by the mechanical simulator, not the
+   value-level model**: the shared malformed-escape fallback path
+   (`euf_fallback_2`) originally re-read the escape trigger character
+   (`c2`) from `R9`, trusting it to still hold the value captured at
+   dispatch time. But `euf_hexdigit`/`euf_dec_accum`/`euf_do_ctrl` all
+   legitimately reuse `R9` as their own internal scratch on the way to a
+   possible fallback -- e.g. `\x4g`: digit1='4' validates and calls into
+   `euf_hexdigit` (clobbering `R9`) before digit2='g' fails and falls
+   back, so the fallback read `euf_hexdigit`'s own leftover scratch value
+   instead of the real `'x'`. 55 of 58 mechanical-simulator cases failed
+   with this bug in place, every failure showing the correct backslash
+   followed by a corrupted second byte. Fixed by having the fallback
+   re-derive `c2` fresh from `*(RF+1)` instead -- `RF` itself is provably
+   unmodified up to that point on every path into the fallback -- rather
+   than ever trusting `R9` to have survived. All 58 cases pass with the
+   fix in place.
+
+**Byte cost, given the original size-budget concern this feature reverses
+part of**: `bin/edlin` 12919 -> 13727 bytes, **+808 bytes**. Pure
+userland (`progs/edlin.asm` only) -- zero kernel-resident cost, zero
+impact on this branch's kernel-shrink sibling work.
+
 ## What changed, and why
 
 `progs/edlin.asm` is a large, flat (no `proc`/`endp`) file full of small,
@@ -520,3 +617,46 @@ boundaries, no-match search have all been real historical bug sources):
     invocation) to exercise the shared helpers' register-liveness across
     consecutive, differently-shaped commands in the same run, not just in
     isolation.
+
+### R/S backslash escape sequences (2026-08-24)
+
+New checklist items for `ed_unescape_field` -- exercise each item below
+in BOTH an R command (`Roldtext,newtext`) and an S command (`Stext`),
+since both now share this same routine but reach it from different call
+sites:
+
+15. **Each of the 13 escape forms individually**: `\a`, `\b`, `\e`, `\f`,
+    `\t`, `\v`, `\"`, `\'`, `\.`, `\\`, `\xXX` (both a lower- and an
+    upper-case hex digit, e.g. `\x4a` and `\x4A`), `\dNNN`, `\OOO` (an
+    octal value like `\101` -> 'A', distinct from the identical-looking
+    decimal digits case), and `\^C` (a letter like `\^J`, AND a non-
+    letter like `\^@`/`\^_`, AND the same letter lowercased, `\^j`).
+16. **A quoted string with NO escapes** (e.g. `R'plain',other` /
+    `S"plain"`) -- pure regression check that quote-stripping alone still
+    works exactly as before this feature.
+17. **An UNQUOTED string WITH escapes** (e.g. `Rold\ttext,new` /
+    `Sfoo\tbar`, no surrounding quotes at all) -- confirms the deliberate
+    "escapes apply regardless of quoting" scope decision, not just the
+    quoted case.
+18. **Malformed/edge cases**: a trailing lone backslash at the very end
+    of the text (should appear as a literal `\`); an unrecognized escape
+    trigger like `\z` or `\9` (should appear as literal `\z`/`\9`
+    unchanged); `\x` with only 1 hex digit or none at all before the
+    text ends (literal, not a partial match); `\d` with only 1-2 decimal
+    digits; a boundary value for each numeric form (`\x00`, `\xff`,
+    `\d000`, `\d255`, `\000`, `\377`); and `\d999` specifically, to
+    confirm the documented 8-bit-wraparound behavior (`999 & $FF` =
+    231 = `$E7`) rather than a crash or a saturated/clamped value.
+19. **`S""` (an explicit empty search text via quotes)** -- a new,
+    previously-unreachable case now that S has quote support at all
+    (previously an empty search text could only be reached by typing
+    nothing after `S`, which is intercepted earlier as "nothing to
+    search for" before ever reaching the quote/escape logic). Confirmed
+    by static trace to match immediately at the very start of the next
+    line in range (a zero-length needle matches everywhere) rather than
+    crash or loop -- worth a real hardware confirmation of this exact,
+    slightly unusual but well-defined behavior.
+20. For R specifically: confirm an escape sequence works correctly in
+    BOTH the oldtext and newtext fields independently (e.g.
+    `Rfoo,\tbar` and `R\tfoo,bar` on the same line), not just one or the
+    other.
