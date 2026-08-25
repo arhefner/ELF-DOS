@@ -177,6 +177,45 @@ specifically calls for the explicit multi-line-range scenario (the one
 path neither this pass nor the original investigation could exercise
 without real hardware).
 
+### A real bug found by hardware-testing the design fix: n2 without n1
+
+The first hardware round of the three-part design fix above surfaced a
+real, separate bug (coordinator-traced, implemented and verified here):
+**a range with the second line number given but the first omitted was
+silently ignored**. Concretely, from `cur_line=134`, typing `,145p`
+listed line 134 through the whole rest of the buffer instead of
+stopping at 145 -- `ed_n2` was never even read. Root cause:
+`ed_cmd_l`/`ed_cmd_p`'s own dispatch only ever checked `ed_have_n1` to
+decide whether to route into the explicit-range handler; `ed_have_n2`
+was never consulted at that decision point, so "n2 given, n1 not"
+always fell straight through to the fully-default computation.
+
+Fixed entirely inside `ed_lp_have_default` (reached only when n1 was
+NOT given): after writing `ed_list_i` from the default first exactly as
+before, it now checks `ed_have_n2` before deciding what "last" should
+be -- if n2 was also omitted, behavior is byte-for-byte unchanged; if
+n2 WAS given, it jumps into a new shared label, `ed_lp_read_n2`, placed
+at the exact point `ed_lp_n1_given`'s own existing n2-read/validate
+code already lived, so the validation logic (reject 0, check against
+`ed_line_count`) isn't duplicated between the literal-n1 and defaulted-
+n1 paths. That shared code depends on `R8` already holding
+`ed_line_count` -- true for the literal-n1 path only as an
+undocumented side effect of an earlier `ed_cmp_rd_le` call (unchanged,
+still relied on); loaded explicitly and freshly for the new path
+instead, since it never makes that call. No `n2 < first` cross-check
+was added -- `ed_list_loop`'s own top-of-loop range check already
+handles that for free, the same mechanism a literal reversed range
+(`145,100l`) already relies on.
+
+Traced against concrete numbers for every required case before
+assembling: bare P/L, n1-only, and both-given are all provably
+untouched (routed through code this fix never modifies); n2-only for
+both P and L is the fix itself (confirmed `,145p` from `cur_line=134`
+now lists 134..145); n2 below the computed default first prints
+nothing rather than erroring; n2 given as 0 or out of range still hits
+the existing, unmodified error path. Sweeps and full build clean;
+`bin/edlin` 12904->12919 bytes (+15).
+
 ## What changed, and why
 
 `progs/edlin.asm` is a large, flat (no `proc`/`endp`) file full of small,
@@ -428,7 +467,17 @@ boundaries, no-match search have all been real historical bug sources):
    one page (e.g. `L 1,50` on a file with 50+ lines, `ed_page_lines`
    defaults to 23) the same way, and confirm a range whose last page is
    a PARTIAL page does NOT show a spurious extra pause/prompt after
-   that final short batch.
+   that final short batch. **Specifically test `,145l`/`,145p` (second
+   line number given, first OMITTED)** -- from a known `cur_line`, this
+   should list from the DEFAULT first (centered for `L`, `cur_line`
+   itself for `P`) through line 145, not through the whole rest of the
+   buffer (the exact regression the 2026-08-24 hardware round found and
+   this branch's own latest commit fixes). Also confirm the same form
+   with an n2 numerically LESS than the computed default first (e.g.
+   `,50p` from `cur_line=134`) prints nothing and returns cleanly to
+   the prompt, and with an out-of-range or zero n2 (e.g. `,0p`) still
+   prints "Line number out of range." rather than silently doing
+   nothing or crashing.
 4. **Bare-number single-line edit**: edit the *first* line, the *last*
    line, and (if buffer has exactly one line) the only line -- confirm
    Enter-alone leaves it unchanged and real replacement text works,
