@@ -61,12 +61,11 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $4400       ; user programs load here (see kernel.inc;
-                                    ; == KERN_LOAD in boot/mbr.asm again as of
-                                    ; 2026-08-23 -- moved back up from $4300,
-                                    ; which left the RUN_*-relay region below
-                                    ; PROG_BASE overlapping live kernel code;
-                                    ; see kernel.inc's own PROG_BASE comment)
+PROG_BASE:      equ     $4200       ; user programs load here (see kernel.inc;
+                                    ; moved $4400->$4200 2026-08-25 once a
+                                    ; real kernel size-reduction pass freed
+                                    ; real margin back; see kernel.inc's own
+                                    ; PROG_BASE comment for the full history)
 LOADER_ARGS:    equ     PROG_BASE-4 ; word 0 = mem_base, word 1 = mem_top
 
 ; LINE_BUF/RUN_ARGC/RUN_ARGV_TABLE/RUN_PATH: the shell-as-a-program

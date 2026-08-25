@@ -109,9 +109,28 @@
 ; reduction pass (freeing bytes, not just relabeling the boundary) --
 ; not attempted here, since this fix is about stopping live corruption
 ; on the current build, not re-litigating the space tradeoff.
-PROG_BASE:      equ     $4400       ; user programs load here -- back
-                                    ; to == KERN_LOAD (boot/mbr.asm,
-                                    ; $4400) as of 2026-08-23, see above
+;
+; MOVED to $4200 (2026-08-25), now that a real size-reduction pass has
+; actually happened: the kernel-shrink-agent branch (7 commits, purely
+; mechanical consolidation, hardware-confirmed, merged same day) freed
+; 710 bytes -- Highest address $42e4 -> $401e -- restoring real margin
+; even after handing 512 bytes back to programs here. Checked with the
+; NOW-FIXED tools/check_kernel_margin.py (the one that actually verifies
+; against RUN_ERRORLEVEL, not just PROG_BASE itself, per the bug above)
+; before moving: at $4200, real margin is 372 bytes -- comfortably past
+; this project's own "not just a few dozen bytes" standard, and boot
+; margin (KERN_LOAD vs. sector-rounded size) is completely unaffected
+; at 768 bytes, since it doesn't depend on PROG_BASE at all. $4200 is
+; below KERN_LOAD ($4400, unchanged, boot/mbr.asm) -- confirmed safe by
+; this project's own established reasoning (2026-08-01): the krnboot-
+; sector-reclaim benefit doesn't need exact equality, only that a loaded
+; program be bigger than the gap between the two addresses, which any
+; real program always is. Needs its own isolated hardware round before
+; being trusted -- not yet tested.
+PROG_BASE:      equ     $4200       ; user programs load here -- moved
+                                    ; down from $4400 once the kernel
+                                    ; shrink pass freed real margin
+                                    ; back, see above
 
 ; $0080-$00FF: the ROM's small boot-time stack lives here (see
 ; boot/mbr.asm) but is dead once the kernel sets up its own stack at
