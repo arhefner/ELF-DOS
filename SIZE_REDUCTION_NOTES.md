@@ -313,6 +313,114 @@ part of**: `bin/edlin` 12919 -> 13727 bytes, **+808 bytes**. Pure
 userland (`progs/edlin.asm` only) -- zero kernel-resident cost, zero
 impact on this branch's kernel-shrink sibling work.
 
+## Insert-mode escape sequences (2026-08-25) -- extends the R/S work above
+
+Direct follow-on to the R/S escape-sequence feature, prompted by a real
+FreeDOS documentation passage the user found: "While inserting, escape
+sequences such as those above are legal to type in. To exit insert
+mode, type a period (.) on an otherwise blank line (if you need a line
+with just a period, escape it)." `I`/`A`'s own typed lines
+(`ed_i_loop`/`ed_i_not_dot`) had no escape decoding at all before this
+-- this closes that gap.
+
+**The real design wrinkle this pass exists to resolve**: the original
+`ed_unescape_field` did TWO things -- (1) strip a matching leading/
+trailing quote pair, THEN (2) escape-decode. Phase 1 is correct for R/
+S's own delimited text fields, but would be WRONG for a plain Insert-
+mode content line -- a real line of typed content that happens to
+start and end with `"` (e.g. a line of C-like code) must NOT have
+those quote characters silently eaten the way R/S's own field-
+delimiter syntax legitimately does. Insert-mode lines aren't quote-
+delimited fields at all.
+
+**Fix: split `ed_unescape_field` into two independently-callable
+phases**, each keeping the exact same `(RB=ptr cell addr, R9=len cell
+addr)` calling convention as the original combined routine:
+- `ed_strip_quotes(RB, R9)` -- phase 1 alone (quote-strip only), a
+  pure rename of the original quote-strip body with zero logic change
+  (`euf_check`/`euf_is_quote`/`euf_strip_done` renamed
+  `esq_check`/`esq_is_quote`/`esq_done`, the only behavioral change
+  being an explicit `rtn` at `esq_done` instead of a fallthrough).
+- `ed_unescape_only(RB, R9)` -- phase 2 alone (escape-decode only, NO
+  quote-stripping), the original escape-scan body unchanged except for
+  a new 2-instruction entry prologue (`mov ra,rb` / `mov rc,r9`)
+  mirroring what the combined routine used to do once for both phases
+  -- needed since this is now a standalone entry point.
+- `ed_unescape_field(RB, R9)` -- a thin wrapper that calls both in
+  sequence, reproducing R/S's own existing behavior byte-for-byte with
+  zero change to either call site.
+
+**The one real calling-convention wrinkle**: `ed_strip_quotes`'s own
+internal reads walk `RB`/`R9` forward as read cursors -- neither
+register survives the call (matching the original combined routine's
+own broad "Modifies: everything" footprint). The wrapper therefore
+saves its incoming `(RB,R9)` to two new memory cells
+(`euf_saved_ptr_cell`/`euf_saved_len_cell`) before calling
+`ed_strip_quotes`, then reloads them fresh before tail-calling
+`ed_unescape_only` -- this is provably equivalent to the original's own
+`RA`/`RC` stash-once-at-entry design, since both approaches end up
+re-deriving the SAME addresses (the caller's real ptr/len cells, e.g.
+`ed_r_old_ptr`/`ed_r_old_len`) for phase 2 to read, by which point
+phase 1's own writes (if a quote was stripped) are already visible
+through those same addresses.
+
+**Insert-mode's own new call site** (`ed_i_not_dot`, right after the
+`.`-terminator check and before `ed_insert_one`): calls ONLY
+`ed_unescape_only` directly on `ed_input_buf`/`ed_i_text_len`,
+deliberately reusing `ed_i_source_buf` (already set to `&ed_input_buf`
+moments earlier, for `ed_insert_one`'s own use) as the pointer cell
+rather than declaring a new one -- safe because `ed_unescape_only`
+never writes the pointer cell itself, only the length cell (on
+shrink), confirmed by re-reading `euf_scan_done`'s own tail (writes
+only through `RC`, the length cell address). No quote-stripping
+happens on this path at all.
+
+**Why the `.`-terminator check needs no changes, and gets FreeDOS's
+own "if you need a line with just a period, escape it" behavior for
+free**: that check runs on the RAW, undecoded bytes, BEFORE this new
+call -- `\.` (backslash then period, 2 raw bytes) can never match a
+check for a single `.` byte, so it always falls through to be treated
+as real content, which is then correctly decoded down to a single `.`
+byte by `ed_unescape_only` afterward. Traced by hand end-to-end for
+`\.` specifically: raw buffer `['\\','.',0]`, len=2 -- the escape scan
+recognizes `\.` as a simple-table hit (outputs `.`), the loop's own
+bounds check (`RF+2 <= END`) evaluates true at exactly the boundary
+(`RF+2 == END`, not `>`), and the routine correctly reports the new
+length as 1 -- `ed_insert_one` then inserts a genuine 1-byte
+`.`-only line, exactly the doc's own described behavior.
+
+**Verification**: this is mostly a refactor (splitting an already-
+simulated, already-verified routine) plus one new, small call site --
+lower risk than the original escape-decode work itself, but still
+traced carefully per the task's own instruction. Confirmed by
+construction (not just re-reading) that R/S's own behavior is
+unchanged: the wrapper's net effect is provably identical to the
+original combined routine's, since both end up feeding phase 2 the
+SAME cell addresses with phase 1's writes already applied. Hand-traced
+all four required concrete cases against the actual assembled code:
+a bare `.` (never reaches the new code at all -- unaffected, confirmed
+by the existing check running first); `\.` (see above, confirmed
+correct byte-for-byte); a line mixing ordinary text with a real escape
+like `\t`/`\x41` (routes through the exact same, already-verified
+escape-scan body R/S already use); and a line starting/ending with an
+UNESCAPED `"`/`'` (confirmed to fall through to `euf_copy1`'s plain
+byte-copy, since `ed_strip_quotes` never runs on this path at all --
+the quote characters are inserted verbatim, not stripped). D-clobber/
+self-overwrite/gotcha-18/duplicate-label sweeps clean on the whole
+file. Full clean `make`+`make progs`+`make test` (0 errors/warnings
+throughout, kernel untouched -- `git status` shows only
+`progs/edlin.asm` modified). `bin/edlin` links at `Lowest address:
+4400` (matching `PROG_BASE`, the standard cheap tell for a proc-
+boundary/gotcha-20-style corruption -- none found).
+
+**Byte cost**: `bin/edlin` 13727 -> 13795 bytes, **+68 bytes** (a
+2-instruction prologue for `ed_unescape_only`, the
+`euf_saved_ptr_cell`/`euf_saved_len_cell` stash-and-reload in the
+wrapper, one new call site in `ed_i_not_dot`, and a handful of renamed
+labels -- essentially just the wrapper's own bookkeeping, since no
+escape-decode logic itself was duplicated). Pure userland, zero
+kernel-resident cost. **Not yet hardware-tested.**
+
 ## What changed, and why
 
 `progs/edlin.asm` is a large, flat (no `proc`/`endp`) file full of small,
@@ -660,3 +768,36 @@ sites:
     BOTH the oldtext and newtext fields independently (e.g.
     `Rfoo,\tbar` and `R\tfoo,bar` on the same line), not just one or the
     other.
+
+### Insert-mode escape sequences (2026-08-25)
+
+New checklist items for `ed_unescape_only`'s own direct call from `I`/
+`A`'s Insert mode (`ed_i_loop`), independent of the R/S checklist
+above since this is a different call site/calling shape (a direct
+buffer, not a quote-delimited field):
+
+21. **A bare `.` on its own line still ends Insert mode correctly**
+    (regression check -- confirms the new call site doesn't disturb
+    the pre-existing terminator check, which runs before it).
+22. **`\.` on its own line inserts a real line containing just a
+    single `.` character** -- the exact FreeDOS-documented behavior
+    that prompted this whole feature ("if you need a line with just a
+    period, escape it"). Follow with `L` to confirm the inserted line
+    displays as a bare `.`, not as two characters or as an empty line.
+23. **A typed line mixing plain text with a real escape**, e.g.
+    `hello\tworld` or `line1\x0Aline2` -- confirms the escape grammar
+    works identically here as it already does in R/S.
+24. **A typed line that starts AND ends with an unescaped `"` or `'`**
+    (e.g. `"hello world"` typed as real content, no backslash anywhere)
+    -- must be inserted WITH the quote characters intact, NOT stripped.
+    This is the specific behavior the phase split exists to guarantee;
+    confirm with `L` that both quote characters are visibly present in
+    the inserted line.
+25. **A typed line containing a malformed/unrecognized escape** (e.g.
+    `\z` or a trailing lone `\`) -- confirms the same safe-literal
+    fallback behavior R/S already rely on works identically in Insert
+    mode.
+26. **`A` (append) exercises the same code path as `I`** -- worth one
+    confirming round via `A` specifically (e.g. append a line
+    containing `\t`), even though it shares `ed_i_loop`/`ed_i_not_dot`
+    with `I` and should need no separate logic.

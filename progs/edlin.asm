@@ -2342,6 +2342,21 @@ ed_i_loop:
             lbnz    ed_i_not_dot
             lbr     ed_i_done           ; exactly "." and nothing else
 ed_i_not_dot:
+            ; real FreeDOS: "While inserting, escape sequences...
+            ; are legal to type in." -- decode them here, on the RAW
+            ; typed line, AFTER the "." terminator check above (so
+            ; "\." -- backslash then period, 2 bytes -- never matches
+            ; a check for a single "." byte, correctly falling through
+            ; to be inserted as real content: a line containing just a
+            ; period, exactly the doc's own "if you need a line with
+            ; just a period, escape it" case, for free) and BEFORE
+            ; ed_insert_one runs, so it inserts the decoded text.
+            ; Deliberately calls ONLY ed_unescape_only, not the
+            ; combined ed_unescape_field -- a typed content line is
+            ; NOT a quote-delimited field the way R/S's own text is,
+            ; so it must never have a leading/trailing '"'/''' quote
+            ; character silently stripped (see ed_unescape_field's own
+            ; header comment for the full design reasoning).
 
             mov     rf, ed_input_buf
             call    ed_strlen
@@ -2353,7 +2368,16 @@ ed_i_not_dot:
             str     rf
             inc     rf
             ldi     low ed_input_buf
-            str     rf
+            str     rf                  ; ed_i_source_buf = &ed_input_buf
+
+            mov     rb, ed_i_source_buf ; reuse this already-set cell
+            mov     r9, ed_i_text_len   ; as the (ptr,len) pair --
+            call    ed_unescape_only    ; ed_unescape_only never writes
+                                        ; the pointer cell itself (only
+                                        ; the length cell, on shrink),
+                                        ; so ed_i_source_buf still
+                                        ; correctly points at
+                                        ; ed_input_buf afterward
 
             call    ed_insert_one
             lbdf    ed_edit_toolong
@@ -3216,22 +3240,43 @@ erpa_err:
             rtn
 
 ;------------------------------------------------------------------
-; ed_unescape_field: given a (ptr,len) pair stored at the two memory
-; addresses passed in, (1) strip a matching leading/trailing quote
-; pair ('...' or "...") if present, then (2) process backslash escape
-; sequences ANYWHERE in the (now quote-stripped) field -- adjusts
-; both fields in place. Renamed from the original ed_r_strip_quotes
-; (2026-08-24) once escape processing was added on top of its
-; existing quote-stripping -- the old name no longer described its
-; full scope. Shared by R's old/new-text fields and S's search text.
+; ed_unescape_field / ed_strip_quotes / ed_unescape_only: given a
+; (ptr,len) pair stored at the two memory addresses passed in,
+; (1) strip a matching leading/trailing quote pair ('...' or "...")
+; if present, then (2) process backslash escape sequences ANYWHERE in
+; the (now quote-stripped) field -- adjusts both fields in place.
+; Renamed from the original ed_r_strip_quotes (2026-08-24) once
+; escape processing was added on top of its existing quote-stripping
+; -- the old name no longer described its full scope. Shared by R's
+; old/new-text fields and S's search text (both phases, via the
+; combined ed_unescape_field wrapper below).
 ;
-; Design decision, confirmed deliberate: escapes are recognized
-; whether or not the field was quoted at all -- \t works equally in
-; `Rold\ttext,new` and `R'old\ttext',new`. Real FreeDOS documents the
-; grammar as a property of the text itself, not of quoting, and this
-; keeps the two phases (quote-strip, then escape-scan) simple and
-; independent rather than needing the scanner to remember whether it
-; started inside a quote.
+; SPLIT INTO TWO INDEPENDENTLY-CALLABLE PHASES (2026-08-24), once
+; EDLIN's own Insert-mode typed lines also needed escape decoding
+; (matching real FreeDOS: "While inserting, escape sequences... are
+; legal to type in. To exit insert mode, type a period on an
+; otherwise blank line (if you need a line with just a period, escape
+; it)") -- a plain Insert-mode content line is NOT a quote-delimited
+; field the way R/S's own text is: a line of real content that
+; happens to start and end with a literal '"' (e.g. inserting a line
+; of C-like code) must NOT have those quote characters silently
+; stripped the way R/S's own field-delimiter syntax legitimately
+; does. So quote-stripping and escape-decoding are now two separate,
+; independently-callable procs, each taking the exact same (RB=ptr
+; cell addr, R9=len cell addr) convention as the original combined
+; routine:
+;   ed_strip_quotes(RB, R9)     -- phase 1 alone (quote-strip only)
+;   ed_unescape_only(RB, R9)    -- phase 2 alone (escape-decode only,
+;                                  no quote-stripping at all)
+;   ed_unescape_field(RB, R9)   -- thin wrapper: calls both in
+;                                  sequence, byte-for-byte the same
+;                                  net effect R/S's own call sites
+;                                  already relied on before the split
+; R's own ed_r_parse_args and S's own ed_cmd_s both still call the
+; combined ed_unescape_field wrapper -- zero behavior change for
+; either. EDLIN's own Insert-mode call site (ed_i_not_dot, see its
+; own comment) calls ONLY ed_unescape_only directly, on ed_input_buf/
+; ed_i_text_len, deliberately skipping ed_strip_quotes entirely.
 ;
 ; Escape grammar, verbatim from FreeDOS's own edlin documentation --
 ; this is the authoritative reference and every form below matches it
@@ -3277,8 +3322,8 @@ erpa_err:
 ; exact edge case's own established precedent in progs/shell.asm's
 ; own tokenizer.
 ;
-; Mechanics: two passes, in place, using the same read-cursor/write-
-; cursor convention already established in this file (and in
+; Mechanics: in place, using the same read-cursor/write-cursor
+; convention already established in this file (and in
 ; progs/shell.asm's own tokenizer) -- every escape form collapses 2+
 ; source bytes into exactly 1 output byte (quote characters themselves
 ; are dropped entirely too), so the write cursor never exceeds the
@@ -3317,6 +3362,59 @@ erpa_err:
 ;          R9 = address of the 2-byte length field
 ;------------------------------------------------------------------
 ed_unescape_field:
+            ; Save the caller's incoming (RB,R9) -- the addresses of
+            ; its own ptr/len cells -- to memory before calling
+            ; ed_strip_quotes: that proc's own internal reads walk
+            ; RB/R9 forward as read cursors, so neither register
+            ; survives the call (it has the same broad "Modifies:
+            ; everything" footprint the original combined routine
+            ; always had) -- both are re-derived fresh here for the
+            ; second call rather than trusted to still hold the
+            ; original cell addresses.
+            mov     rf, euf_saved_ptr_cell
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf
+
+            mov     rf, euf_saved_len_cell
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+
+            call    ed_strip_quotes
+
+            mov     rf, euf_saved_ptr_cell
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
+
+            mov     rf, euf_saved_len_cell
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+
+            lbr     ed_unescape_only    ; tail call -- ed_unescape_
+                                        ; only's own final rtn pops
+                                        ; whatever ed_unescape_field's
+                                        ; OWN caller pushed via its
+                                        ; "call ed_unescape_field",
+                                        ; unchanged by this plain lbr
+
+;------------------------------------------------------------------
+; ed_strip_quotes: phase 1 alone -- strip a matching leading/trailing
+; quote pair if present, adjusting both fields in place. No effect if
+; the field isn't quoted (or is too short to be). See the combined
+; header comment above for the full design.
+; Args:    RB = address of the 2-byte pointer field
+;          R9 = address of the 2-byte length field
+;------------------------------------------------------------------
+ed_strip_quotes:
             mov     ra, rb              ; stash the ORIGINAL field
             mov     rc, r9              ; addresses -- needed for the
                                         ; write-back at the end, since
@@ -3328,13 +3426,13 @@ ed_unescape_field:
             ldn     r9
             plo     rd                  ; RD = len
             ghi     rd
-            lbnz    euf_check           ; high byte nonzero: len is
+            lbnz    esq_check           ; high byte nonzero: len is
                                         ; way more than 2, definitely
                                         ; long enough
             glo     rd
             smi     2
-            lbnf    euf_strip_done      ; len < 2: can't be quoted
-euf_check:
+            lbnf    esq_done            ; len < 2: can't be quoted
+esq_check:
             lda     rb
             phi     r8
             ldn     rb
@@ -3344,13 +3442,13 @@ euf_check:
             ldn     rf
             plo     r7                  ; R7.0 = first char
             xri     $27
-            lbz     euf_is_quote
+            lbz     esq_is_quote
             glo     r7
             xri     $22
-            lbz     euf_is_quote
-            lbr     euf_strip_done      ; first char isn't a quote
+            lbz     esq_is_quote
+            lbr     esq_done            ; first char isn't a quote
 
-euf_is_quote:
+esq_is_quote:
             mov     rf, r8
             add16   rf, rd
             dec     rf                  ; RF = last char's address
@@ -3358,7 +3456,7 @@ euf_is_quote:
             str     r2
             glo     r7
             xor
-            lbnz    euf_strip_done      ; last char != first char
+            lbnz    esq_done            ; last char != first char
 
             inc     r8            ; ptr++
             dec     rd
@@ -3387,11 +3485,30 @@ euf_is_quote:
             glo     rd
             str     rf
 
-euf_strip_done:
-            ; --- phase 2: escape-scan the (now quote-stripped) field,
-            ; in place, from ed_r_old_ptr/len-style (ptr,len) cells
-            ; whose ADDRESSES are still in RA (ptr cell) / RC (len
-            ; cell) from phase 1 above ---
+esq_done:
+            rtn
+
+;------------------------------------------------------------------
+; ed_unescape_only: phase 2 alone -- backslash-escape-decode the
+; field IN PLACE, WITHOUT any quote-stripping at all (a plain Insert-
+; mode content line, unlike R/S's own delimited fields, is never
+; quote-stripped -- see the combined header comment above for why).
+; See that same header comment for the full escape grammar and the
+; two real bugs found while verifying it.
+; Args:    RB = address of the 2-byte pointer field
+;          R9 = address of the 2-byte length field
+;------------------------------------------------------------------
+ed_unescape_only:
+            mov     ra, rb              ; RA = ptr cell address, RC =
+            mov     rc, r9              ; len cell address -- this
+                                        ; proc's own entry-stash,
+                                        ; mirroring what the combined
+                                        ; routine used to do once for
+                                        ; both phases -- needed here
+                                        ; since this is now a
+                                        ; standalone entry point,
+                                        ; reachable with no quote-
+                                        ; strip having run first
             lda     ra
             phi     r8
             ldn     ra
@@ -3868,6 +3985,11 @@ euf_simple_table:
             db      0
 
 euf_start_ptr:  dw      0
+
+; ed_unescape_field's own scratch, for stashing its incoming (RB,R9)
+; across the call to ed_strip_quotes (see that wrapper's own comment)
+euf_saved_ptr_cell: dw  0
+euf_saved_len_cell: dw  0
 
 ;------------------------------------------------------------------
 ; ed_r_process_line: replace every occurrence of ed_r_old_ptr/len
