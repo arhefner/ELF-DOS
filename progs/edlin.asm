@@ -1982,15 +1982,45 @@ ed_lp_have_default:
             glo     rd
             str     rf
 
-            ghi     r8
-            phi     rd
-            glo     r8
-            plo     rd                  ; RD = first (restore, 1-based)
-            call    ed_list_clamp_last  ; RD = last (first+page-1,
-                                        ; clamped to line_count)
+            ; 2026-08-24, hardware-reported bug fix: n1 was NOT given
+            ; (that's how we got here -- R8 already holds this
+            ; command's own DEFAULT first), but n2 might still have
+            ; been given on its own (e.g. ",145p") -- this used to be
+            ; silently ignored, always falling through to the full-
+            ; buffer default below regardless of what n2 said, so
+            ; ",145p" listed cur_line through the WHOLE REST OF THE
+            ; BUFFER instead of stopping at line 145. Check
+            ; ed_have_n2 before deciding what "last" should be.
+            mov     rf, ed_have_n2
+            ldn     rf
+            lbnz    ed_lp_default_n2_given
+
+            ; neither n1 nor n2 given: last = rest of the buffer.
+            ; ed_list_clamp_last no longer reads its own RD argument
+            ; at all (see its own header comment above) -- no need to
+            ; restore RD=first before calling it any more.
+            call    ed_list_clamp_last  ; RD = ed_line_count
             call    ed_stw_rd
             dw      ed_list_last
             lbr     ed_list_start
+
+ed_lp_default_n2_given:
+            ; n1 defaulted, n2 WAS given: last = n2, validated by the
+            ; SAME shared code the literal-n1-and-n2 path below uses
+            ; (starting at ed_lp_read_n2). That code expects R8 =
+            ; ed_line_count by the time it reaches its own comparison
+            ; -- the literal-n1 path gets this for free as a side
+            ; effect of its own earlier ed_cmp_rd_le call (see that
+            ; call's own header: it loads the dereferenced word into
+            ; R8 as internal scratch); loaded explicitly and freshly
+            ; here instead, since this path never makes that call and
+            ; has no reason to depend on that side effect.
+            mov     r9, ed_line_count
+            lda     r9
+            phi     r8
+            ldn     r9
+            plo     r8                  ; R8 = line_count
+            lbr     ed_lp_read_n2
 
 ed_lp_n1_given:
             call    ed_ldw_rd
@@ -2018,6 +2048,11 @@ ed_l_n1_ok:
             ldn     rf
             lbz     ed_l_single         ; only n1: a page starting there
 
+ed_lp_read_n2:
+            ; shared with ed_lp_default_n2_given above (n1 defaulted,
+            ; n2 given) -- that path jumps straight in here, having
+            ; already written ed_list_i and loaded R8 = ed_line_count
+            ; itself, since neither of those needs redoing.
             call    ed_ldw_rd
             dw      ed_n2  ; RD = n2 (1-based)
 
