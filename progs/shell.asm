@@ -2756,21 +2756,32 @@ pp_dirent:  ds      DIRENT_LEN
 ; (start_interactive) -- this call site is NEVER redirected (shell
 ; input redirection only ever applies to a CHILD program's own I/O,
 ; never the shell's own prompt read), so there's no EOF/redirect case
-; to handle here. Reads use f_uread (the raw UART BIOS entry point,
-; EBIOS+0Ch), not K_READ -- hardware-confirmed 2026-07-23 that K_READ's
-; own two-layer indirection (kernel jump table, then the BIOS's own
-; internal RAM-vector redirect) was slow enough between this routine's
-; per-byte branching to drop the '[' byte of a real "ESC [ A"/"ESC [ B"
+; to handle here. Reads used the raw UART BIOS entry point (f_uread,
+; EBIOS+0Ch) directly, not K_READ, from 2026-07-23 until 2026-08-26 --
+; hardware-confirmed 2026-07-23 that the OLD K_READ's own two-layer
+; indirection (kernel jump table, then the BIOS's own internal RAM-
+; vector redirect) was slow enough between this routine's per-byte
+; branching to drop the '[' byte of a real "ESC [ A"/"ESC [ B"
 ; arrow-key sequence -- the exact bug progs/mr.asm/progs/ms.asm already
-; hit and fixed the same way (see their own header comments); nothing
-; is lost bypassing K_READ here since redirection never applies to this
-; call site regardless. Echo still uses K_TYPE, not K_TTY -- K_TYPE is
+; hit and fixed the same way (see their own header comments). CHANGED
+; BACK to K_READ 2026-08-26: a direct f_uread call hardcodes reading
+; from the hardware UART regardless of what's actually connected/
+; configured, which is exactly the bug that made this shell's input
+; completely dead on mBIOS with the bit-bang UART selected (the boot
+; banner/prompt still worked, since those go through K_MSG/K_INMSG ->
+; K_TYPE, which was never hardcoded this way). K_READ itself was fixed
+; the same day to resolve, at boot, directly to the real detected UART
+; routine (see IO_READ_TARGET/_io_tail_jump in kernel.inc's own header
+; comment) -- correct on both BIOSes, with far less indirection than
+; the old K_READ had, but not yet proven immune to the 2026-07-23
+; byte-drop risk at speed; see rlwh_loop's own call site below for the
+; current status. Echo still uses K_TYPE, not K_TTY -- K_TYPE is
 ; already exercised once per byte by TYPE.exe's own hot loop across
 ; this project's whole history, while K_TTY has a documented hardware
 ; caution under repeated calls (/CLAUDE.md gotcha #14); the byte-drop
-; risk that motivated switching reads to f_uread is specifically about
-; input arriving faster than it's read, which doesn't apply to output
-; we control the timing of ourselves.
+; risk this whole comment is about is specifically about input arriving
+; faster than it's read, which doesn't apply to output we control the
+; timing of ourselves.
 ;
 ; HISTORY_LOAD_BUDGET: how many bytes of history.dat's own tail get
 ; loaded into RAM for one session's worth of Up/Down recall. Raised
@@ -2842,22 +2853,43 @@ read_line_with_history:
             str     rf
 
 rlwh_loop:
-            call    f_uread             ; D = char (blocking) -- direct
-                                        ; BIOS call, not K_READ (see this
-                                        ; routine's own header comment:
-                                        ; hardware-confirmed 2026-07-23
-                                        ; that K_READ's own indirection
-                                        ; drops bytes arriving in rapid
-                                        ; succession, exactly the mr.asm/
-                                        ; ms.asm precedent this mirrors)
+            call    K_READ              ; D = char (blocking). CHANGED
+                                        ; 2026-08-26 from a direct
+                                        ; "call f_uread" (see this
+                                        ; routine's own header comment
+                                        ; for the full 2026-07-23
+                                        ; byte-drop history that led to
+                                        ; that): K_READ now resolves,
+                                        ; at boot, directly to the
+                                        ; REAL, auto-detected UART
+                                        ; routine (kernel/redir.asm's
+                                        ; rrd_console, via
+                                        ; IO_READ_TARGET/_io_tail_jump
+                                        ; -- see kernel.inc's own
+                                        ; header comment on those) --
+                                        ; with far less indirection
+                                        ; than before, AND correct on
+                                        ; both classic BIOS and mBIOS,
+                                        ; unlike the hardcoded-
+                                        ; hardware-UART-only "f_uread"
+                                        ; this replaces (that's the
+                                        ; actual bug this change fixes
+                                        ; -- see ~/.claude/plans/
+                                        ; sparkling-puzzling-pebble.md).
+                                        ; NOT yet hardware-confirmed
+                                        ; that this remains fast enough
+                                        ; to avoid the 2026-07-23 byte-
+                                        ; drop at speed -- needs a real
+                                        ; test, not assumed fixed just
+                                        ; because the mechanism changed.
             plo     rc                  ; RC.0 = char (D unchanged,
                                         ; plo doesn't touch it)
 
             ; ESC checked FIRST (not last) -- minimizes the latency
-            ; between reading ESC and rlwh_escape's own next f_uread
+            ; between reading ESC and rlwh_escape's own next K_READ
             ; call, giving maximum headroom against the exact byte-drop
-            ; risk that motivated switching to f_uread in the first
-            ; place (see that routine's own header comment). Costs one
+            ; risk that originally motivated switching away from K_READ
+            ; (see that routine's own header comment). Costs one
             ; extra comparison on every OTHER byte (ordinary chars, CR/
             ; LF, backspace) to buy this -- negligible, since none of
             ; those paths are timing-sensitive the way a multi-byte
@@ -3393,27 +3425,49 @@ rlwh_backspace:
             lbr     rlwh_loop
 
 rlwh_escape:
-            call    f_uread             ; direct BIOS call, not K_READ
-                                        ; -- see below
+            call    K_READ              ; CHANGED 2026-08-26 from a direct
+                                        ; "call f_uread" -- see rlwh_loop's
+                                        ; own comment above for why. This
+                                        ; specific call site is part of
+                                        ; what the 2026-07-23 byte-drop
+                                        ; finding was actually about (a
+                                        ; multi-byte escape sequence's
+                                        ; continuation bytes arriving in
+                                        ; rapid succession right after
+                                        ; ESC) -- converting it back to
+                                        ; K_READ is a real, deliberate
+                                        ; risk, not an oversight: left on
+                                        ; f_uread, arrow/Del keys would
+                                        ; stay silently broken forever on
+                                        ; bit-bang UART (f_uread always
+                                        ; reads the wrong UART there);
+                                        ; converted to K_READ, they may or
+                                        ; may not survive the same byte-
+                                        ; drop risk that motivated the
+                                        ; original switch away from it --
+                                        ; K_READ's indirection is smaller
+                                        ; now (see IO_READ_TARGET/
+                                        ; _io_tail_jump) but not zero.
+                                        ; NEEDS A REAL HARDWARE TEST
+                                        ; specifically exercising fast
+                                        ; arrow-key sequences before this
+                                        ; is trusted -- do not assume
+                                        ; either outcome.
             plo     rc                  ; RC.0 = byte immediately after ESC
 
             ; The terminal sends real ANSI/VT100 "ESC [ A"/"ESC [ B" --
             ; an earlier bare-ESC-letter theory turned out to be wrong,
             ; see the CLAUDE.md write-up for the full history. What
-            ; actually happened: K_READ's own two-layer indirection
-            ; (kernel jump table, then the BIOS's own internal RAM-
-            ; vector redirect) was slow enough, between this routine's
-            ; own per-byte branching, to lose the '[' byte to the
-            ; UART's single-byte holding register being overwritten by
-            ; 'A'/'B' before it was ever read -- the exact bug
-            ; progs/mr.asm/progs/ms.asm already hit and fixed the same
-            ; way (see their own header comments): call the raw BIOS
-            ; entry point (f_uread, EBIOS+0Ch) directly, skipping both
-            ; indirection hops. Every read in this routine goes through
-            ; f_uread instead of K_READ for that reason -- input
-            ; redirection never applies to this call site anyway (see
-            ; the section header comment above), so nothing is lost by
-            ; bypassing K_READ's own redirect-aware dispatch.
+            ; actually happened (found 2026-07-23): the OLD K_READ's own
+            ; two-layer indirection (kernel jump table, then the BIOS's
+            ; own internal RAM-vector redirect) was slow enough,
+            ; between this routine's own per-byte branching, to lose
+            ; the '[' byte to the UART's single-byte holding register
+            ; being overwritten by 'A'/'B' before it was ever read --
+            ; the exact bug progs/mr.asm/progs/ms.asm already hit and
+            ; fixed the same way (see their own header comments): call
+            ; the raw BIOS entry point (f_uread, EBIOS+0Ch) directly,
+            ; skipping both indirection hops.
             ;
             ; HARDWARE-CONFIRMED 2026-07-23, including a test round that
             ; specifically ruled out a masked failure: a bare-letter
@@ -3431,11 +3485,28 @@ rlwh_escape:
             ; or the bit-bang UART path reintroduces byte loss -- better
             ; for Up/Down to visibly stop working than to silently
             ; degrade to whatever partial byte arrived.
+            ;
+            ; CHANGED 2026-08-26: both of this section's own f_uread
+            ; calls below (the CSI-letter read, and the Del key's '~'
+            ; terminator read) converted BACK to K_READ, now that
+            ; K_READ itself resolves directly to the real detected UART
+            ; routine with far less indirection than before (see
+            ; IO_READ_TARGET/_io_tail_jump) -- and, critically, is
+            ; correct on mBIOS's bit-bang UART, which the OLD hardcoded
+            ; f_uread never was (that's the actual bug this whole pass
+            ; fixes). This is a real, deliberate reintroduction of the
+            ; SAME byte-drop risk the 2026-07-23 test above was built to
+            ; catch, not an oversight -- left on f_uread, arrow/Del keys
+            ; would stay silently broken forever on bit-bang UART.
+            ; NEEDS ITS OWN FRESH HARDWARE ROUND specifically re-running
+            ; the 2026-07-23 recall test (fast typing/paste, live
+            ; arrow-key sequences) before this is trusted -- do not
+            ; assume either outcome without seeing it.
             glo     rc
             xri     '['
             lbnz    rlwh_loop           ; neither form: discard, continue
 
-            call    f_uread
+            call    K_READ
             plo     rc
             glo     rc
             xri     'A'
@@ -3461,7 +3532,11 @@ rlwh_escape:
             xri     '3'
             lbnz    rlwh_loop           ; unrecognized: discard
 
-            call    f_uread             ; read the expected '~' terminator
+            call    K_READ              ; read the expected '~' terminator
+                                        ; -- CHANGED 2026-08-26, see the
+                                        ; comment block above (same
+                                        ; call, same "needs a fresh
+                                        ; hardware round" caveat)
             plo     rc
             glo     rc
             xri     '~'

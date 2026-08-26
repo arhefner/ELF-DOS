@@ -81,6 +81,7 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   _himem_release
             extrn   _is_nul_device
             extrn   _redir_close_out_if_open
+            extrn   _io_tail_jump
 
 ; same-file cross-proc data references (required even within the same
 ; file -- see CLAUDE.md gotcha #6)
@@ -764,6 +765,75 @@ rt_release_done:
             endp
 
 ; ----------------------------------------------------------------
+; _io_tail_jump: transfer control to a runtime-computed address as a
+; TRUE TAIL JUMP -- the target's own eventual "rtn" resumes directly
+; at whoever ORIGINALLY called K_TYPE/K_READ, not just back at this
+; routine's own caller. Deliberately NOT lib/icall.asm's own icall,
+; even though the underlying safe-target-assembly technique is
+; identical (see icall.asm's own header for the full P=R3 partial-
+; write hazard this avoids on the 1802): icall is reached via a real
+; "call", which means ITS caller (whoever executes "call icall") is
+; who the target's "rtn" returns to -- one level too shallow for
+; rty_console/rrd_console's own tail position. By the time those run,
+; R6 already holds the address the ORIGINAL K_TYPE/K_READ caller needs
+; resumed at (everything from the jump-table slot down to here is a
+; plain "lbr", which never touches R6) -- a "call icall" would
+; silently overwrite that with "resume right after this call" instead,
+; corrupting the return address for every console I/O call in the
+; whole OS. Reached via a plain "lbr" (never "call") for exactly this
+; reason -- the same "lbr, not call" discipline kernel/kernel.asm's
+; own k_inmsg jump-table slot already established for an analogous
+; R6-corruption hazard (see gotcha #10/#21-adjacent history).
+; Args:    RB = target address
+;          D  = whatever value the target routine itself expects in D
+;          (e.g. the character for f_utype/f_btype; unexamined by
+;          f_uread/f_bread, but preserved regardless to match icall's
+;          own general contract)
+; Returns: never returns here -- the target's own "rtn" resumes
+;          directly at whoever originally called K_TYPE/K_READ
+; Modifies: R3 (as any dispatch mechanism must), R7/R9 (brief, purely
+;          local temporaries -- never expected to carry anything
+;          meaningful across this call, matching icall's own contract)
+; ----------------------------------------------------------------
+            proc    _io_tail_jump
+
+            plo     r9                  ; stash D -- the mov below
+                                        ; clobbers D via its own LDI
+                                        ; sequence (gotcha #4)
+
+            mov     r7, iotj_safe       ; R7 = a compile-time-constant
+                                        ; local address -- safe to set
+                                        ; while P=R3
+            sep     r7                  ; P = R7, TEMPORARILY -- now
+                                        ; executing under a register
+                                        ; other than R3, so R3 can be
+                                        ; safely modified below with no
+                                        ; fetch-corruption risk (see
+                                        ; icall.asm's own header for
+                                        ; why this step is mandatory)
+
+iotj_safe:
+            ghi     rb
+            phi     r3
+            glo     rb
+            plo     r3                  ; R3 = target address, fully
+                                        ; and safely assembled while
+                                        ; P=R7, not P=R3
+
+            glo     r9                  ; D restored, for the target
+                                        ; to see exactly what this
+                                        ; routine's own caller left it
+                                        ; as
+            sep     r3                  ; P = R3 = target. R6 was
+                                        ; never touched anywhere above,
+                                        ; so the target's own eventual
+                                        ; "rtn" resumes directly at the
+                                        ; ORIGINAL K_TYPE/K_READ caller
+                                        ; with zero extra bookkeeping
+
+            endp
+
+; ----------------------------------------------------------------
 ; _redir_type: redirect-aware replacement for the bare "lbr f_type"
 ; K_TYPE used to be.
 ;
@@ -852,8 +922,23 @@ rty_console:
             pop     ra
             pop     rc
             pop     rf
+            mov     r8, IO_TYPE_TARGET  ; R8 = &target word (fixed
+                                        ; address, PROG_BASE-relative)
+            lda     r8
+            phi     rb                  ; RB.hi = target's high byte,
+                                        ; R8 -> target's low-byte addr
+            ldn     r8
+            plo     rb                  ; RB.lo = target's low byte --
+                                        ; RB now holds the REAL target,
+                                        ; auto-detected once at boot
+                                        ; (boot/krnboot.asm)
             glo     r7                  ; D = the character (restored)
-            lbr     f_type
+                                        ; -- set LAST, right before the
+                                        ; tail jump (gotcha #4: nothing
+                                        ; after this may clobber D)
+            lbr     _io_tail_jump       ; true tail jump -- see its own
+                                        ; header for why this replaced
+                                        ; a hardcoded "lbr f_type"
 
             endp
 
@@ -1252,7 +1337,25 @@ rrd_console:
             pop     ra
             pop     rc
             pop     rf
-            lbr     f_read
+            mov     r8, IO_READ_TARGET  ; R8 = &target word (fixed
+                                        ; address, PROG_BASE-relative)
+            lda     r8
+            phi     rb                  ; RB.hi = target's high byte,
+                                        ; R8 -> target's low-byte addr
+            ldn     r8
+            plo     rb                  ; RB.lo = target's low byte --
+                                        ; RB now holds the REAL target,
+                                        ; auto-detected once at boot
+                                        ; (boot/krnboot.asm)
+            lbr     _io_tail_jump       ; true tail jump -- see its own
+                                        ; header for why this replaced
+                                        ; a hardcoded "lbr f_read". D is
+                                        ; passed through unexamined,
+                                        ; matching the original "lbr
+                                        ; f_read"'s own behavior exactly
+                                        ; (f_read/f_uread/f_bread don't
+                                        ; take an input in D, only
+                                        ; return one)
 
             endp
 

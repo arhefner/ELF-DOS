@@ -261,6 +261,26 @@ RUN_BATCH_ECHO_OFF: equ     PROG_BASE-109   ; byte: 0 = echo batch lines
 RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
                                             ; code (0-255)
 
+; IO_TYPE_TARGET/IO_READ_TARGET: the real console I/O routine's address,
+; auto-detected ONCE at boot by boot/krnboot.asm's own boot_init2 (see
+; its own header comment for the full mBIOS-vs-classic-BIOS detection
+; logic) -- mBIOS stores a rewritable lbr vector at $003C (type)/$003F
+; (read) already pointing at the correct real routine; classic BIOS has
+; no such vector, so krnboot falls back to checking RE's high byte the
+; same way classic BIOS's own type:/read: entry points do. Read by
+; kernel/redir.asm's rty_console/rrd_console (K_TYPE/K_READ's own "not
+; redirected" fallthrough), which load the target into RB and "call
+; icall" (lib/icall.asm) to reach it directly -- see redir.asm's own
+; comment for why this replaced a hardcoded "lbr f_type"/"lbr f_read".
+; Same fixed-address/kernel-and-boot-shared convention as the fields
+; above, restated in kernel_api.inc even though no ordinary program
+; references these directly -- boot/krnboot.asm is a SEPARATE link unit
+; from kernel.bin and can only reach kernel-resident state through a
+; fixed address (or the K_* jump table) either way, same reasoning as
+; every other RUN_* field on this page.
+IO_READ_TARGET:     equ     PROG_BASE-112   ; word: real f_uread/f_bread
+IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
+
 ; GLOB_BUF_LEN: size of the dynamic himem reservation progs/shell.asm's
 ; own glob-expansion pass makes via K_GLOB_RESERVE (kernel/glob.asm) --
 ; NOT a fixed PROG_BASE-relative address like the fields above, since

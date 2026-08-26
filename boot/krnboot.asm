@@ -856,6 +856,137 @@ boot_drive_copy:
                                             ; severity as any other
                                             ; boot-time failure here
 
+;--------------------------------------------------------------
+; IO_TYPE_TARGET/IO_READ_TARGET detection (see kernel.inc's own header
+; comment on these two fixed words for the full design/motivation).
+; mBIOS stores a rewritable 3-byte lbr vector at $003C (type)/$003F
+; (read), already pointing at the correct real routine by the time
+; anything else runs -- if the byte there is $C0 (the LBR opcode), the
+; 2 bytes right after it ARE the real target, copy them directly.
+; Classic BIOS has no such vector, so a non-$C0 byte falls back to
+; checking RE's high byte the SAME WAY classic BIOS's own type:/read:
+; entry points do: GHI RE / SHR / branch-on-zero -- deliberately NOT a
+; raw comparison of RE.1 against 0, since bit 0 of RE.1 is the
+; unrelated local-echo flag and must be shifted off first (confirmed
+; directly against classic BIOS's own real source by the user). The
+; shifted value is computed once, into boot_re_shifted, and reused for
+; both the type and read fallback checks, since classic BIOS uses the
+; same RE.1 flag for both directions.
+;
+; Also, unconditionally, force RE's own local-echo bit OFF here (bit 0
+; of RE.1) -- confirmed on hardware 2026-08-26 (bit-bang UART): left
+; however mBIOS/the ROM monitor happens to leave it, it can come up
+; SET, which makes the BIOS's own read routine echo each character
+; back itself, doubling up with this shell's own K_TYPE-based echo in
+; read_line_with_history (progs/shell.asm) -- and tripling up if the
+; terminal's own local echo is ALSO on. We only ever want ONE echo
+; source (the shell's own), so this bit is cleared here, once, before
+; any interactive read ever happens, regardless of which BIOS/UART
+; scheme ends up detected below. Bits 1-7 (the real baud-rate timing
+; constant used by the very check right after this) are completely
+; unaffected by this single-bit AND mask -- ordering relative to the
+; boot_re_shifted computation below doesn't matter either way, since
+; GHI RE is a nondestructive read and SHR always discards bit 0
+; regardless of its value.
+;--------------------------------------------------------------
+            ghi         re
+            ani         $FE                 ; clear bit 0 (echo), leave
+                                            ; bits 1-7 (baud/UART-select
+                                            ; timing constant) untouched
+            phi         re                  ; write back -- permanent
+                                            ; for the rest of this boot
+                                            ; session
+
+            mov         rf, boot_re_shifted ; RF = dest, set BEFORE
+                                            ; reading RE (mov itself
+                                            ; clobbers D -- gotcha #4)
+            ghi         re
+            shr
+            str         rf                  ; boot_re_shifted = RE.1
+                                            ; >> 1 (echo bit discarded)
+
+            ldi         high $003C
+            phi         rf
+            ldi         low $003C
+            plo         rf
+            ldn         rf                  ; D = byte at $003C
+            xri         $C0
+            lbnz        boot_io_type_fallback
+
+            mov         r8, IO_TYPE_TARGET  ; R8 = dest, set BEFORE the
+                                            ; reads below (gotcha #4)
+            inc         rf                  ; RF = $003D
+            lda         rf                  ; D = vector's high byte,
+                                            ; RF -> $003E
+            str         r8
+            inc         r8
+            lda         rf                  ; D = vector's low byte
+            str         r8
+            lbr         boot_io_read_check
+
+boot_io_type_fallback:
+            mov         r8, IO_TYPE_TARGET  ; R8 = dest, set BEFORE
+                                            ; reading boot_re_shifted
+            mov         rf, boot_re_shifted
+            ldn         rf                  ; D = shifted RE.1
+            lbnz        boot_io_type_bitbang
+
+            ldi         high f_utype
+            str         r8
+            inc         r8
+            ldi         low f_utype
+            str         r8
+            lbr         boot_io_read_check
+
+boot_io_type_bitbang:
+            ldi         high f_btype
+            str         r8
+            inc         r8
+            ldi         low f_btype
+            str         r8
+
+boot_io_read_check:
+            ldi         high $003F
+            phi         rf
+            ldi         low $003F
+            plo         rf
+            ldn         rf                  ; D = byte at $003F
+            xri         $C0
+            lbnz        boot_io_read_fallback
+
+            mov         r8, IO_READ_TARGET  ; R8 = dest, set BEFORE the
+                                            ; reads below (gotcha #4)
+            inc         rf                  ; RF = $0040
+            lda         rf                  ; D = vector's high byte,
+                                            ; RF -> $0041
+            str         r8
+            inc         r8
+            lda         rf                  ; D = vector's low byte
+            str         r8
+            lbr         boot_io_done
+
+boot_io_read_fallback:
+            mov         r8, IO_READ_TARGET  ; R8 = dest, set BEFORE
+                                            ; reading boot_re_shifted
+            mov         rf, boot_re_shifted
+            ldn         rf                  ; D = shifted RE.1
+            lbnz        boot_io_read_bitbang
+
+            ldi         high f_uread
+            str         r8
+            inc         r8
+            ldi         low f_uread
+            str         r8
+            lbr         boot_io_done
+
+boot_io_read_bitbang:
+            ldi         high f_bread
+            str         r8
+            inc         r8
+            ldi         low f_bread
+            str         r8
+
+boot_io_done:
             lbr         KERN_ENTRY          ; continue into kernel_init proper
 
 ;--------------------------------------------------------------
@@ -908,6 +1039,11 @@ boot_present_addr:  dw      0           ; this iteration's own
 boot_ver_major:     db      0
 boot_ver_minor:     db      0
 boot_ver_buf:       ds      6           ; decimal scratch (max "65535"+null)
+
+; Scratch for the IO_TYPE_TARGET/IO_READ_TARGET detection above --
+; RE.1 with the local-echo bit (bit 0) shifted off, computed once and
+; reused for both the type and read fallback checks.
+boot_re_shifted:    db      0
 
 boot_scratch:       ds      512
 

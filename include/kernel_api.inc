@@ -112,6 +112,16 @@ RUN_BATCH_ECHO_OFF: equ     PROG_BASE-109   ; byte: 0 = echo batch lines
 RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
                                             ; code (0-255)
 
+; IO_TYPE_TARGET/IO_READ_TARGET: the real console I/O routine's address,
+; auto-detected once at boot (see kernel.inc's own copy of this comment
+; for the full mBIOS-vs-classic-BIOS detection reasoning). Kernel/boot-
+; internal only, same as RUN_PATH/RUN_ERRORLEVEL above -- restated here
+; only because boot/krnboot.asm (which writes these) is a separate link
+; unit from kernel.bin and needs a fixed address to reach them either
+; way; no ordinary program has any reason to reference these directly.
+IO_READ_TARGET:     equ     PROG_BASE-112   ; word: real f_uread/f_bread
+IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
+
 ; K_GET_ERRORLEVEL: read the last command's exit code. A real jump-table
 ; call rather than a direct RUN_ERRORLEVEL read, unlike the shell's own
 ; internal access -- an ordinary program shouldn't bake a kernel/shell-
