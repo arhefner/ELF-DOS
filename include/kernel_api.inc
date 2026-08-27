@@ -114,11 +114,14 @@ RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
 
 ; IO_TYPE_TARGET/IO_READ_TARGET: the real console I/O routine's address,
 ; auto-detected once at boot (see kernel.inc's own copy of this comment
-; for the full mBIOS-vs-classic-BIOS detection reasoning). Kernel/boot-
-; internal only, same as RUN_PATH/RUN_ERRORLEVEL above -- restated here
-; only because boot/krnboot.asm (which writes these) is a separate link
-; unit from kernel.bin and needs a fixed address to reach them either
-; way; no ordinary program has any reason to reference these directly.
+; for the full mBIOS-vs-classic-BIOS detection reasoning, and for the
+; Phase 2 self-modifying-K_TYPE/K_READ-vector redesign that changed who
+; reads these -- now only kernel/redir.asm's _redir_teardown, once per
+; redirected command, not every console call). Kernel/boot-internal
+; only, same as RUN_PATH/RUN_ERRORLEVEL above -- restated here only
+; because boot/krnboot.asm (which writes these) is a separate link unit
+; from kernel.bin and needs a fixed address to reach them either way; no
+; ordinary program has any reason to reference these directly.
 IO_READ_TARGET:     equ     PROG_BASE-112   ; word: real f_uread/f_bread
 IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
 

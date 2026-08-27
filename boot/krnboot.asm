@@ -987,6 +987,52 @@ boot_io_read_bitbang:
             str         r8
 
 boot_io_done:
+            ; Phase 2: self-modify K_TYPE's/K_READ's own jump-table slots
+            ; (kernel/kernel.asm, $011E/$0157) to a bare "LBR <real
+            ; routine>", using the SAME value just computed into
+            ; IO_TYPE_TARGET/IO_READ_TARGET above -- see kernel.inc's own
+            ; header comment on those two words, and kernel/redir.asm's
+            ; module header, for the full design. The slot's own opcode
+            ; byte ($C0) is already correct at link time (kernel.asm
+            ; declares a self-referencing placeholder LBR there); only
+            ; the 2-byte operand is written here. Runs after all 4
+            ; detection branches above have converged, so this one block
+            ; covers every case uniformly.
+            mov         rf, IO_TYPE_TARGET  ; RF = dest, set BEFORE
+                                            ; reading it (gotcha #4)
+            lda         rf
+            phi         r9
+            ldn         rf
+            plo         r9                  ; R9 = the real TYPE target
+
+            ldi         high (K_TYPE+1)
+            phi         rf
+            ldi         low (K_TYPE+1)
+            plo         rf                  ; RF = &K_TYPE's slot operand
+            ghi         r9
+            str         rf
+            inc         rf
+            glo         r9
+            str         rf                  ; K_TYPE's slot now reads
+                                            ; "LBR <real TYPE routine>"
+
+            mov         rf, IO_READ_TARGET
+            lda         rf
+            phi         r9
+            ldn         rf
+            plo         r9                  ; R9 = the real READ target
+
+            ldi         high (K_READ+1)
+            phi         rf
+            ldi         low (K_READ+1)
+            plo         rf                  ; RF = &K_READ's slot operand
+            ghi         r9
+            str         rf
+            inc         rf
+            glo         r9
+            str         rf                  ; K_READ's slot now reads
+                                            ; "LBR <real READ routine>"
+
             lbr         KERN_ENTRY          ; continue into kernel_init proper
 
 ;--------------------------------------------------------------

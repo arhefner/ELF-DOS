@@ -12,11 +12,12 @@ LE_MODE_FAST:   equ     0       ; read_line_ex: f_uread directly, byte-
                                 ; sequences, but can never see
                                 ; redirected input -- always DF=0.
 LE_MODE_REDIR:  equ     1       ; read_line_ex: K_READ (redirect-aware
-                                ; via the kernel's own _redir_read),
-                                ; may return DF=1 at EOF, but subject
-                                ; to K_READ's own latency-driven byte-
-                                ; drop risk on a fast live arrow-key
-                                ; sequence.
+                                ; via kernel/redir.asm's self-modified
+                                ; jump-table slot -- see its own module
+                                ; header), may return DF=1 at EOF, but
+                                ; still subject to K_READ's own latency-
+                                ; driven byte-drop risk on a fast live
+                                ; arrow-key sequence.
 LE_MODE_BITBANG: equ    2       ; read_line_ex: f_bread directly
                                 ; (2026-08-05) -- the onboard bit-
                                 ; banged serial port, same byte-drop-

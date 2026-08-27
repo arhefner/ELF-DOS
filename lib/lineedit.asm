@@ -47,8 +47,9 @@
 ;     contract -- see kernel/redir.asm's own header and the
 ;     K_INPUTL-EOF bug hunt in CLAUDE.md). f_uread can never see
 ;     redirected input at all (redirection is a kernel-jump-table-
-;     level concept -- _redir_read is reached only via K_READ's own
-;     dispatch slot), so a version that always used f_uread would
+;     level concept -- kernel/redir.asm's file-I/O read routine is
+;     reached only via K_READ's own self-modified dispatch slot), so a
+;     version that always used f_uread would
 ;     silently break "< file" batch editing for any caller that
 ;     switched to it.
 ;
@@ -153,9 +154,9 @@
 ;------------------------------------------------------------------
 ; le_getchar: mode-aware, blocking single-byte read -- see this
 ; file's own header comment for the full LE_MODE_FAST/LE_MODE_REDIR
-; tradeoff. In LE_MODE_REDIR, D==0 signals EOF, matching
-; kernel/redir.asm's _redir_read own documented contract ("D=0 (NUL)
-; at EOF or on a read error"); a live console read via K_READ, when
+; tradeoff. In LE_MODE_REDIR, D==0 signals EOF, matching K_READ's own
+; documented contract ("D=0 (NUL) at EOF or on a read error" --
+; kernel/redir.asm's _read_from_file); a live console read via K_READ, when
 ; NOT actually redirected, falls straight through to the real BIOS
 ; f_read and can never legitimately produce a NUL for a genuine
 ; keystroke, so this is unambiguous. LE_MODE_FAST/LE_MODE_BITBANG

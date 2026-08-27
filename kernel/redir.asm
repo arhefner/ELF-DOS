@@ -11,13 +11,31 @@
 ; routine's own header below.
 ;
 ; Redirection itself is made transparent to every existing and future
-; program by rewriting K_TYPE/K_MSG/K_INMSG/K_READ/K_INPUTL's own
-; jump-table targets (kernel/kernel.asm) to the dispatchers below,
-; instead of the bare BIOS passthroughs they used to be -- each checks
-; whether redirection is active and, if not, falls straight through to
-; the original BIOS call with no added overhead. No new jump-table
-; slots, no calling-convention changes: a program that already calls
-; K_TYPE/K_MSG/etc gets redirect support automatically.
+; program via kernel/kernel.asm's own jump table, but the exact
+; mechanism differs by slot as of PHASE 2 (self-modifying K_TYPE/K_READ
+; vectors):
+;
+;   - K_TYPE/K_READ's own slot operand is repatched DIRECTLY by
+;     _redir_setup/_redir_teardown below -- not a runtime flag check on
+;     every call, a genuinely different target routine ("LBR
+;     <console/file/discard routine>") depending on what the CURRENT
+;     command's redirection needs. Boot-time default (boot/krnboot.asm)
+;     is a bare "LBR <real console routine>"; every "call K_TYPE"/
+;     "call K_READ" throughout the whole OS -- kernel-internal or
+;     program -- automatically does the right thing with zero added
+;     branching in the common (not redirected) case.
+;   - K_MSG/K_INMSG's own slots are NEVER repatched -- they're
+;     ordinary, permanent entries pointing at trivial byte-loops that
+;     simply "call K_TYPE" per character (see _redir_msg/_redir_inmsg
+;     below), inheriting whatever K_TYPE's own slot currently does with
+;     no redirect-awareness of their own.
+;   - K_INPUTL is untouched by Phase 2 entirely -- its own dispatcher
+;     (_redir_inputl below) still checks redir_in_active/redir_in_null
+;     directly, exactly as before.
+;
+; No new jump-table slots, no calling-convention changes for K_TYPE/
+; K_READ/K_MSG/K_INMSG/K_INPUTL: a program that already calls any of
+; these gets redirect support automatically.
 ;
 ; MEMORY COST, BY DESIGN (the user's own proposal, 2026-07-16): output-
 ; only or input-only redirection -- overwhelmingly the common cases --
@@ -81,7 +99,11 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   _himem_release
             extrn   _is_nul_device
             extrn   _redir_close_out_if_open
-            extrn   _io_tail_jump
+            extrn   _patch_io_vector
+            extrn   _type_to_file
+            extrn   _type_discard
+            extrn   _read_from_file
+            extrn   _read_eof_immediate
 
 ; same-file cross-proc data references (required even within the same
 ; file -- see CLAUDE.md gotcha #6)
@@ -94,10 +116,6 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   redir_stack_reserved
             extrn   redir_scratch
             extrn   himem_scratch
-            extrn   kim_start
-            extrn   kim_resume
-            extrn   kim_ptr
-            extrn   kim_remaining
             extrn   kir_buf
             extrn   kir_max
             extrn   kir_count
@@ -439,32 +457,59 @@ rcoo_clear:
             endp
 
 ; ----------------------------------------------------------------
+; _patch_io_vector: overwrite a K_TYPE/K_READ-shaped jump-table slot's
+; own 2-byte LBR operand to point directly at a new target -- the
+; actual Phase 2 self-modification primitive, shared by _redir_setup
+; (patches to a file-I/O routine) and _redir_teardown (restores the
+; real console routine, previously auto-detected once at boot into
+; IO_TYPE_TARGET/IO_READ_TARGET -- see kernel.inc's own header comment
+; on those two words for the full design).
+; Args:    RF = &slot's operand (e.g. K_TYPE+1 or K_READ+1)
+;          RB = new target address
+; Returns: nothing
+; Modifies: RF, D
+; ----------------------------------------------------------------
+            proc    _patch_io_vector
+
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; _redir_setup: open whichever of RUN_REDIR_OUT/RUN_REDIR_IN the
 ; shell's tokenizer set, right before run_loop runs the resolved
 ; command. A no-op (DF=0) if neither is set -- the common case, only
 ; two quick zero-checks. Output (if requested) always opens through
 ; prog_fcb/prog_iobuf, UNLESS the target is the null device ("NUL",
 ; case-insensitive -- see _is_nul_device), in which case no real FCB
-; is touched at all: redir_out_null is set instead, and the 3 output
-; dispatchers (_redir_type/_redir_msg/_redir_inmsg) discard the write
-; and report success without ever calling file_write. Input (if
-; requested) also uses prog_fcb/prog_iobuf UNLESS output is ALSO using
-; it (a real, non-NUL output redirect), in which case input uses a
-; dynamically-reserved second FCB+iobuf instead (see _himem_reserve)
-; -- an output redirect to NUL does NOT count as "using prog_fcb" for
-; this decision, since it never touches it. Input redirected from NUL
-; also skips any real FCB and sets redir_in_null instead; the 2 input
-; dispatchers (_redir_read/_redir_inputl) short-circuit straight to
-; their own existing EOF handling -- matching MS-DOS's own "reading
-; from NUL returns EOF immediately" convention -- rather than needing
-; any new EOF logic of their own.
+; is touched at all: redir_out_null is set instead, and K_TYPE's own
+; jump-table slot is repatched to _type_discard rather than
+; _type_to_file (PHASE 2: K_TYPE's slot itself now encodes whether
+; output is redirected at all, and to what -- see this file's own
+; module header) -- either way the write is discarded and reported as
+; success, without ever calling file_write. Input (if requested) also
+; uses prog_fcb/prog_iobuf UNLESS output is ALSO using it (a real,
+; non-NUL output redirect), in which case input uses a dynamically-
+; reserved second FCB+iobuf instead (see _himem_reserve) -- an output
+; redirect to NUL does NOT count as "using prog_fcb" for this decision,
+; since it never touches it. Input redirected from NUL also skips any
+; real FCB and repatches K_READ's own slot to _read_eof_immediate
+; instead of _read_from_file -- matching MS-DOS's own "reading from
+; NUL returns EOF immediately" convention -- rather than needing any
+; new EOF logic of its own.
 ; Args:    none
 ; Returns: DF = 0 on success, DF = 1 if any requested open failed (bad
 ;          path, disk full, the input file doesn't exist, or --
 ;          extremely rare -- not enough RAM headroom for a dual
-;          redirect's second buffer); nothing is left open/reserved in
-;          that case, the caller should report an error and skip
-;          running the child entirely (fail the whole command, not a
+;          redirect's second buffer); nothing is left open/reserved,
+;          and neither K_TYPE's nor K_READ's slot is repatched, in that
+;          case -- the caller should report an error and skip running
+;          the child entirely (fail the whole command, not a
 ;          half-working redirect)
 ; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
 ; ----------------------------------------------------------------
@@ -516,6 +561,20 @@ rs_out_domode:
             mov     rf, redir_out_active
             ldi     $FF
             str     rf
+
+            ; PHASE 2: repatch K_TYPE's own jump-table slot to
+            ; _type_to_file -- from here on, every "call K_TYPE" (by
+            ; ANY caller, kernel or program) writes straight to this
+            ; redirect file with no runtime flag-check at all.
+            ldi     high (K_TYPE+1)
+            phi     rf
+            ldi     low (K_TYPE+1)
+            plo     rf                  ; RF = &K_TYPE's slot operand
+            ldi     high _type_to_file
+            phi     rb
+            ldi     low _type_to_file
+            plo     rb                  ; RB = new target
+            call    _patch_io_vector
             lbr     rs_in
 
 rs_out_isnull:
@@ -525,6 +584,17 @@ rs_out_isnull:
             mov     rf, redir_out_null
             ldi     $FF
             str     rf
+
+            ; PHASE 2: repatch K_TYPE's slot to _type_discard instead
+            ldi     high (K_TYPE+1)
+            phi     rf
+            ldi     low (K_TYPE+1)
+            plo     rf
+            ldi     high _type_discard
+            phi     rb
+            ldi     low _type_discard
+            plo     rb
+            call    _patch_io_vector
                                         ; falls through to rs_in
 
 rs_in:
@@ -584,6 +654,20 @@ rs_in_single:
             mov     rf, redir_in_active
             ldi     $FF
             str     rf
+
+            ; PHASE 2: repatch K_READ's own jump-table slot to
+            ; _read_from_file -- from here on, every "call K_READ"
+            ; reads straight from this redirect file, no runtime
+            ; flag-check.
+            ldi     high (K_READ+1)
+            phi     rf
+            ldi     low (K_READ+1)
+            plo     rf                  ; RF = &K_READ's slot operand
+            ldi     high _read_from_file
+            phi     rb
+            ldi     low _read_from_file
+            plo     rb                  ; RB = new target
+            call    _patch_io_vector
             lbr     rs_ok
 
 rs_in_dual:
@@ -651,6 +735,17 @@ rs_in_dual:
             mov     rf, redir_in_active
             ldi     $FF
             str     rf
+
+            ; PHASE 2: same K_READ slot repatch as rs_in_single above
+            ldi     high (K_READ+1)
+            phi     rf
+            ldi     low (K_READ+1)
+            plo     rf
+            ldi     high _read_from_file
+            phi     rb
+            ldi     low _read_from_file
+            plo     rb
+            call    _patch_io_vector
             lbr     rs_ok
 
 rs_in_isnull:
@@ -660,6 +755,17 @@ rs_in_isnull:
             mov     rf, redir_in_null
             ldi     $FF
             str     rf
+
+            ; PHASE 2: repatch K_READ's slot to _read_eof_immediate
+            ldi     high (K_READ+1)
+            phi     rf
+            ldi     low (K_READ+1)
+            plo     rf
+            ldi     high _read_eof_immediate
+            phi     rb
+            ldi     low _read_eof_immediate
+            plo     rb
+            call    _patch_io_vector
             lbr     rs_ok
 
 rs_err_undo_reserve:
@@ -699,13 +805,16 @@ rs_ok:
 ; _redir_teardown: close whichever of the output/input redirect FCBs
 ; _redir_setup opened, clear both active flags (and both null-device
 ; flags -- always, so neither can leak stale into the next command's
-; own _redir_setup), and reverse any dual-redirect stack reservation --
-; called unconditionally after prog_run returns (success or failure),
-; so a misbehaving child can never leave redirection (or a shrunk
-; stack/mem_top) silently active for the NEXT command. A NUL-device
-; redirect never opened a real FCB, so file_close is skipped for it
-; (calling it on redir_out_handle/redir_in_handle's leftover/bogus
-; value would be a real bug). Closing must happen before
+; own _redir_setup), reverse any dual-redirect stack reservation, and
+; -- PHASE 2 -- unconditionally restore K_TYPE's/K_READ's own jump-
+; table slots to the real console routine, regardless of whether
+; _redir_setup actually repatched either one. Called unconditionally
+; after prog_run returns (success or failure), so a misbehaving child
+; can never leave redirection (or a shrunk stack/mem_top, or a
+; repatched console vector) silently active for the NEXT command. A
+; NUL-device redirect never opened a real FCB, so file_close is skipped
+; for it (calling it on redir_out_handle/redir_in_handle's leftover/
+; bogus value would be a real bug). Closing must happen before
 ; _himem_release, since the dynamically-reserved FCB/iobuf (if any)
 ; live in exactly the memory _himem_release is about to hand back to
 ; the stack.
@@ -760,105 +869,58 @@ rt_release:
             call    _himem_release
 
 rt_release_done:
+            ; PHASE 2: restore K_TYPE's/K_READ's own jump-table slots to
+            ; the real console routine -- unconditionally, regardless
+            ; of whether _redir_setup actually repatched either one,
+            ; matching this routine's own "always reset shared state,
+            ; harmless no-op otherwise" convention. IO_TYPE_TARGET/
+            ; IO_READ_TARGET hold the real, boot-detected routine (see
+            ; kernel.inc's own header comment on those two words).
+            mov     rf, IO_TYPE_TARGET
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = the real TYPE routine
+            ldi     high (K_TYPE+1)
+            phi     rf
+            ldi     low (K_TYPE+1)
+            plo     rf
+            call    _patch_io_vector
+
+            mov     rf, IO_READ_TARGET
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = the real READ routine
+            ldi     high (K_READ+1)
+            phi     rf
+            ldi     low (K_READ+1)
+            plo     rf
+            call    _patch_io_vector
+
             rtn
 
             endp
 
 ; ----------------------------------------------------------------
-; _io_tail_jump: transfer control to a runtime-computed address as a
-; TRUE TAIL JUMP -- the target's own eventual "rtn" resumes directly
-; at whoever ORIGINALLY called K_TYPE/K_READ, not just back at this
-; routine's own caller. Deliberately NOT lib/icall.asm's own icall,
-; even though the underlying safe-target-assembly technique is
-; identical (see icall.asm's own header for the full P=R3 partial-
-; write hazard this avoids on the 1802): icall is reached via a real
-; "call", which means ITS caller (whoever executes "call icall") is
-; who the target's "rtn" returns to -- one level too shallow for
-; rty_console/rrd_console's own tail position. By the time those run,
-; R6 already holds the address the ORIGINAL K_TYPE/K_READ caller needs
-; resumed at (everything from the jump-table slot down to here is a
-; plain "lbr", which never touches R6) -- a "call icall" would
-; silently overwrite that with "resume right after this call" instead,
-; corrupting the return address for every console I/O call in the
-; whole OS. Reached via a plain "lbr" (never "call") for exactly this
-; reason -- the same "lbr, not call" discipline kernel/kernel.asm's
-; own k_inmsg jump-table slot already established for an analogous
-; R6-corruption hazard (see gotcha #10/#21-adjacent history).
-; Args:    RB = target address
-;          D  = whatever value the target routine itself expects in D
-;          (e.g. the character for f_utype/f_btype; unexamined by
-;          f_uread/f_bread, but preserved regardless to match icall's
-;          own general contract)
-; Returns: never returns here -- the target's own "rtn" resumes
-;          directly at whoever originally called K_TYPE/K_READ
-; Modifies: R3 (as any dispatch mechanism must), R7/R9 (brief, purely
-;          local temporaries -- never expected to carry anything
-;          meaningful across this call, matching icall's own contract)
-; ----------------------------------------------------------------
-            proc    _io_tail_jump
-
-            plo     r9                  ; stash D -- the mov below
-                                        ; clobbers D via its own LDI
-                                        ; sequence (gotcha #4)
-
-            mov     r7, iotj_safe       ; R7 = a compile-time-constant
-                                        ; local address -- safe to set
-                                        ; while P=R3
-            sep     r7                  ; P = R7, TEMPORARILY -- now
-                                        ; executing under a register
-                                        ; other than R3, so R3 can be
-                                        ; safely modified below with no
-                                        ; fetch-corruption risk (see
-                                        ; icall.asm's own header for
-                                        ; why this step is mandatory)
-
-iotj_safe:
-            ghi     rb
-            phi     r3
-            glo     rb
-            plo     r3                  ; R3 = target address, fully
-                                        ; and safely assembled while
-                                        ; P=R7, not P=R3
-
-            glo     r9                  ; D restored, for the target
-                                        ; to see exactly what this
-                                        ; routine's own caller left it
-                                        ; as
-            sep     r3                  ; P = R3 = target. R6 was
-                                        ; never touched anywhere above,
-                                        ; so the target's own eventual
-                                        ; "rtn" resumes directly at the
-                                        ; ORIGINAL K_TYPE/K_READ caller
-                                        ; with zero extra bookkeeping
-
-            endp
-
-; ----------------------------------------------------------------
-; _redir_type: redirect-aware replacement for the bare "lbr f_type"
-; K_TYPE used to be.
+; _type_to_file: write one character (D) to the currently-open output
+; redirect file (redir_out_handle). Reached ONLY via K_TYPE's own
+; self-modified jump-table slot ($011E), while output is redirected to
+; a real file -- K_TYPE's slot is repatched per command by
+; _redir_setup/_redir_teardown, not checked via a runtime flag on every
+; call (see this file's own module header for the full Phase 2 design).
 ;
-; MUST preserve RF/RC across itself, whether or not it ends up
-; redirecting -- hardware-found bug (2026-07-16): the first version of
-; this routine used RF/RC as ordinary scratch and returned with them
-; clobbered. progs/type.asm's own hot loop (its read_loop/print_loop)
-; depends on RF (the read cursor into type_buf, advanced via "lda rf"
-; immediately before each "call K_TYPE" and read again next iteration)
-; and RC (the remaining-byte counter) surviving the call -- confirmed
-; as the one exception to "assume clobbered" by progs/hexdump.asm's
-; own comment ("RF/RC across K_TYPE is the one exception, proven by
-; progs/type.asm's own hot loop"). The old bare "lbr f_type" never
-; touched them; this dispatcher must not either, from the caller's
-; perspective, regardless of which internal path it takes. Broke
-; TYPE's output on the very first hardware round (truncated to 1-2
-; garbage characters, no trailing newline) -- R7/RA are preserved too
-; out of the same caution, since nothing establishes they're safe to
-; clobber either.
+; MUST preserve RF/RC/RA -- same hardware-found-bug caution as the old
+; _redir_type this replaces (2026-07-16): this routine uses all three
+; as its own internal scratch for the file_write call, and real callers
+; (progs/type.asm's own hot loop) depend on RF/RC surviving a "call
+; K_TYPE" regardless of which routine that slot currently targets.
 ;
-; Args:    D = character to print
-; Returns: whatever f_type itself returns (unexamined by every
-;          existing caller)
+; Args:    D = character to write
+; Returns: whatever file_write itself returns (unexamined by every
+;          existing caller, matching the old _redir_type's own contract)
 ; ----------------------------------------------------------------
-            proc    _redir_type
+            proc    _type_to_file
 
             plo     r7                  ; stash the incoming character
                                         ; FIRST -- every mov/push below
@@ -867,15 +929,6 @@ iotj_safe:
             push    rf
             push    rc
             push    ra
-
-            mov     rf, redir_out_active
-            ldn     rf
-            lbz     rty_console
-
-            mov     rf, redir_out_null
-            ldn     rf
-            lbnz    rty_discard         ; NUL device: discard the
-                                        ; byte, report success
 
             mov     rf, redir_scratch   ; RF = &redir_scratch -- also
                                         ; file_write's own source
@@ -897,138 +950,86 @@ iotj_safe:
                                         ; via RA scratch, leaving RF/RC
                                         ; untouched)
             call    file_write
-            lbr     rty_popret
 
-rty_discard:
-            lbr     rty_popret
-
-            ; shared pop+return tail (2026-08-01 size-reduction pass):
-            ; the success path (after file_write) and rty_discard used
-            ; to each carry their own identical "pop ra/pop rc/pop rf/
-            ; rtn" -- neither one needs D or any other register to
-            ; survive from its own branch point into this tail (the
-            ; success path's file_write result is unexamined by every
-            ; caller, matching this proc's own header; rty_discard sets
-            ; nothing at all before jumping here), so hoisting the
-            ; duplicate into one physical copy, reached via lbr from
-            ; both, changes no observable behavior.
-rty_popret:
             pop     ra
             pop     rc
             pop     rf
             rtn
 
-rty_console:
-            pop     ra
-            pop     rc
-            pop     rf
-            mov     r8, IO_TYPE_TARGET  ; R8 = &target word (fixed
-                                        ; address, PROG_BASE-relative)
-            lda     r8
-            phi     rb                  ; RB.hi = target's high byte,
-                                        ; R8 -> target's low-byte addr
-            ldn     r8
-            plo     rb                  ; RB.lo = target's low byte --
-                                        ; RB now holds the REAL target,
-                                        ; auto-detected once at boot
-                                        ; (boot/krnboot.asm)
-            glo     r7                  ; D = the character (restored)
-                                        ; -- set LAST, right before the
-                                        ; tail jump (gotcha #4: nothing
-                                        ; after this may clobber D)
-            lbr     _io_tail_jump       ; true tail jump -- see its own
-                                        ; header for why this replaced
-                                        ; a hardcoded "lbr f_type"
+            endp
+
+; ----------------------------------------------------------------
+; _type_discard: discard the character in D and report success. Reached
+; ONLY via K_TYPE's own self-modified slot while output is redirected
+; to the NUL device. Zero scratch use -- trivially safe, no register
+; protection needed at all.
+; Args:    D = character (ignored)
+; Returns: nothing meaningful (matching the old _redir_type's own
+;          "discard, report success" NUL-device behavior)
+; ----------------------------------------------------------------
+            proc    _type_discard
+
+            rtn
 
             endp
 
 ; ----------------------------------------------------------------
-; _redir_msg: redirect-aware replacement for "lbr f_msg". Computes the
-; string's length once and issues a single file_write for the whole
-; thing when redirected -- cheaper than _redir_type's byte-at-a-time
-; path, and correctness-equivalent.
+; _redir_msg: K_MSG's own jump-table target -- unlike K_TYPE/K_READ,
+; this slot is NEVER self-modified (the user's own explicit choice):
+; since K_TYPE's own vector now already does the right thing (console,
+; file, or discard) depending on what's currently patched into it,
+; K_MSG needs no redirect-awareness of its own at all -- it just
+; transfers the string to K_TYPE, one byte at a time. No separate byte
+; count or other bookkeeping: the loop drives entirely off RF, fetching
+; and advancing it each iteration.
 ;
-; Preserves RF/RC/RA across itself (same caution as _redir_type,
-; hardware-found bug 2026-07-16) -- R9 is never touched at all here, so
-; it survives naturally, matching the confirmed "R9 survives f_msg"
-; contract (gotcha #8).
+; DELIBERATE CONTRACT CHANGE from the old _redir_msg (Phase 2): RF is
+; now left pointing at the string's terminating NUL when this returns,
+; not preserved at its original (start-of-string) value -- confirmed
+; via a repo-wide scan of every "call K_MSG" site that nothing relies
+; on RF surviving unchanged (every real call site either doesn't touch
+; RF again afterward, or resets it explicitly before its next use).
+;
+; RA is still protected (push/pop) -- the one other promise the old
+; contract made that this design keeps, since nothing establishes it's
+; safe to drop (mr.asm/ms.asm's own 2026-07-11 hardware finding: RA
+; specifically does NOT survive repeated calls through K_TYPE/K_READ's
+; jump-table slots) and the cost is one push/pop pair per call, not per
+; byte. RC/R9 are not protected: neither is part of K_MSG's documented
+; calling convention, and RF/RC surviving REPEATED K_TYPE calls is
+; already independently proven safe (progs/type.asm's own hot loop) --
+; this loop relies on that same proven property for RF, needing no
+; extra protection of its own.
 ;
 ; Args:    RF = pointer to a null-terminated string
-; Returns: whatever f_msg itself returns (unexamined by every existing
-;          caller)
+; Returns: RF left pointing at the string's terminating NUL
 ; ----------------------------------------------------------------
             proc    _redir_msg
 
-            mov     r7, rf              ; R7 = the string pointer
-
-            push    rf
-            push    rc
             push    ra
 
-            mov     rf, redir_out_active
+rmsg_loop:
             ldn     rf
-            lbz     rmsg_console
+            lbz     rmsg_done           ; NUL: done, RF left pointing
+                                        ; at it
+            inc     rf                  ; advance BEFORE the call (D
+                                        ; still holds the character --
+                                        ; inc rf doesn't touch D)
+            call    K_TYPE
+            lbr     rmsg_loop
 
-            mov     rf, redir_out_null
-            ldn     rf
-            lbnz    rmsg_discard        ; NUL device: discard the
-                                        ; whole string, report success
-
-            ; compute the string's length into RC
-            mov     rf, r7              ; RF = scan cursor
-            ldi     0
-            phi     rc
-            plo     rc                  ; RC = 0 (length so far)
-rmsg_scan:
-            ldn     rf
-            lbz     rmsg_scandone
-            inc     rf
-            glo     rc
-            adi     1
-            plo     rc
-            lbnz    rmsg_scan
-            ghi     rc
-            adi     1
-            phi     rc
-            lbr     rmsg_scan
-
-rmsg_scandone:
-            mov     rf, r7              ; RF = the string, back to its
-                                        ; start (file_write's own
-                                        ; source buffer argument)
-            mov     ra, redir_out_handle
-            lda     ra
-            phi     rd
-            ldn     ra
-            plo     rd                  ; RD = the FCB pointer
-            call    file_write
-            lbr     rmsg_popret
-
-rmsg_discard:
-            lbr     rmsg_popret
-
-            ; shared pop+return tail (2026-08-01 size-reduction pass),
-            ; same reasoning as _redir_type's own rty_popret above --
-            ; neither the success path nor rmsg_discard needs anything
-            ; to survive from its own branch point into this tail.
-rmsg_popret:
+rmsg_done:
             pop     ra
-            pop     rc
-            pop     rf
             rtn
-
-rmsg_console:
-            pop     ra
-            pop     rc
-            pop     rf
-            mov     rf, r7              ; RF restored
-            lbr     f_msg
 
             endp
 
 ; ----------------------------------------------------------------
-; _redir_inmsg: redirect-aware replacement for the real BIOS inmsg
-; routine:
+; _redir_inmsg: K_INMSG's own jump-table target -- unlike K_TYPE/K_READ,
+; this slot is NEVER self-modified (same reasoning as _redir_msg
+; above): K_TYPE's own vector already does the right thing (console,
+; file, or discard), so K_INMSG just transfers each byte to K_TYPE as
+; it scans:
 ;
 ;   inmsglp:    sep   scall
 ;               dw    type
@@ -1043,33 +1044,25 @@ rmsg_console:
 ; nested call here would reset it before this routine ever got a
 ; chance to read it.
 ;
-; Scans the whole inline message first (a pure lda r6/lbnz loop, no
-; calls at all during the scan, so nothing can clobber R6 mid-scan),
-; stashing R6's starting value and its final (correct post-NUL resume)
-; value to memory. Then dispatches: one file_write call if redirected
-; (cheaper than the original byte-at-a-time shape), or the original
-; byte-at-a-time f_type loop if not, matching today's console timing
-; exactly -- and finally reloads R6 from the stashed resume value
-; before returning, rather than assuming it survives the dispatch
-; call(s) (gotcha #8/#10's standing "don't trust a register across an
-; unaudited call" discipline).
+; No separate byte count or resume-address bookkeeping needed anymore
+; (Phase 2): "lda r6" both fetches and advances R6 in one instruction,
+; so scanning to the NUL automatically leaves R6 at the correct resume
+; point, with nothing further to compute or restore.
 ;
-; A single inline message is assumed to fit in 255 bytes (an
-; extremely safe assumption for a compile-time string literal in this
-; project) -- kim_remaining below is a single byte.
-;
-; Also preserves RF/RC/R9/RA/RD across itself, same caution as
-; _redir_type/_redir_msg (hardware-found bug 2026-07-16) -- R9
-; specifically is confirmed to survive f_inmsg (gotcha #8), and this
-; routine already uses R9 as its own internal scratch (kim_start's
-; value), so without this it would break that contract for any real
-; caller relying on it, exactly like the RF/RC bug did for K_TYPE. RD
-; protection was a SECOND, later hardware-found bug (also 2026-07-16,
-; found chasing ECHO's redirected-append corruption): the redirected
-; path below calls file_write, which documents RD as scratch, and
-; progs/echo.asm's loop depends on RD (holding its own loop index)
-; surviving a "call K_INMSG" for its separator -- silent when not
-; redirected, since the console path here never touches RD either.
+; Protects RF/RC/R9/RA/RD around the WHOLE scan -- not because this
+; routine uses any of them as scratch anymore (R6 alone drives the
+; loop now), but because K_INMSG's own EXISTING, hardware-confirmed
+; caller contract already promises all five survive a "call K_INMSG"
+; (progs/echo.asm's own real dependency on RD, hardware-found bug
+; 2026-07-16), and nothing establishes that a repeated "call K_TYPE"
+; preserves R9/RA/RD (RA specifically is confirmed NOT to, per
+; mr.asm/ms.asm's 2026-07-11 hardware finding) -- so this routine still
+; needs to guarantee the contract itself, regardless of what K_TYPE
+; does internally to those three. RF/RC are separately proven safe
+; across repeated K_TYPE calls (progs/type.asm's own hot loop) and
+; aren't used as scratch here either, but are protected anyway for
+; consistency with the rest of the guarantee -- the cost is one
+; push/pop pair each, once per call, not once per byte.
 ;
 ; Args:    none (R6 already points at the caller's inline text)
 ; Returns: matches the real BIOS inmsg's own contract (resumes past
@@ -1081,172 +1074,16 @@ rmsg_console:
             push    rc
             push    r9
             push    ra
-            push    rd                  ; BUG FIX (hardware-found,
-                                        ; 2026-07-16): RD was NOT
-                                        ; protected here, but the
-                                        ; redirected path below calls
-                                        ; file_write, whose own header
-                                        ; documents RD as scratch
-                                        ; ("R7/R8/R9/RD are scratch,
-                                        ; recomputed fresh each
-                                        ; iteration"). progs/echo.asm's
-                                        ; loop calls K_INMSG for its
-                                        ; separator, then immediately
-                                        ; computes &argv[echo_i] via
-                                        ; "shl16 rd", relying on RD
-                                        ; (holding echo_i) surviving
-                                        ; that call -- exactly like
-                                        ; K_TYPE's RF/RC exception
-                                        ; (see _redir_type's own
-                                        ; header). Silent when NOT
-                                        ; redirected (the kim_console
-                                        ; path below never touches RD),
-                                        ; only breaking once real
-                                        ; hardware exercised a multi-
-                                        ; argument ECHO through actual
-                                        ; redirection: the first
-                                        ; argument (no separator/no
-                                        ; K_INMSG call before it) always
-                                        ; printed correctly, every
-                                        ; later one resolved to the
-                                        ; SAME wrong address once RD
-                                        ; came back clobbered by
-                                        ; file_write's own internal use
-                                        ; of it.
+            push    rd
 
-            mov     rf, kim_start
-            ghi     r6
-            str     rf
-            inc     rf
-            glo     r6
-            str     rf                  ; kim_start = R6 (scan start)
-
-kim_scan:
+kim_loop:
             lda     r6                  ; D = next inline byte, R6++
-            lbnz    kim_scan            ; not the NUL yet: keep going
+            lbz     kim_done            ; NUL: done, R6 already at the
+                                        ; correct resume point
+            call    K_TYPE
+            lbr     kim_loop
 
-            mov     rf, kim_resume
-            ghi     r6
-            str     rf
-            inc     rf
-            glo     r6
-            str     rf                  ; kim_resume = R6 (now one
-                                        ; past the NUL -- the correct
-                                        ; resume point)
-
-            ; length = kim_resume - kim_start - 1 (exclude the NUL)
-            mov     rf, kim_resume
-            lda     rf
-            phi     rc
-            ldn     rf
-            plo     rc                  ; RC = kim_resume
-            mov     rf, kim_start
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = kim_start
-            sub16   rc, r9              ; RC = kim_resume - kim_start
-            dec     rc                  ; RC -= 1 (exclude the NUL) --
-                                        ; DEC not SUB16 (2026-07-30):
-                                        ; a 1-byte no-D-clobber
-                                        ; instruction is strictly
-                                        ; better than SUB16's 8-byte,
-                                        ; D-clobbering macro expansion
-                                        ; whenever the constant is
-                                        ; small and DF isn't needed
-                                        ; from the subtraction itself
-                                        ; (confirmed here: the very
-                                        ; next instruction is a mov,
-                                        ; which clobbers D anyway)
-
-            mov     rf, redir_out_active
-            ldn     rf
-            lbz     kim_console
-
-            mov     rf, redir_out_null
-            ldn     rf
-            lbnz    kim_restore         ; NUL device: discard, skip
-                                        ; straight to R6 restoration --
-                                        ; needed regardless of output
-                                        ; disposition
-
-            ; --- redirected: one file_write call for the whole run ---
-            mov     rf, r9              ; RF = kim_start (still in R9)
-            mov     ra, redir_out_handle
-            lda     ra
-            phi     rd
-            ldn     ra
-            plo     rd                  ; RD = the FCB pointer (RD's
-                                        ; caller-visible value is
-                                        ; already saved via push rd at
-                                        ; entry, free to use internally
-                                        ; here)
-            call    file_write
-            lbr     kim_restore
-
-kim_console:
-            ; --- not redirected: print each byte via f_type, matching
-            ; the original byte-at-a-time console behavior/timing.
-            ; kim_ptr/kim_remaining are memory-resident and reloaded
-            ; fresh around every f_type call -- its own clobber
-            ; footprint isn't confirmed (gotcha #8) ---
-            mov     rf, kim_ptr
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf                  ; kim_ptr = kim_start
-
-            mov     rf, kim_remaining
-            glo     rc
-            str     rf                  ; kim_remaining = length (low
-                                        ; byte -- see the header note
-                                        ; on the 255-byte assumption)
-
-kim_print_loop:
-            mov     rf, kim_remaining
-            ldn     rf
-            lbz     kim_restore         ; nothing left: done
-
-            mov     rf, kim_ptr
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = kim_ptr
-            mov     rf, r9
-            ldn     rf                  ; D = the byte to print
-            call    f_type
-
-            ; kim_ptr += 1 (high byte stored first at kim_ptr, low
-            ; byte at kim_ptr+1 -- same convention as every other
-            ; word in this codebase)
-            mov     rf, kim_ptr
-            inc     rf                  ; RF -> kim_ptr's low byte
-            ldn     rf
-            adi     1
-            str     rf
-            lbnf    kim_ptr_hidone      ; no carry: done
-            dec     rf                  ; RF -> kim_ptr's high byte
-            ldn     rf
-            adi     1
-            str     rf
-kim_ptr_hidone:
-            mov     rf, kim_remaining
-            ldn     rf
-            smi     1
-            str     rf
-            lbr     kim_print_loop
-
-kim_restore:
-            mov     rf, kim_resume
-            lda     rf
-            phi     r6
-            ldn     rf
-            plo     r6                  ; R6 = kim_resume (restored
-                                        ; explicitly, not assumed to
-                                        ; survive the dispatch call(s)
-                                        ; made above)
-
+kim_done:
             pop     rd
             pop     ra
             pop     r9
@@ -1257,37 +1094,32 @@ kim_restore:
             endp
 
 ; ----------------------------------------------------------------
-; _redir_read: redirect-aware replacement for "lbr f_read". Reads one
-; byte from the input redirect file when active; returns D=0 (NUL) at
-; EOF or on a read error -- every current K_READ caller (COPY's Y/N
-; overwrite prompt) already treats "not Y" as cancel, so this degrades
-; safely to "no." Every subsequent call after EOF keeps returning 0
-; (file_read's own "0 bytes transferred" result naturally repeats past
-; EOF, so no extra state is needed here to remember EOF was hit).
+; _read_from_file: read one byte from the currently-open input redirect
+; file (redir_in_handle); D=0 at EOF or on an I/O error, same
+; convention K_READ has always had -- every current K_READ caller
+; (COPY's Y/N overwrite prompt) already treats "not Y" as cancel, so
+; this degrades safely to "no." Every subsequent call after EOF keeps
+; returning 0 (file_read's own "0 bytes transferred" result naturally
+; repeats past EOF, so no extra state is needed here to remember EOF
+; was hit). Reached ONLY via K_READ's own self-modified jump-table slot
+; ($0157), while input is redirected to a real file -- see this file's
+; own module header for the full Phase 2 design.
+;
 ; f_read's own confirmed contract is "D = char in, no other side
-; effects" (see CLAUDE.md's COPY overwrite-prompt writeup) -- the
-; strongest of the five, so this dispatcher preserves RF/RC/RA
-; unconditionally (same hardware-found-bug caution as the other four).
+; effects" (see CLAUDE.md's COPY overwrite-prompt writeup) -- so this
+; routine preserves RF/RC/RA unconditionally too, same hardware-found-
+; bug caution as _type_to_file above and the old _redir_read this
+; replaces.
 ;
 ; Args:    none
-; Returns: D = the character read (0 at EOF/error), matching f_read's
-;          own "D = char in" contract
+; Returns: D = the character read (0 at EOF/error), matching K_READ's
+;          existing, unchanged "D = char in" contract
 ; ----------------------------------------------------------------
-            proc    _redir_read
+            proc    _read_from_file
 
             push    rf
             push    rc
             push    ra
-
-            mov     rf, redir_in_active
-            ldn     rf
-            lbz     rrd_console
-
-            mov     rf, redir_in_null
-            ldn     rf
-            lbnz    rrd_eof             ; NUL device: EOF immediately,
-                                        ; matching MS-DOS's own
-                                        ; convention
 
             mov     rf, redir_scratch
             ldi     0
@@ -1300,62 +1132,45 @@ kim_restore:
             ldn     ra
             plo     rd                  ; RD = the FCB pointer
             call    file_read           ; RC = bytes actually read
-            lbdf    rrd_eof             ; I/O error: treat like EOF
+            lbdf    rff_eof             ; I/O error: treat like EOF
             glo     rc
-            lbz     rrd_eof             ; 0 bytes: EOF
+            lbz     rff_eof             ; 0 bytes: EOF
 
             mov     rf, redir_scratch
             ldn     rf
             plo     r7                  ; stash the result -- the pops
                                         ; below clobber D
-            lbr     rrd_popret
+            lbr     rff_popret
 
-rrd_eof:
+rff_eof:
             ldi     0
             plo     r7                  ; stash "0" the same way the
                                         ; success path stashes its real
                                         ; byte, so both can share one
                                         ; physical pop+return tail
-                                        ; (2026-08-01 size-reduction
-                                        ; pass) -- rrd_console below is
-                                        ; NOT folded in here, since its
-                                        ; own tail ends in a jump to
-                                        ; f_read rather than a plain
-                                        ; return with R7's value in D
-            lbr     rrd_popret
 
-            ; shared pop+return tail: both the success path and
-            ; rrd_eof stash their D value into R7 before arriving here
-rrd_popret:
+rff_popret:
             pop     ra
             pop     rc
             pop     rf
             glo     r7
             rtn
 
-rrd_console:
-            pop     ra
-            pop     rc
-            pop     rf
-            mov     r8, IO_READ_TARGET  ; R8 = &target word (fixed
-                                        ; address, PROG_BASE-relative)
-            lda     r8
-            phi     rb                  ; RB.hi = target's high byte,
-                                        ; R8 -> target's low-byte addr
-            ldn     r8
-            plo     rb                  ; RB.lo = target's low byte --
-                                        ; RB now holds the REAL target,
-                                        ; auto-detected once at boot
-                                        ; (boot/krnboot.asm)
-            lbr     _io_tail_jump       ; true tail jump -- see its own
-                                        ; header for why this replaced
-                                        ; a hardcoded "lbr f_read". D is
-                                        ; passed through unexamined,
-                                        ; matching the original "lbr
-                                        ; f_read"'s own behavior exactly
-                                        ; (f_read/f_uread/f_bread don't
-                                        ; take an input in D, only
-                                        ; return one)
+            endp
+
+; ----------------------------------------------------------------
+; _read_eof_immediate: D=0 immediately (matching K_READ's existing EOF
+; convention). Reached ONLY via K_READ's own self-modified slot while
+; input is redirected to the NUL device -- matches MS-DOS's own
+; "reading from NUL returns EOF immediately" convention. Zero scratch
+; use -- trivially safe, no register protection needed.
+; Args:    none
+; Returns: D = 0
+; ----------------------------------------------------------------
+            proc    _read_eof_immediate
+
+            ldi     0
+            rtn
 
             endp
 
@@ -1549,9 +1364,9 @@ kir_eof:
             ; a repeat call after a prior partial-final-line call
             ; already consumed everything) is reported as true EOF.
             ; file_read's own "0 bytes" result is confirmed to repeat
-            ; indefinitely past real EOF (see _redir_read's own header
-            ; note), so this can't loop forever re-accumulating stale
-            ; partial content.
+            ; indefinitely past real EOF (see _read_from_file's own
+            ; header note), so this can't loop forever re-accumulating
+            ; stale partial content.
             mov     rf, kir_count
             ldn     rf
             lbnz    kir_line_done       ; nonzero: partial final line,
@@ -1649,7 +1464,7 @@ redir_stack_reserved:   db      0   ; set only while a dual-redirect's
                                     ; reservation through the same
                                     ; shared mechanism
 redir_scratch:          db      0   ; shared 1-byte I/O scratch for
-                                    ; _redir_type/_redir_read/
+                                    ; _type_to_file/_read_from_file/
                                     ; _redir_inputl (never in
                                     ; concurrent use -- this kernel is
                                     ; single-threaded)
@@ -1664,15 +1479,6 @@ himem_scratch:           dw      0   ; scratch word used by
                                     ; relocation incident; R2 is never
                                     ; touched by either routine at all
                                     ; in the current design
-
-kim_start:              dw      0   ; _redir_inmsg's own scan-start R6
-                                    ; value
-kim_resume:              dw      0   ; _redir_inmsg's own post-NUL
-                                    ; resume R6 value
-kim_ptr:                dw      0   ; _redir_inmsg's console-path
-                                    ; print cursor
-kim_remaining:           db      0   ; _redir_inmsg's console-path
-                                    ; remaining-byte countdown
 
 kir_buf:                 dw      0   ; _redir_inputl's destination
                                     ; buffer
@@ -1690,10 +1496,6 @@ kir_count:               db      0   ; _redir_inputl's running byte
                 public  redir_stack_reserved
                 public  redir_scratch
                 public  himem_scratch
-                public  kim_start
-                public  kim_resume
-                public  kim_ptr
-                public  kim_remaining
                 public  kir_buf
                 public  kir_max
                 public  kir_count

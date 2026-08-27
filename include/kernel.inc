@@ -267,19 +267,45 @@ RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
 ; logic) -- mBIOS stores a rewritable lbr vector at $003C (type)/$003F
 ; (read) already pointing at the correct real routine; classic BIOS has
 ; no such vector, so krnboot falls back to checking RE's high byte the
-; same way classic BIOS's own type:/read: entry points do. Read by
-; kernel/redir.asm's rty_console/rrd_console (K_TYPE/K_READ's own "not
-; redirected" fallthrough), which load the target into RB and "call
-; icall" (lib/icall.asm) to reach it directly -- see redir.asm's own
-; comment for why this replaced a hardcoded "lbr f_type"/"lbr f_read".
-; Same fixed-address/kernel-and-boot-shared convention as the fields
-; above, restated in kernel_api.inc even though no ordinary program
-; references these directly -- boot/krnboot.asm is a SEPARATE link unit
-; from kernel.bin and can only reach kernel-resident state through a
-; fixed address (or the K_* jump table) either way, same reasoning as
-; every other RUN_* field on this page.
+; same way classic BIOS's own type:/read: entry points do.
+;
+; PHASE 2 (self-modifying K_TYPE/K_READ vectors): these two words are no
+; longer read on every console call -- that consumer (kernel/redir.asm's
+; old _io_tail_jump/rty_console/rrd_console) is gone. boot/krnboot.asm
+; now ALSO uses the same computed value to self-modify K_TYPE's/K_READ's
+; own jump-table slots (kernel/kernel.asm, $011E/$0157) directly into a
+; bare "LBR <real routine>", once, at boot -- eliminating the runtime
+; redirect-check branch entirely for the common case, not just the
+; console-fallthrough dispatch. These two words are kept only as "the
+; one true record of the real console routine," read exclusively by
+; kernel/redir.asm's _redir_teardown (once per redirected command) to
+; know what to restore K_TYPE's/K_READ's slot to once the command
+; finishes. Same fixed-address/kernel-and-boot-shared convention as the
+; fields above, restated in kernel_api.inc even though no ordinary
+; program references these directly -- boot/krnboot.asm is a SEPARATE
+; link unit from kernel.bin and can only reach kernel-resident state
+; through a fixed address (or the K_* jump table) either way, same
+; reasoning as every other RUN_* field on this page.
 IO_READ_TARGET:     equ     PROG_BASE-112   ; word: real f_uread/f_bread
 IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
+
+; K_TYPE/K_READ: the jump-table addresses (kernel/kernel.asm), restated
+; here (matching kernel_api.inc's own identical constants -- "restated,
+; not shared," same convention as every field above) so kernel-internal
+; code can reach them too. Needed specifically because Phase 2's
+; self-modifying-vector design means K_TYPE's real target now varies at
+; runtime -- kernel/redir.asm's own K_MSG/K_INMSG implementations must
+; genuinely call THROUGH the jump table (never the bare label
+; "k_type"/"k_read" directly, which isn't public and deliberately isn't
+; made so: it's bare, unwrapped content sitting outside any proc/endp,
+; and this project's own gotcha #20 warns against cross-file references
+; to exactly that shape of label -- a plain equ constant, resolved at
+; assemble time, sidesteps that entirely). Never referenced from
+; kernel_api.inc's own copy or vice versa; if K_TYPE/K_READ's address
+; ever changes (it shouldn't, per the jump table's own append-only
+; convention), all three restatements need updating together.
+K_TYPE:             equ     $011E
+K_READ:             equ     $0157
 
 ; GLOB_BUF_LEN: size of the dynamic himem reservation progs/shell.asm's
 ; own glob-expansion pass makes via K_GLOB_RESERVE (kernel/glob.asm) --

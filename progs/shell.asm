@@ -2771,11 +2771,17 @@ pp_dirent:  ds      DIRENT_LEN
 ; banner/prompt still worked, since those go through K_MSG/K_INMSG ->
 ; K_TYPE, which was never hardcoded this way). K_READ itself was fixed
 ; the same day to resolve, at boot, directly to the real detected UART
-; routine (see IO_READ_TARGET/_io_tail_jump in kernel.inc's own header
-; comment) -- correct on both BIOSes, with far less indirection than
-; the old K_READ had, but not yet proven immune to the 2026-07-23
-; byte-drop risk at speed; see rlwh_loop's own call site below for the
-; current status. Echo still uses K_TYPE, not K_TTY -- K_TYPE is
+; routine (Phase 1: IO_READ_TARGET, read at runtime via _io_tail_jump)
+; -- correct on both BIOSes, with far less indirection than the old
+; K_READ had, but not yet proven immune to the 2026-07-23 byte-drop
+; risk at speed. Phase 2 (2026-08-26, same day) went further: K_READ's
+; own jump-table slot is now self-modified directly to a bare
+; "LBR <real routine>" (see kernel.inc's own IO_TYPE_TARGET/
+; IO_READ_TARGET header comment and kernel/redir.asm's module header)
+; -- _io_tail_jump no longer exists. Whether THIS is finally enough to
+; avoid the 2026-07-23 byte-drop at speed is still an open, needs-
+; hardware-testing question; see rlwh_loop's own call site below for
+; the current status. Echo still uses K_TYPE, not K_TTY -- K_TYPE is
 ; already exercised once per byte by TYPE.exe's own hot loop across
 ; this project's whole history, while K_TTY has a documented hardware
 ; caution under repeated calls (/CLAUDE.md gotcha #14); the byte-drop
@@ -2862,13 +2868,16 @@ rlwh_loop:
                                         ; that): K_READ now resolves,
                                         ; at boot, directly to the
                                         ; REAL, auto-detected UART
-                                        ; routine (kernel/redir.asm's
-                                        ; rrd_console, via
-                                        ; IO_READ_TARGET/_io_tail_jump
-                                        ; -- see kernel.inc's own
-                                        ; header comment on those) --
-                                        ; with far less indirection
-                                        ; than before, AND correct on
+                                        ; routine -- Phase 2 (2026-08-26,
+                                        ; same day): K_READ's own jump-
+                                        ; table slot is self-modified
+                                        ; directly, see kernel.inc's own
+                                        ; IO_TYPE_TARGET/IO_READ_TARGET
+                                        ; header comment and
+                                        ; kernel/redir.asm's module
+                                        ; header -- with far less
+                                        ; indirection than before, AND
+                                        ; correct on
                                         ; both classic BIOS and mBIOS,
                                         ; unlike the hardcoded-
                                         ; hardware-UART-only "f_uread"
@@ -3445,9 +3454,14 @@ rlwh_escape:
                                         ; may not survive the same byte-
                                         ; drop risk that motivated the
                                         ; original switch away from it --
-                                        ; K_READ's indirection is smaller
-                                        ; now (see IO_READ_TARGET/
-                                        ; _io_tail_jump) but not zero.
+                                        ; K_READ's indirection is far
+                                        ; smaller now (Phase 2 self-
+                                        ; modified vector, see kernel/
+                                        ; redir.asm's module header) but
+                                        ; not necessarily zero, since
+                                        ; K_READ itself is still reached
+                                        ; via the ordinary jump-table
+                                        ; call/return dispatch.
                                         ; NEEDS A REAL HARDWARE TEST
                                         ; specifically exercising fast
                                         ; arrow-key sequences before this
@@ -3490,9 +3504,10 @@ rlwh_escape:
             ; calls below (the CSI-letter read, and the Del key's '~'
             ; terminator read) converted BACK to K_READ, now that
             ; K_READ itself resolves directly to the real detected UART
-            ; routine with far less indirection than before (see
-            ; IO_READ_TARGET/_io_tail_jump) -- and, critically, is
-            ; correct on mBIOS's bit-bang UART, which the OLD hardcoded
+            ; routine with far less indirection than before (Phase 2:
+            ; K_READ's own jump-table slot is self-modified directly,
+            ; see kernel/redir.asm's module header) -- and, critically,
+            ; is correct on mBIOS's bit-bang UART, which the OLD hardcoded
             ; f_uread never was (that's the actual bug this whole pass
             ; fixes). This is a real, deliberate reintroduction of the
             ; SAME byte-drop risk the 2026-07-23 test above was built to

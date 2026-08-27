@@ -72,10 +72,8 @@
             extrn   dir_last_off
             extrn   _redir_setup
             extrn   _redir_teardown
-            extrn   _redir_type
             extrn   _redir_msg
             extrn   _redir_inmsg
-            extrn   _redir_read
             extrn   _redir_inputl
             extrn   kernel_glob_reserve
             extrn   _glob_release
@@ -141,15 +139,30 @@ k_dir_read:     lbr     dir_read            ; $011B
 ; removal note) -- collapsed into the internal-only prog_run
 ; (kernel/loader.asm), called directly by run_loop below, never
 ; through this table.
-; K_TYPE/K_MSG/K_INMSG/K_INPUTL (below) and K_READ (further down) are no
-; longer bare BIOS passthroughs -- each now targets a small redirect-
-; aware dispatcher in kernel/redir.asm that falls straight through to
-; the original BIOS call when I/O redirection isn't active (see
-; redir.asm's own module header for the full design). Still a plain
-; lbr each -- not a nested call -- so the target address is the only
-; thing that changed; every existing caller's own calling convention
-; is untouched.
-k_type:         lbr     _redir_type         ; $011E
+;
+; K_TYPE/K_READ (PHASE 2, self-modifying vectors): these two slots are
+; no longer a fixed "lbr <dispatcher>" like every other entry in this
+; table -- their own 2-byte operand is self-modified at RUNTIME.
+; boot/krnboot.asm writes a bare "LBR <real console routine>" here once
+; at boot (see kernel.inc's own IO_TYPE_TARGET/IO_READ_TARGET comment);
+; kernel/redir.asm's _redir_setup/_redir_teardown repatch the SAME
+; operand, per command, to point at a file-I/O routine while output/
+; input is redirected, then restore it afterward. The source-level
+; targets below ("lbr k_type"/"lbr k_read", i.e. each slot pointing at
+; itself) are placeholders ONLY -- an infinite spin if somehow ever
+; reached before krnboot's own patch step runs, matching this project's
+; own preference for a visible hang over a silent wild jump. See
+; kernel/redir.asm's own module header for the full design.
+;
+; K_MSG/K_INMSG/K_INPUTL are NOT self-modified -- they stay ordinary,
+; permanent "lbr <dispatcher>" entries. K_MSG/K_INMSG's own dispatchers
+; are now trivial byte-loops that simply "call K_TYPE" per character --
+; since K_TYPE's own vector already does the right thing (console,
+; file, or discard) depending on what's currently patched into it,
+; K_MSG/K_INMSG need no redirect-awareness of their own at all anymore.
+k_type:         lbr     k_type              ; $011E -- placeholder, see
+                                            ; above; self-modified by
+                                            ; boot/krnboot.asm
 k_msg:          lbr     _redir_msg          ; $0121
 k_inmsg:        lbr     _redir_inmsg        ; $0124
 k_getdev:       lbr     f_getdev            ; $0127 (BIOS passthrough)
@@ -175,7 +188,10 @@ k_file_delete:  lbr     file_delete         ; $014B
 k_dir_create:   lbr     dir_create          ; $014E
 k_dir_remove:   lbr     dir_remove          ; $0151
 k_file_rename:  lbr     file_rename         ; $0154
-k_read:         lbr     _redir_read         ; $0157
+k_read:         lbr     k_read              ; $0157 -- placeholder, see
+                                            ; k_type's own comment above;
+                                            ; self-modified by
+                                            ; boot/krnboot.asm
 
 ; K_FAT_INIT/K_FILE_INIT/K_SHELL_INIT: boot-only, called exactly once
 ; each by boot/krnboot.asm's relocated init code (see kernel_init's
