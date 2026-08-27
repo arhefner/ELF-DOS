@@ -410,20 +410,22 @@ bg_label_arg:  dw      0           ; local to this proc only
 ; kernel_batch_args_reserve: K_BATCH_ARGS_RESERVE's jump-table target
 ; -- %0-%9 batch-argument substitution (2026-07-25). UNCHANGED by the
 ; 2026-07-30 loadable-module split -- see kernel_api.inc's own doc
-; comment for the full contract. Mirrors kernel/glob.asm's own
-; kernel_glob_reserve almost exactly, reusing the same shared
-; _himem_reserve/_himem_release mechanism (kernel/redir.asm) rather
-; than inventing a new reservation routine -- that mechanism is
-; already length-parameterized, flag-agnostic, and already proven safe
-; with multiple simultaneous callers (this file's own reservation can
-; be active at the same time as a per-command dual-redirect or glob
-; reservation, nested, with no special handling needed here).
+; comment for the full contract. Mirrored kernel/glob.asm's own
+; kernel_glob_reserve almost exactly at the time both existed (that
+; file was later removed as dead code -- see kernel_api.inc's own
+; removal note); reuses the same shared _himem_reserve/_himem_release
+; mechanism (kernel/redir.asm) rather than inventing a new reservation
+; routine -- that mechanism is already length-parameterized, flag-
+; agnostic, and already proven safe with multiple simultaneous callers
+; (this file's own reservation can be active at the same time as a
+; per-command dual-redirect reservation, nested, with no special
+; handling needed here).
 ;
-; Deliberately NOT idempotent like K_GLOB_RESERVE: this is only ever
-; called once per batch, right after K_BATCH_START succeeds, and
-; starting a new batch while one is already active is already rejected
-; (nested batch) before this could ever be reached twice without a
-; release in between.
+; Deliberately NOT idempotent the way kernel_glob_reserve used to be:
+; this is only ever called once per batch, right after K_BATCH_START
+; succeeds, and starting a new batch while one is already active is
+; already rejected (nested batch) before this could ever be reached
+; twice without a release in between.
 ;
 ; Population (packing the actual argument text/pointers into the
 ; reserved block) is deliberately NOT done here -- it happens shell-
@@ -546,9 +548,11 @@ kbag_inactive:
 
 ; ----------------------------------------------------------------
 ; _batch_args_release: kernel-internal only (no jump-table slot --
-; called from batch_mod_teardown above, same link unit, mirroring
-; kernel/glob.asm's own _glob_release shape). UNCHANGED by the
-; 2026-07-30 loadable-module split, other than its caller: it used to
+; called from batch_mod_teardown above, same link unit; mirrored
+; kernel/glob.asm's own _glob_release shape at the time that file
+; still existed -- see kernel_api.inc's own removal note). UNCHANGED
+; by the 2026-07-30 loadable-module split, other than its caller: it
+; used to
 ; be called directly from batch_readline's own EOF/I/O-error close
 ; paths; now it's called once, centrally, from batch_mod_teardown --
 ; same net effect (still runs exactly once per real batch-end), but
@@ -560,10 +564,10 @@ kbag_inactive:
 ; the time a real batch-end is ever detected (attempting to read what
 ; would be the NEXT line, or a GOTO that can't find its label), the
 ; previous command has already fully run and returned, including its
-; own per-command _redir_teardown/_glob_release calls inside that
-; command's own run_loop iteration -- so this reservation, made before
-; any per-line reservation for this batch ever could be, is always
-; released after them, LIFO, for free.
+; own per-command _redir_teardown call inside that command's own
+; run_loop iteration -- so this reservation, made before any per-line
+; reservation for this batch ever could be, is always released after
+; it, LIFO, for free.
 ;
 ; Args:    none
 ; Returns: nothing
@@ -627,13 +631,18 @@ batch_mod_reserve_size: dw      0   ; the himem reservation size
 
 batch_args_reserved: db 0          ; set only while a %0-%9 himem
                                     ; reservation is currently active --
-                                    ; unrelated to redir_stack_reserved/
-                                    ; glob_stack_reserved (kernel/
-                                    ; redir.asm, kernel/glob.asm), which
-                                    ; track separate, possibly-
-                                    ; simultaneous reservations through
+                                    ; unrelated to kernel/redir.asm's
+                                    ; own redir_stack_reserved, which
+                                    ; tracks a separate, possibly-
+                                    ; simultaneous reservation through
                                     ; the same shared _himem_reserve/
                                     ; _himem_release mechanism
+                                    ; (kernel/glob.asm's own
+                                    ; glob_stack_reserved used to be a
+                                    ; third such flag, before that
+                                    ; whole file was removed as dead
+                                    ; code -- see kernel_api.inc's own
+                                    ; removal note)
 batch_args_empty:    db 0          ; a fixed, always-valid empty-string
                                     ; constant -- kernel_batch_args_getarg
                                     ; points here for an out-of-range

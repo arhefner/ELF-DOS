@@ -29,13 +29,18 @@
 ;     simply "call K_TYPE" per character (see _redir_msg/_redir_inmsg
 ;     below), inheriting whatever K_TYPE's own slot currently does with
 ;     no redirect-awareness of their own.
-;   - K_INPUTL is untouched by Phase 2 entirely -- its own dispatcher
-;     (_redir_inputl below) still checks redir_in_active/redir_in_null
-;     directly, exactly as before.
 ;
 ; No new jump-table slots, no calling-convention changes for K_TYPE/
-; K_READ/K_MSG/K_INMSG/K_INPUTL: a program that already calls any of
-; these gets redirect support automatically.
+; K_READ/K_MSG/K_INMSG: a program that already calls any of these gets
+; redirect support automatically.
+;
+; K_INPUTL itself (this file's own former _redir_inputl) was removed
+; entirely, along with its jump-table slot, in the same pass that
+; deleted kernel/glob.asm -- see include/kernel_api.inc's own history
+; note on the jump-table renumbering for the full story. It had zero
+; real callers anywhere: lib/lineedit.asm's read_line_ex was built
+; 2026-07-30 explicitly as its replacement, and progs/edlin.asm already
+; used that instead.
 ;
 ; MEMORY COST, BY DESIGN (the user's own proposal, 2026-07-16): output-
 ; only or input-only redirection -- overwhelmingly the common cases --
@@ -116,9 +121,6 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   redir_stack_reserved
             extrn   redir_scratch
             extrn   himem_scratch
-            extrn   kir_buf
-            extrn   kir_max
-            extrn   kir_count
 
 ; ----------------------------------------------------------------
 ; _himem_reserve: reduce mem_top by RC bytes, freeing that much RAM at
@@ -311,10 +313,12 @@ rsv_fail:
 ; K_HIMEM_RELEASE's own jump-table targets (2026-07-31) -- thin,
 ; general-purpose passthroughs to _himem_reserve/_himem_release above,
 ; exposed to ordinary programs for the first time. Unlike
-; kernel_glob_reserve (a fixed-size, idempotent, single-purpose
-; wrapper for exactly one caller), these are PURE MECHANISM, same
-; shape as the routines they wrap: no flag, caller-supplied size,
-; caller tracks its own reservation state. First real consumer:
+; kernel/glob.asm's own kernel_glob_reserve used to be (a fixed-size,
+; idempotent, single-purpose wrapper for exactly one caller, before
+; that file was removed as dead code -- see kernel_api.inc's own
+; removal note), these are PURE MECHANISM, same shape as the routines
+; they wrap: no flag, caller-supplied size, caller tracks its own
+; reservation state. First real consumer:
 ; lib/modload.asm's mod_load, which needs a page-aligned region of a
 ; size that varies per module -- see that file's own header for why a
 ; general-purpose reservation (not another single-purpose wrapper) is
@@ -1174,267 +1178,6 @@ rff_popret:
 
             endp
 
-; ----------------------------------------------------------------
-; _redir_inputl: redirect-aware replacement for "lbr f_inputl". Reads
-; from the input redirect file into RF, stopping at a newline (CR/LF
-; handling mirrors kernel/batch.asm's batch_readline, which already
-; solves exactly this "read a line from an open file, strip line
-; endings" problem), NUL-terminated, no console echo. Does NOT close
-; the input FCB (that's _redir_teardown's job, since a program might
-; legitimately call this again later in the same run).
-;
-; A single line is assumed to fit in 255 bytes (kir_max/kir_count
-; below are single bytes, matching this codebase's own K_INPUTL
-; callers -- the shell's prompt read and edlin's own three, all
-; 127-byte buffers); a caller passing a length over 255 has it
-; silently capped at 255.
-;
-; Preserves RF/RC/RA/R8/R9/RB across itself, same hardware-found-bug
-; caution as the other four dispatchers (2026-07-16) -- nothing
-; establishes any of these are safe for a caller to lose across
-; K_INPUTL, so none of them are trusted to be fair game.
-;
-; DF NOW HAS A REAL, DEFINED MEANING (2026-07-17, gap found by the
-; user testing `edlin file <NUL`): DF=0 means RF's buffer holds a real
-; line (possibly empty -- a blank Enter at a live console, or a
-; genuinely blank line in a redirected file); DF=1 means the
-; redirected input source is EXHAUSTED (immediate EOF from `<NUL`, or
-; a real file that's been fully read) -- RF's buffer is still written
-; as an empty string in that case too, but DF now lets a caller
-; distinguish "really nothing left" from "a normal blank line," which
-; nothing before this could. Before this fix, EVERY caller ignored DF
-; (there was nothing meaningful to check), so redefining it here is
-; safe for existing behavior. Non-redirected (console) input ALWAYS
-; reports DF=0 -- forced explicitly after a real `call f_inputl`
-; (not the previous tail `lbr`), since the real BIOS routine's own DF
-; behavior isn't confirmed and a live keyboard structurally can never
-; hit "redirected EOF." A caller that wants EOF-aware behavior (e.g.
-; edlin, to avoid spinning forever re-reading nothing from `<NUL`)
-; must now check DF after K_INPUTL; a caller that doesn't (unchanged
-; from before) still works exactly as it always has.
-;
-; Args:    RF = destination buffer, RC = max length
-; Returns: DF = 0 (real line, RF's buffer valid) or 1 (EOF, RF's
-;          buffer is an empty string)
-; ----------------------------------------------------------------
-            proc    _redir_inputl
-
-            mov     r7, rf              ; R7 = destination buffer
-                                        ; (unprotected scratch, same
-                                        ; convention as the other
-                                        ; dispatchers)
-
-            push    rf
-            push    rc
-            push    ra
-            push    r8
-            push    r9
-            push    rb
-
-            mov     rf, redir_in_active
-            ldn     rf
-            lbz     kir_console
-
-            mov     rf, kir_buf
-            ghi     r7
-            str     rf
-            inc     rf
-            glo     r7
-            str     rf                  ; kir_buf = R7 (dest buffer)
-                                        ; -- needed by kir_term below
-                                        ; regardless of which path
-                                        ; follows
-
-            mov     rf, redir_in_null
-            ldn     rf
-            lbnz    kir_null_eof        ; NUL device: EOF immediately
-                                        ; -- an empty line, exactly
-                                        ; what kir_term already writes
-                                        ; when kir_count is 0
-
-            mov     rf, kir_max
-            glo     rc
-            str     rf                  ; kir_max = RC's low byte
-
-            mov     rf, kir_count
-            ldi     0
-            str     rf                  ; kir_count = 0
-
-kir_loop:
-            ; stop with room for the NUL terminator: branch when
-            ; kir_count >= kir_max - 1 (same shape as
-            ; batch_readline's own "smi 126 / lbdf brl_term" bound
-            ; check, just with the limit read from memory instead of
-            ; a compile-time constant)
-            mov     rf, kir_max
-            ldn     rf
-            smi     1
-            str     r2                  ; [R2] = kir_max - 1 (one-shot
-                                        ; scratch-via-stack-pointer,
-                                        ; same idiom rtc.asm's
-                                        ; _pack_fat_datetime already
-                                        ; uses -- X is R2 by default,
-                                        ; per gotcha #7)
-            mov     rf, kir_count
-            ldn     rf                  ; D = kir_count
-            sm                          ; D = kir_count - (kir_max-1),
-                                        ; DF=1 if no borrow
-            lbdf    kir_line_done       ; buffer full -- real content,
-                                        ; not EOF
-
-            mov     rf, redir_scratch
-            ldi     0
-            phi     rc
-            ldi     1
-            plo     rc
-            mov     ra, redir_in_handle
-            lda     ra
-            phi     rd
-            ldn     ra
-            plo     rd                  ; RD = the FCB pointer
-            call    file_read
-            lbdf    kir_eof             ; I/O error: treat like EOF
-
-            glo     rc
-            lbz     kir_eof             ; 0 bytes: EOF
-
-            mov     rf, redir_scratch
-            ldn     rf
-            xri     13                  ; CR? skip silently (handles
-                                        ; both bare-LF and CRLF, same
-                                        ; as batch_readline)
-            lbz     kir_loop
-
-            mov     rf, redir_scratch
-            ldn     rf                  ; D = the byte (reload -- xri
-                                        ; above clobbered it)
-            xri     10                  ; LF? line complete
-            lbz     kir_line_done       ; real content, not EOF
-
-            ; append the byte at kir_buf[kir_count]
-            ldi     0
-            phi     r9
-            mov     rb, kir_count
-            ldn     rb
-            plo     r9                  ; R9 = kir_count (widened to
-                                        ; a word for add16 below)
-            mov     rf, kir_buf
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = kir_buf's base address
-            mov     rf, r8
-            add16   rf, r9              ; RF = kir_buf + kir_count
-            mov     rb, redir_scratch
-            ldn     rb                  ; D = the byte (reload --
-                                        ; add16 clobbered it)
-            str     rf
-            mov     rb, kir_count
-            ldn     rb
-            adi     1
-            str     rb                  ; kir_count += 1
-            lbr     kir_loop
-
-kir_line_done:
-            ; a real line was read (possibly empty, e.g. two
-            ; consecutive newlines in the file) -- NOT end-of-file.
-            ; R7 is free scratch from this point on (its only earlier
-            ; use, staging the destination buffer into kir_buf, is
-            ; long done)
-            ldi     0
-            plo     r7                  ; R7.0 = 0: not EOF
-            lbr     kir_term
-
-kir_null_eof:
-            mov     rf, kir_count
-            ldi     0
-            str     rf
-            ldi     1
-            plo     r7                  ; R7.0 = 1: true EOF (NUL
-                                        ; device)
-            lbr     kir_term
-
-kir_eof:
-            ; real file_read EOF/error. If any characters were
-            ; accumulated THIS call, return them as a final line --
-            ; real content, not EOF (same "partial final line" idea as
-            ; batch_readline). Only a call that reads ZERO new bytes
-            ; before hitting EOF (kir_count still 0 -- either the very
-            ; first call against an already-empty/exhausted source, or
-            ; a repeat call after a prior partial-final-line call
-            ; already consumed everything) is reported as true EOF.
-            ; file_read's own "0 bytes" result is confirmed to repeat
-            ; indefinitely past real EOF (see _read_from_file's own
-            ; header note), so this can't loop forever re-accumulating
-            ; stale partial content.
-            mov     rf, kir_count
-            ldn     rf
-            lbnz    kir_line_done       ; nonzero: partial final line,
-                                        ; treat as real content
-            ldi     1
-            plo     r7                  ; R7.0 = 1: true EOF, nothing
-                                        ; read this call
-            lbr     kir_term
-
-kir_term:
-            ldi     0
-            phi     r9
-            mov     rb, kir_count
-            ldn     rb
-            plo     r9
-            mov     rf, kir_buf
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8
-            mov     rf, r8
-            add16   rf, r9
-            ldi     0
-            str     rf                  ; null-terminate
-
-            glo     r7
-            lbnz    kir_term_eof
-            clc                         ; DF = 0: real line
-            lbr     kir_term_ret
-kir_term_eof:
-            stc                         ; DF = 1: true EOF
-kir_term_ret:
-            pop     rb
-            pop     r9
-            pop     r8
-            pop     ra
-            pop     rc
-            pop     rf
-            rtn
-
-kir_console:
-            pop     rb
-            pop     r9
-            pop     r8
-            pop     ra
-            pop     rc
-            pop     rf
-            call    f_inputl            ; a real call, not a tail lbr
-                                        ; -- needed so DF can be forced
-                                        ; below regardless of whatever
-                                        ; f_inputl itself leaves it as
-                                        ; (its own DF contract isn't
-                                        ; confirmed anywhere in this
-                                        ; codebase -- gotcha #8).
-                                        ; f_inputl has no R6-based
-                                        ; inline-message mechanism like
-                                        ; f_inmsg does, so a real
-                                        ; call/return pair here is
-                                        ; completely safe.
-            clc                         ; DF = 0: console input can
-                                        ; never be "redirected EOF" --
-                                        ; every caller can now safely
-                                        ; treat DF=1 as meaning ONLY
-                                        ; that
-            rtn
-
-            endp
-
 ;------------------------------------------------------------------
 ; Redirect scratch data
 ;------------------------------------------------------------------
@@ -1458,16 +1201,15 @@ redir_stack_reserved:   db      0   ; set only while a dual-redirect's
                                     ; dynamic stack reservation is
                                     ; active (see _himem_reserve) --
                                     ; this file's OWN flag; unrelated
-                                    ; to kernel/glob.asm's own
-                                    ; glob_stack_reserved, which tracks
+                                    ; to kernel/batch.asm's own
+                                    ; batch_args_reserved, which tracks
                                     ; a separate, possibly-simultaneous
                                     ; reservation through the same
                                     ; shared mechanism
 redir_scratch:          db      0   ; shared 1-byte I/O scratch for
-                                    ; _type_to_file/_read_from_file/
-                                    ; _redir_inputl (never in
-                                    ; concurrent use -- this kernel is
-                                    ; single-threaded)
+                                    ; _type_to_file/_read_from_file
+                                    ; (never in concurrent use -- this
+                                    ; kernel is single-threaded)
 
 himem_scratch:           dw      0   ; scratch word used by
                                     ; _himem_reserve/_himem_release's
@@ -1480,13 +1222,6 @@ himem_scratch:           dw      0   ; scratch word used by
                                     ; touched by either routine at all
                                     ; in the current design
 
-kir_buf:                 dw      0   ; _redir_inputl's destination
-                                    ; buffer
-kir_max:                 db      0   ; _redir_inputl's max length (low
-                                    ; byte of the caller's RC)
-kir_count:               db      0   ; _redir_inputl's running byte
-                                    ; count
-
                 public  redir_out_active
                 public  redir_out_handle
                 public  redir_out_null
@@ -1496,8 +1231,5 @@ kir_count:               db      0   ; _redir_inputl's running byte
                 public  redir_stack_reserved
                 public  redir_scratch
                 public  himem_scratch
-                public  kir_buf
-                public  kir_max
-                public  kir_count
 
             endp

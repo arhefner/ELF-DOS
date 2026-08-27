@@ -20,6 +20,19 @@
 ; deliberately used this last mutable window; don't repeat that kind
 ; of full renumber after release.
 ;
+; A SECOND renumbering pass happened 2026-08-26 (removing K_INPUTL/
+; K_SETBD/K_GLOB_RESERVE, three genuinely dead slots found by a full-
+; repo audit -- see each one's own removal note further down for why).
+; Still within the same "not actually released" window this header's
+; own rule describes: KERNEL_VER was bumped to 1.0.0 back on
+; 2026-08-01, but never actually tagged or released to anyone, and
+; every external program in existence is the user's own, rebuilt from
+; source on every `make progs` regardless -- confirmed directly with
+; the user before doing this, not assumed. The SAME "don't repeat a
+; full renumber after release" rule still applies going forward from
+; here; this note exists so a future reader knows the table has moved
+; twice, not that the rule above was violated.
+;
 ; Calling convention for every slot: identical to the real routine it
 ; forwards to (see kernel/file.asm, kernel/dir.asm, kernel/loader.asm,
 ; and include/bios.inc for each routine's args/returns/clobbers).
@@ -61,12 +74,13 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $4100       ; user programs load here (see kernel.inc;
-                                    ; moved $4400->$4200->$4100 (2026-08-25,
-                                    ; 2026-08-26) as successive kernel size-
-                                    ; reduction passes freed real margin
-                                    ; back; see kernel.inc's own PROG_BASE
-                                    ; comment for the full history)
+PROG_BASE:      equ     $4000       ; user programs load here (see kernel.inc;
+                                    ; moved $4400->$4200->$4100->$4000
+                                    ; (2026-08-25, 2026-08-26 x2) as
+                                    ; successive kernel size-reduction
+                                    ; passes freed real margin back; see
+                                    ; kernel.inc's own PROG_BASE comment
+                                    ; for the full history)
 LOADER_ARGS:    equ     PROG_BASE-4 ; word 0 = mem_base, word 1 = mem_top
 
 ; LINE_BUF/RUN_ARGC/RUN_ARGV_TABLE/RUN_PATH: the shell-as-a-program
@@ -133,7 +147,7 @@ IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
 ; the argv/argc ABI redesign already moved away from).
 ; Args:    none
 ; Returns: D = the last command's exit code (0-255), DF = 0 always
-K_GET_ERRORLEVEL: equ   $017C       ; -> kernel_get_errorlevel
+K_GET_ERRORLEVEL: equ   $0173       ; -> kernel_get_errorlevel
 
 K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
 
@@ -217,8 +231,8 @@ K_DIR_READ:     equ     $011B
 ;            disk re-read needed to restore the current sector failed
 ;            -- treat as a hard I/O error, same as any other failed
 ;            K_DIR_READ
-K_DIR_SAVE_STATE:    equ     $0188
-K_DIR_RESTORE_STATE: equ     $018B
+K_DIR_SAVE_STATE:    equ     $017F
+K_DIR_RESTORE_STATE: equ     $0182
 
 ; DIR_STATE_LEN: size of the K_DIR_SAVE_STATE/K_DIR_RESTORE_STATE
 ; snapshot buffer, restated from kernel.inc for any program that needs
@@ -239,9 +253,8 @@ DIR_STATE_LEN:  equ     9
 ; it. Safe to remove outright (not just leave a stub) because nothing
 ; in this repo depends on today's addresses yet -- see K_BPB_INIT's
 ; own removal note below for the same reasoning. (See the "BIOS
-; passthroughs" section further down for K_TYPE through K_SETBD,
-; which now start at $011E, immediately after K_DIR_READ, instead of
-; $0124.)
+; passthroughs" section further down for K_TYPE through K_READ, which
+; now start at $011E, immediately after K_DIR_READ, instead of $0124.)
 
 ; K_GETCURDIR/K_SETCURDIR/K_SETDRIVE/K_GETSHELLDRIVE: multi-drive
 ; current-directory state (2026-07-13). Classic MS-DOS semantics,
@@ -269,10 +282,10 @@ DIR_STATE_LEN:  equ     9
 ;   bare command name isn't found on the active drive, so ordinary
 ;   commands work from any drive without needing /bin duplicated
 ;   everywhere.
-K_GETCURDIR:    equ     $013C
-K_SETCURDIR:    equ     $013F
-K_SETDRIVE:     equ     $0142
-K_GETSHELLDRIVE: equ    $0145
+K_GETCURDIR:    equ     $0136
+K_SETCURDIR:    equ     $0139
+K_SETDRIVE:     equ     $013C
+K_GETSHELLDRIVE: equ    $013F
 
 ; K_PATH_RESOLVE: resolve a '/'-separated path, optionally prefixed
 ; with a drive letter, to (parent directory cluster, final path
@@ -306,7 +319,7 @@ K_GETSHELLDRIVE: equ    $0145
 ;               was not found, was found but is not a directory, or
 ;               an explicit "X:" prefix named a drive with no mounted
 ;               partition
-K_PATH_RESOLVE: equ     $0148
+K_PATH_RESOLVE: equ     $0142
 
 ; K_FILE_DELETE: delete a file (not a directory -- rejected).
 ; Crash-safe ordering: the directory entry is marked deleted on disk
@@ -317,7 +330,7 @@ K_PATH_RESOLVE: equ     $0148
 ; Args:    RF = pointer to null-terminated path string
 ; Returns: DF = 0 on success, DF = 1 on error (not found, is a
 ;          directory, or an intermediate path component is invalid)
-K_FILE_DELETE:  equ     $014B
+K_FILE_DELETE:  equ     $0145
 
 ; K_DIR_CREATE: create a new, empty subdirectory (MD). Single-level
 ; only -- the parent must already exist (no implicit intermediate
@@ -326,7 +339,7 @@ K_FILE_DELETE:  equ     $014B
 ; Args:    RF = pointer to null-terminated path string
 ; Returns: DF = 0 on success, DF = 1 on error (already exists, an
 ;          intermediate path component is invalid, or disk full)
-K_DIR_CREATE:   equ     $014E
+K_DIR_CREATE:   equ     $0148
 
 ; K_DIR_REMOVE: remove an EMPTY subdirectory (RD). Refuses non-empty
 ; directories (no recursive delete), "."/".."  and the root itself.
@@ -335,7 +348,7 @@ K_DIR_CREATE:   equ     $014E
 ; Returns: DF = 0 on success, DF = 1 on error (not found, not a
 ;          directory, not empty, is "."/".."/root, or an intermediate
 ;          path component is invalid)
-K_DIR_REMOVE:   equ     $0151
+K_DIR_REMOVE:   equ     $014B
 
 ; K_FILE_RENAME: rename a file or directory within the SAME parent
 ; directory (no cross-directory move). Works on either files or
@@ -349,7 +362,7 @@ K_DIR_REMOVE:   equ     $0151
 ;          name already exists or is invalid, old or new name is
 ;          "."/"..", or an intermediate component of the old path is
 ;          invalid)
-K_FILE_RENAME:  equ     $0154
+K_FILE_RENAME:  equ     $014E
 
 ; ---- Kernel version (read directly, no call needed) ----
 ; $0100's 6-byte header layout is a stable, never-shifting contract
@@ -382,31 +395,27 @@ ATTR_HIDDEN:    equ     $02         ; DIRENT_ATTR bit set for hidden
 ; Calling through here rather than directly into BIOS means a program
 ; has no dependency on the raw BIOS vector table, and gives ELF-DOS a
 ; hook point for future I/O redirection.
+;
+; K_INPUTL/K_SETBD REMOVED (dead-code cleanup, post-v1.0.0 -- see the
+; jump-table renumbering note below for why this was safe to do despite
+; the version bump): K_INPUTL's own kernel-resident implementation had
+; zero real callers anywhere in this repo, fully superseded by
+; lib/lineedit.asm's read_line_ex (built 2026-07-30 explicitly as its
+; replacement -- progs/edlin.asm already uses that instead). K_SETBD
+; (a bare "lbr f_setbd" passthrough) never had a real caller at all --
+; f_setbd is a bare-metal auto-baud-detection routine for pre-OS boot
+; code, irrelevant once ELF-DOS is already running; setting the
+; hardware UART's baud rate uses f_usetbd directly (progs/baud.asm),
+; a genuinely different routine.
 K_TYPE:         equ     $011E       ; -> f_type
 K_MSG:          equ     $0121       ; -> f_msg
 K_INMSG:        equ     $0124       ; -> f_inmsg
 K_GETDEV:       equ     $0127       ; -> f_getdev
 K_GETTOD:       equ     $012A       ; -> f_gettod
 K_SETTOD:       equ     $012D       ; -> f_settod
-K_INPUTL:       equ     $0130       ; -> f_inputl (RF=buffer, RC=max
-                                    ; length; returns DF=0 with a real
-                                    ; line in RF, or DF=1 if input has
-                                    ; been redirected from a now-
-                                    ; exhausted source -- e.g. `<NUL`,
-                                    ; or a real file fully read -- in
-                                    ; which case RF is still an empty
-                                    ; string but the caller now has a
-                                    ; way to tell that apart from a
-                                    ; genuine blank line. Always DF=0
-                                    ; for live console input -- there's
-                                    ; no "EOF" from a keyboard. Check
-                                    ; DF if looping on this could
-                                    ; otherwise spin forever once input
-                                    ; redirection is exhausted.)
-K_BOOT:         equ     $0133       ; -> f_boot
-K_TTY:          equ     $0136       ; -> f_tty
-K_SETBD:        equ     $0139       ; -> f_setbd
-K_READ:         equ     $0157       ; -> f_read: blocking read of a single
+K_BOOT:         equ     $0130       ; -> f_boot
+K_TTY:          equ     $0133       ; -> f_tty
+K_READ:         equ     $0151       ; -> f_read: blocking read of a single
                                     ; character from the console, returned
                                     ; in D. Standard Elf/OS BIOS contract,
                                     ; confirmed on hardware 2026-07-10 via
@@ -441,9 +450,9 @@ K_READ:         equ     $0157       ; -> f_read: blocking read of a single
 ; none. Returns: DF = 0 on success (shell_drive/shell_elba/shell_eoff
 ; populated), DF = 1 if "C:/bin/shell" doesn't exist or isn't a file
 ; -- boot/krnboot.asm treats DF = 1 as a fatal boot error.
-K_FAT_INIT:     equ     $015A       ; -> fat_init
-K_FILE_INIT:    equ     $015D       ; -> file_init
-K_SHELL_INIT:   equ     $0160       ; -> kernel_shell_init
+K_FAT_INIT:     equ     $0154       ; -> fat_init
+K_FILE_INIT:    equ     $0157       ; -> file_init
+K_SHELL_INIT:   equ     $015A       ; -> kernel_shell_init
 
 ; K_SECWRITE/K_SECREAD: raw 512-byte sector read/write by LBA, bypassing
 ; the FAT16 filesystem entirely -- direct passthroughs to the same BIOS
@@ -455,8 +464,8 @@ K_SHELL_INIT:   equ     $0160       ; -> kernel_shell_init
 ; if misused -- a wrong LBA can silently corrupt the running filesystem
 ; or the boot sectors themselves. Added specifically for progs/sys.asm
 ; (target-side kernel/MBR installer); not intended for casual use.
-K_SECWRITE:     equ     $0163       ; -> f_idewrite
-K_SECREAD:      equ     $0166       ; -> f_ideread
+K_SECWRITE:     equ     $015D       ; -> f_idewrite
+K_SECREAD:      equ     $0160       ; -> f_ideread
 
 ; K_STAT: resolve a (possibly multi-component) path to its own
 ; directory entry, filling the caller's buffer with the same format
@@ -472,7 +481,7 @@ K_SECREAD:      equ     $0166       ; -> f_ideread
 ;          path names the root/a directory via a trailing separator --
 ;          see K_PATH_RESOLVE's own comment on that case; there's no
 ;          real directory entry describing the root itself)
-K_STAT:         equ     $0169       ; -> file_stat
+K_STAT:         equ     $0163       ; -> file_stat
 
 ; BPBBLK_*/BPB_DATA_PTR: restated from kernel.inc (not #included, per
 ; the note above) for krnboot's own relocated bpb_init body, which
@@ -499,7 +508,7 @@ BPBBLK_MAX_CLUST:  equ  19         ; 2 bytes
 BPBBLK_FAT_CSEC:   equ  21         ; 2 bytes
 BPBBLK_LEN:        equ  23         ; total block size
 
-BPB_DATA_PTR:      equ  $016C      ; 2-byte pointer to the block's
+BPB_DATA_PTR:      equ  $0166      ; 2-byte pointer to the block's
                                     ; start (part1_lba's real address)
 
 ; DRIVE_DATA_PTR: same mechanism as BPB_DATA_PTR above, for the
@@ -518,7 +527,7 @@ BPB_DATA_PTR:      equ  $016C      ; 2-byte pointer to the block's
 ; session state, not boot-time facts, and are initialized by
 ; kernel_init instead (see kernel.asm).
 DRIVE_COUNT:       equ  4          ; C:, D:, E:, F:
-DRIVE_DATA_PTR:    equ  $016E      ; 2-byte pointer to drive_present's
+DRIVE_DATA_PTR:    equ  $0168      ; 2-byte pointer to drive_present's
                                     ; real address
 DRIVE_PRESENT_LEN: equ  DRIVE_COUNT            ; 4 bytes
 DRIVE_BPB_TABLE_OFF: equ DRIVE_COUNT           ; drive_bpb_table starts
@@ -556,8 +565,8 @@ SHELL_DATA_OFF: equ     DRIVE_COUNT + DRIVE_COUNT*BPBBLK_LEN
 ;          is active, or the batch just reached EOF (auto-closed, so
 ;          the very next call also returns DF=1 until a new
 ;          K_BATCH_START).
-K_BATCH_START:      equ     $0170       ; -> batch_start
-K_BATCH_READLINE:   equ     $0173       ; -> batch_readline
+K_BATCH_START:      equ     $016A       ; -> batch_start
+K_BATCH_READLINE:   equ     $016D       ; -> batch_readline
 
 ; K_BATCH_GOTO: reposition the active batch script to just after a
 ; labeled line ("2026-07-25, IF/GOTO batch scripting). Always rewinds
@@ -577,25 +586,15 @@ K_BATCH_READLINE:   equ     $0173       ; -> batch_readline
 ;          DF = 1 if no batch is active or the label wasn't found (in
 ;          the latter case the batch is already closed, same as
 ;          K_BATCH_READLINE's own EOF behavior)
-K_BATCH_GOTO:       equ     $017F       ; -> batch_goto
+K_BATCH_GOTO:       equ     $0176       ; -> batch_goto
 
-; K_GLOB_RESERVE: reserve GLOB_BUF_LEN bytes of himem for the shell's
-; own glob-expansion buffer (2026-07-21) -- see kernel/glob.asm's own
-; module header for the full design (why this needs to be a dynamic
-; reservation rather than a fixed low buffer, and why it shares
-; kernel/redir.asm's dual-redirect stack-relocation mechanism).
-; Kernel/shell-internal only -- only progs/shell.asm ever calls this,
-; when its own pre-scan finds an argv token that needs expansion.
-; IDEMPOTENT: a second call while already reserved just returns the
-; existing address again, DF=0, no relocation -- safe to call once per
-; command-line attempt without tracking anything shell-side.
-; Args:    none
-; Returns: DF = 0 on success, RD = this reservation's base address
-;          (GLOB_BUF_LEN bytes usable from RD onward). DF = 1 if
-;          there isn't enough RAM headroom -- the caller should abort
-;          the whole command line rather than attempt a half-expanded
-;          one.
-K_GLOB_RESERVE:     equ     $0176       ; -> kernel_glob_reserve
+; K_GLOB_RESERVE REMOVED (dead-code cleanup, 2026-08-26 -- see the
+; jump-table renumbering note near the top of this file). Reserved
+; himem for the shell's own tokenizer-level glob-expansion buffer,
+; which was itself completely removed 2026-07-27 in favor of
+; lib/file_glob.asm's per-program glob approach -- nothing called this
+; slot anymore, and kernel/glob.asm (its whole implementation) was
+; deleted along with it.
 
 ; K_FILE_SETATTR: change an existing directory entry's attribute byte.
 ; Works on either a file or a directory. Deliberately a general
@@ -609,7 +608,7 @@ K_GLOB_RESERVE:     equ     $0176       ; -> kernel_glob_reserve
 ;          new_attr = (old_attr & ~clear) | set
 ; Returns: DF = 0 on success, DF = 1 on error (not found, bad path,
 ;          target is "." or "..", or an I/O error writing the sector)
-K_FILE_SETATTR:     equ     $0179       ; -> file_setattr
+K_FILE_SETATTR:     equ     $0170       ; -> file_setattr
 
 ; K_FILE_TOUCH: update an existing directory entry's last-write date/
 ; time to the current time. Touches nothing else -- content, size,
@@ -619,50 +618,45 @@ K_FILE_SETATTR:     equ     $0179       ; -> file_setattr
 ; Args:    RF = pointer to null-terminated path string
 ; Returns: DF = 0 on success, DF = 1 on error (not found, bad path,
 ;          target is "." or "..", or an I/O error writing the sector)
-K_FILE_TOUCH:       equ     $018E       ; -> file_touch
+K_FILE_TOUCH:       equ     $0185       ; -> file_touch
 
 ; K_HIMEM_RESERVE/K_HIMEM_RELEASE (2026-07-31): general-purpose himem
 ; reservation, exposed to ordinary programs for the first time. Thin
 ; passthroughs to the kernel's own already-proven _himem_reserve/
 ; _himem_release (kernel/redir.asm, used internally for years by I/O
-; redirection, glob expansion, and batch-args substitution) -- PURE
-; MECHANISM, unlike K_GLOB_RESERVE just above: no flag, no
-; idempotency, caller-supplied size, caller tracks its own reservation
-; state. First real consumer: lib/modload.asm's mod_load, which needs
-; a page-aligned region whose size varies per module.
+; redirection and batch-args substitution) -- PURE MECHANISM, no flag,
+; no idempotency, caller-supplied size, caller tracks its own
+; reservation state. First real consumer: lib/modload.asm's mod_load,
+; which needs a page-aligned region whose size varies per module.
 ; K_HIMEM_RESERVE:
 ;   Args:    RC = bytes to reserve
 ;   Returns: DF = 0 on success, RD = this reservation's base address
 ;            (mem_top + 1). DF = 1 if there isn't enough headroom
 ;            (nothing changed).
-K_HIMEM_RESERVE:    equ     $0191       ; -> kernel_himem_reserve
+K_HIMEM_RESERVE:    equ     $0188       ; -> kernel_himem_reserve
 ; K_HIMEM_RELEASE:
 ;   Args:    RC = bytes to release (must match a caller's own prior
 ;            successful K_HIMEM_RESERVE call)
 ;   Returns: nothing
-K_HIMEM_RELEASE:    equ     $0194       ; -> kernel_himem_release
+K_HIMEM_RELEASE:    equ     $018B       ; -> kernel_himem_release
 
-; GLOB_BUF_LEN: size of the reservation K_GLOB_RESERVE makes --
-; progs/shell.asm's own glob-expansion pass budgets its writes against
-; this so it never overruns the reserved region.
-GLOB_BUF_LEN:       equ     768
+; GLOB_BUF_LEN REMOVED along with K_GLOB_RESERVE above (dead code,
+; 2026-08-26) -- its only use was sizing that reservation.
 
 ; K_BATCH_ARGS_RESERVE/K_BATCH_ARGS_GETARG: %0-%9 batch-argument
 ; substitution (2026-07-25) -- see kernel/batch.asm's own module
 ; comments and progs/shell.asm's $/% expansion pass for the full
-; design. Mirrors K_GLOB_RESERVE's own shape closely: reserve dynamic
-; himem via the same _himem_reserve/_himem_release mechanism
-; (kernel/redir.asm), hand back a base address, let the CALLER
-; (progs/shell.asm, which already has the data) populate it directly --
-; rather than passing argv data as call arguments for the kernel to
-; pack.
+; design. Reserves dynamic himem via the same _himem_reserve/
+; _himem_release mechanism (kernel/redir.asm) K_GLOB_RESERVE used to,
+; hands back a base address, lets the CALLER (progs/shell.asm, which
+; already has the data) populate it directly -- rather than passing
+; argv data as call arguments for the kernel to pack.
 ;
 ; K_BATCH_ARGS_RESERVE: called once by progs/shell.asm's own is_batch:
-; path, right after K_BATCH_START succeeds. NOT idempotent like
-; K_GLOB_RESERVE -- starting a new batch while one is already active is
-; already rejected (nested batch) before this could ever be called
-; twice without a release in between, so no idempotency check is
-; needed.
+; path, right after K_BATCH_START succeeds. NOT idempotent -- starting
+; a new batch while one is already active is already rejected (nested
+; batch) before this could ever be called twice without a release in
+; between, so no idempotency check is needed.
 ; Args:    none
 ; Returns: DF = 0 on success, RD = this reservation's base address
 ;          (BATCH_ARGS_RESERVE_LEN bytes usable from RD onward -- see
@@ -671,7 +665,7 @@ GLOB_BUF_LEN:       equ     768
 ;          caller should let the batch proceed anyway, just without
 ;          %N support for that run (graceful degradation, not an
 ;          aborted batch).
-K_BATCH_ARGS_RESERVE: equ   $0182       ; -> kernel_batch_args_reserve
+K_BATCH_ARGS_RESERVE: equ   $0179       ; -> kernel_batch_args_reserve
 ;
 ; K_BATCH_ARGS_GETARG: look up one positional argument by index.
 ; Bounds-checks against the reservation's own stored count before ever
@@ -687,7 +681,7 @@ K_BATCH_ARGS_RESERVE: equ   $0182       ; -> kernel_batch_args_reserve
 ;          literal text). DF = 1 only when NO reservation is active at
 ;          all (no batch running, or its reservation failed) -- the
 ;          caller should leave %<digit> as literal text in that case.
-K_BATCH_ARGS_GETARG: equ    $0185       ; -> kernel_batch_args_getarg
+K_BATCH_ARGS_GETARG: equ    $017C       ; -> kernel_batch_args_getarg
 
 ; BATCH_ARGS_*: layout of K_BATCH_ARGS_RESERVE's own reservation,
 ; restated from kernel.inc for progs/shell.asm's own use -- it

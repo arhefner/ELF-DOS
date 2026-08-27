@@ -60,7 +60,6 @@ KOBJ =  kernel/kernel.prg  \
         kernel/loader.prg  \
         kernel/batch.prg   \
         kernel/redir.prg   \
-        kernel/glob.prg    \
         lib/modload.prg    \
         lib/icall.prg
 
@@ -130,9 +129,6 @@ kernel/batch.prg: kernel/batch.asm $(INCS) include/batchmod.inc
 
 kernel/redir.prg: kernel/redir.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) redir.asm
-
-kernel/glob.prg: kernel/glob.asm $(INCS)
-	cd kernel && $(ASM) $(ASMFLAGS) glob.asm
 
 # kernel/batch_mod.asm: the loadable batch-script module (2026-07-30
 # phase 1) -- NOT part of KOBJ/kernel.bin. A standalone build, own

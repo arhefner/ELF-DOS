@@ -142,12 +142,25 @@
 ; own choice, banking 16 bytes of net margin gain alongside the 256-
 ; byte program-RAM win rather than spending Phase 2's entire savings at
 ; once. Boot margin (KERN_LOAD vs. sector-rounded size) is unaffected
-; as always, since it doesn't depend on PROG_BASE. Needs its own
-; isolated hardware round before being trusted -- not yet tested.
-PROG_BASE:      equ     $4100       ; user programs load here -- moved
-                                    ; down from $4200 once Phase 2's
-                                    ; self-modifying-vector redesign
-                                    ; freed real kernel margin, see above
+; as always, since it doesn't depend on PROG_BASE. Hardware-confirmed
+; (2026-08-26) via the same round that confirmed the K_INPUTL/K_SETBD/
+; K_GLOB_RESERVE jump-table removal below -- several commands, I/O
+; redirection, and globbing all exercised with PROG_BASE=$4100 active.
+;
+; MOVED to $4000 (2026-08-26), after that same jump-table dead-code
+; removal freed a further 434 bytes (Highest address $3f32 -> $3d80).
+; Checked before moving: at $4000, real margin is 526 bytes --
+; comfortably clear, deliberately not pushed all the way to $3F00
+; (270 bytes -- still genuinely safe, but thinner than anywhere this
+; project has chosen to sit all session, and nothing forces spending
+; the last 256 bytes just because they're available). The user's own
+; call, a nice round number besides. Needs its own isolated hardware
+; round before being trusted -- not yet tested.
+PROG_BASE:      equ     $4000       ; user programs load here -- moved
+                                    ; down from $4100 once the K_INPUTL/
+                                    ; K_SETBD/K_GLOB_RESERVE jump-table
+                                    ; cleanup freed real kernel margin,
+                                    ; see above
 
 ; $0080-$00FF: the ROM's small boot-time stack lives here (see
 ; boot/mbr.asm) but is dead once the kernel sets up its own stack at
@@ -319,26 +332,20 @@ IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
 ; to exactly that shape of label -- a plain equ constant, resolved at
 ; assemble time, sidesteps that entirely). Never referenced from
 ; kernel_api.inc's own copy or vice versa; if K_TYPE/K_READ's address
-; ever changes (it shouldn't, per the jump table's own append-only
-; convention), all three restatements need updating together.
+; ever changes, all three restatements need updating together --
+; K_READ's own value already moved once (2026-08-26, jump-table
+; renumbering after removing K_INPUTL/K_SETBD/K_GLOB_RESERVE, all dead
+; -- see kernel_api.inc's own removal notes), despite the table's
+; normal append-only convention; that renumbering is a one-time,
+; pre-release-only exception, not a precedent for future changes.
 K_TYPE:             equ     $011E
-K_READ:             equ     $0157
-
-; GLOB_BUF_LEN: size of the dynamic himem reservation progs/shell.asm's
-; own glob-expansion pass makes via K_GLOB_RESERVE (kernel/glob.asm) --
-; NOT a fixed PROG_BASE-relative address like the fields above, since
-; the reservation's actual address depends on mem_top at the moment
-; it's made (see kernel/glob.asm's own module header for the full
-; design). Restated in kernel_api.inc for progs/shell.asm's own use;
-; this copy is for kernel/glob.asm itself, which #includes this file,
-; not kernel_api.inc.
-GLOB_BUF_LEN:       equ     768
+K_READ:             equ     $0151
 
 ; BATCH_ARGS_*: layout of the dynamic himem reservation K_BATCH_ARGS_RESERVE
-; makes for %0-%9 batch-argument substitution (kernel/batch.asm) -- same
-; "not a fixed PROG_BASE-relative address" reasoning as GLOB_BUF_LEN
-; above (the reservation's real address is mem_top+1 at the moment it's
-; made). Restated in kernel_api.inc for progs/shell.asm's own use (it
+; makes for %0-%9 batch-argument substitution (kernel/batch.asm) -- NOT
+; a fixed PROG_BASE-relative address like the fields above, since the
+; reservation's actual address depends on mem_top at the moment it's
+; made. Restated in kernel_api.inc for progs/shell.asm's own use (it
 ; populates the block directly, addressing into it via these same
 ; offsets); this copy is for kernel/batch.asm itself. A single
 ; contiguous block: a 128-byte packed-text region (matching LINE_BUF's

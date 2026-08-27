@@ -74,9 +74,6 @@
             extrn   _redir_teardown
             extrn   _redir_msg
             extrn   _redir_inmsg
-            extrn   _redir_inputl
-            extrn   kernel_glob_reserve
-            extrn   _glob_release
 
 ; Kernel version -- single source of truth for the header bytes below,
 ; which programs read directly at the fixed KERNEL_HDR_VER address (see
@@ -154,7 +151,7 @@ k_dir_read:     lbr     dir_read            ; $011B
 ; own preference for a visible hang over a silent wild jump. See
 ; kernel/redir.asm's own module header for the full design.
 ;
-; K_MSG/K_INMSG/K_INPUTL are NOT self-modified -- they stay ordinary,
+; K_MSG/K_INMSG are NOT self-modified -- they stay ordinary,
 ; permanent "lbr <dispatcher>" entries. K_MSG/K_INMSG's own dispatchers
 ; are now trivial byte-loops that simply "call K_TYPE" per character --
 ; since K_TYPE's own vector already does the right thing (console,
@@ -168,27 +165,33 @@ k_inmsg:        lbr     _redir_inmsg        ; $0124
 k_getdev:       lbr     f_getdev            ; $0127 (BIOS passthrough)
 k_gettod:       lbr     f_gettod            ; $012A (BIOS passthrough)
 k_settod:       lbr     f_settod            ; $012D (BIOS passthrough)
-k_inputl:       lbr     _redir_inputl       ; $0130
-k_boot:         lbr     f_boot              ; $0133 (BIOS passthrough)
-k_tty:          lbr     f_tty               ; $0136 (BIOS passthrough)
-k_setbd:        lbr     f_setbd             ; $0139 (BIOS passthrough)
-k_getcurdir:    lbr     kernel_getcurdir    ; $013C
-k_setcurdir:    lbr     kernel_setcurdir    ; $013F
+
+; K_INPUTL and K_SETBD REMOVED (this pass, dead-code cleanup after a
+; full-repo audit -- see kernel_api.inc's own removal note for the
+; full story on both): K_INPUTL's own _redir_inputl had zero real
+; callers anywhere, fully superseded by lib/lineedit.asm's
+; read_line_ex; K_SETBD (a bare "lbr f_setbd" passthrough) never had a
+; real caller at all -- f_setbd is a bare-metal auto-baud-detection
+; routine for pre-OS boot code, irrelevant once ELF-DOS is running.
+k_boot:         lbr     f_boot              ; $0130 (BIOS passthrough)
+k_tty:          lbr     f_tty               ; $0133 (BIOS passthrough)
+k_getcurdir:    lbr     kernel_getcurdir    ; $0136
+k_setcurdir:    lbr     kernel_setcurdir    ; $0139
 
 ; K_SETDRIVE: the only call that ever changes cur_drive -- see
 ; kernel_setdrive's own header comment and kernel_api.inc's note on
 ; the DOS-style CD/drive-switch decoupling.
-k_setdrive:     lbr     kernel_setdrive     ; $0142
+k_setdrive:     lbr     kernel_setdrive     ; $013C
 
 ; K_GETSHELLDRIVE: see kernel_getshelldrive's own header comment below.
-k_getshelldrive: lbr    kernel_getshelldrive ; $0145
+k_getshelldrive: lbr    kernel_getshelldrive ; $013F
 
-k_path_resolve: lbr     path_resolve        ; $0148
-k_file_delete:  lbr     file_delete         ; $014B
-k_dir_create:   lbr     dir_create          ; $014E
-k_dir_remove:   lbr     dir_remove          ; $0151
-k_file_rename:  lbr     file_rename         ; $0154
-k_read:         lbr     k_read              ; $0157 -- placeholder, see
+k_path_resolve: lbr     path_resolve        ; $0142
+k_file_delete:  lbr     file_delete         ; $0145
+k_dir_create:   lbr     dir_create          ; $0148
+k_dir_remove:   lbr     dir_remove          ; $014B
+k_file_rename:  lbr     file_rename         ; $014E
+k_read:         lbr     k_read              ; $0151 -- placeholder, see
                                             ; k_type's own comment above;
                                             ; self-modified by
                                             ; boot/krnboot.asm
@@ -203,9 +206,9 @@ k_read:         lbr     k_read              ; $0157 -- placeholder, see
 ; removal note) -- its slot's k_bpb_init_stub had already been a
 ; no-op for a while; grep confirmed zero remaining callers, so it's
 ; now gone outright rather than kept as a stub forever.
-k_fat_init:     lbr     fat_init            ; $015A
-k_file_init:    lbr     file_init           ; $015D
-k_shell_init:   lbr     kernel_shell_init   ; $0160
+k_fat_init:     lbr     fat_init            ; $0154
+k_file_init:    lbr     file_init           ; $0157
+k_shell_init:   lbr     kernel_shell_init   ; $015A
 
 ; K_SECWRITE/K_SECREAD: raw 512-byte sector read/write by LBA, bypassing
 ; the FAT16 filesystem entirely -- direct passthroughs to the same BIOS
@@ -219,8 +222,8 @@ k_shell_init:   lbr     kernel_shell_init   ; $0160
 ; corrupt the running filesystem or the boot sectors themselves; added
 ; specifically for progs/sys.asm (target-side kernel/MBR installer) and
 ; not intended for casual use by other programs.
-k_secwrite:     lbr     f_idewrite          ; $0163 (BIOS passthrough)
-k_secread:      lbr     f_ideread           ; $0166 (BIOS passthrough)
+k_secwrite:     lbr     f_idewrite          ; $015D (BIOS passthrough)
+k_secread:      lbr     f_ideread           ; $0160 (BIOS passthrough)
 
 ; K_STAT: resolve a path to its own directory entry without opening it
 ; as a file -- works on either a file or a directory. See
@@ -228,7 +231,7 @@ k_secread:      lbr     f_ideread           ; $0166 (BIOS passthrough)
 ; the motivation (a third caller, progs/stat.asm, was about to
 ; hand-roll the same path_resolve+dir_open/dir_read+f_strcmp scan
 ; progs/copy.asm and progs/sys.asm already each do inline).
-k_stat:         lbr     file_stat           ; $0169
+k_stat:         lbr     file_stat           ; $0163
 
 ; BPB_DATA_PTR: a DATA slot (2 bytes, not a 3-byte lbr call target),
 ; sitting at the jump table's own tail by design (the user's own
@@ -241,7 +244,7 @@ k_stat:         lbr     file_stat           ; $0169
 ; this line is part of kernel.bin's own link, so "dw part1_lba" resolves
 ; to the block's real address automatically, same as any other
 ; relocatable reference.
-                dw      part1_lba           ; $016C: BPB_DATA_PTR
+                dw      part1_lba           ; $0166: BPB_DATA_PTR
 
 ; DRIVE_DATA_PTR: same DATA-slot mechanism as BPB_DATA_PTR above, for
 ; the multi-partition boot-time scan (2026-07-13). Points at
@@ -250,27 +253,27 @@ k_stat:         lbr     file_stat           ; $0169
 ; kernel_api.inc's own DRIVE_DATA_PTR comment. boot/krnboot.asm's
 ; relocated partition-scan loop and K_SHELL_INIT both reach their own
 ; piece of this through the one pointer.
-                dw      drive_present       ; $016E: DRIVE_DATA_PTR
+                dw      drive_present       ; $0168: DRIVE_DATA_PTR
 
 ; K_BATCH_START/K_BATCH_READLINE: minimal flat batch-script execution
 ; (2026-07-14) -- see kernel_api.inc's own comment and kernel/batch.asm
 ; for the full design (state has to live here, not in the shell, since
 ; the shell is reloaded fresh from disk every command cycle).
-k_batch_start:  lbr     batch_start         ; $0170
-k_batch_readline: lbr   batch_readline      ; $0173
+k_batch_start:  lbr     batch_start         ; $016A
+k_batch_readline: lbr   batch_readline      ; $016D
 
-; K_GLOB_RESERVE: dynamic himem reservation for progs/shell.asm's own
-; glob-expansion buffer (2026-07-21) -- see kernel/glob.asm's own
-; module header for the full design. Idempotent; only ever called by
-; the shell itself, when its own pre-scan finds a token that needs
-; expansion.
-k_glob_reserve: lbr     kernel_glob_reserve ; $0176
+; K_GLOB_RESERVE REMOVED (this pass, dead-code cleanup -- see
+; kernel_api.inc's own removal note for the full story): the shell's
+; own tokenizer-level glob expansion that used to call
+; kernel_glob_reserve (kernel/glob.asm, deleted along with this slot)
+; was completely removed 2026-07-27 in favor of lib/file_glob.asm's
+; per-program glob approach. Nothing called this slot anymore.
 
 ; K_FILE_SETATTR: change an existing directory entry's attribute byte
 ; (2026-07-22) -- see kernel/file.asm's file_setattr for the full
 ; design. General set/clear-mask primitive; ATTRIB currently only
 ; exposes +H/-H, but this needs no kernel change to grow further.
-k_file_setattr: lbr     file_setattr        ; $0179
+k_file_setattr: lbr     file_setattr        ; $0170
 
 ; K_GET_ERRORLEVEL: read the last command's exit code (2026-07-25) --
 ; ERRORLEVEL prelude to batch IF/GOTO. RUN_ERRORLEVEL (kernel.inc) is
@@ -278,19 +281,19 @@ k_file_setattr: lbr     file_setattr        ; $0179
 ; the real jump-table entry point for an ORDINARY program to read it
 ; (progs/errorlevel.asm), rather than baking the fixed relay address
 ; directly into its own compiled binary.
-k_get_errorlevel: lbr   kernel_get_errorlevel ; $017C
+k_get_errorlevel: lbr   kernel_get_errorlevel ; $0173
 
 ; K_BATCH_GOTO: reposition the active batch script to just after a
 ; labeled line (2026-07-25, IF/GOTO batch scripting) -- see
 ; kernel_api.inc's own doc comment and kernel/batch.asm's batch_goto
 ; for the full design.
-k_batch_goto:   lbr     batch_goto          ; $017F
+k_batch_goto:   lbr     batch_goto          ; $0176
 
 ; K_BATCH_ARGS_RESERVE/K_BATCH_ARGS_GETARG: %0-%9 batch-argument
 ; substitution (2026-07-25) -- see kernel_api.inc's own doc comments
 ; and kernel/batch.asm's own module header for the full design.
-k_batch_args_reserve: lbr kernel_batch_args_reserve  ; $0182
-k_batch_args_getarg:  lbr kernel_batch_args_getarg   ; $0185
+k_batch_args_reserve: lbr kernel_batch_args_reserve  ; $0179
+k_batch_args_getarg:  lbr kernel_batch_args_getarg   ; $017C
 
 ; K_DIR_SAVE_STATE/K_DIR_RESTORE_STATE: snapshot/restore the
 ; directory iterator's own scan position (2026-07-27), added so
@@ -298,21 +301,21 @@ k_batch_args_getarg:  lbr kernel_batch_args_getarg   ; $0185
 ; where it left off instead of re-scanning from the start on every
 ; call -- see kernel/dir.asm's own dir_save_state/dir_restore_state
 ; headers for the full design and kernel_api.inc's own doc comments.
-k_dir_save_state:    lbr     dir_save_state      ; $0188
-k_dir_restore_state: lbr     dir_restore_state   ; $018B
+k_dir_save_state:    lbr     dir_save_state      ; $017F
+k_dir_restore_state: lbr     dir_restore_state   ; $0182
 
 ; K_FILE_TOUCH: update an existing directory entry's last-write date/
 ; time to the current time, touching nothing else (2026-07-30) -- see
 ; kernel/file.asm's file_touch for the full design.
-k_file_touch:   lbr     file_touch          ; $018E
+k_file_touch:   lbr     file_touch          ; $0185
 
 ; K_HIMEM_RESERVE/K_HIMEM_RELEASE: general-purpose himem reservation,
 ; exposed to ordinary programs for the first time (2026-07-31) -- see
 ; kernel/redir.asm's own kernel_himem_reserve/kernel_himem_release for
 ; the full design. First real consumer: lib/modload.asm.
-k_himem_reserve: lbr    kernel_himem_reserve ; $0191
-k_himem_release: lbr    kernel_himem_release ; $0194
-                ; next free jump-table address: $0197
+k_himem_reserve: lbr    kernel_himem_reserve ; $0188
+k_himem_release: lbr    kernel_himem_release ; $018B
+                ; next free jump-table address: $018E
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"
@@ -548,14 +551,6 @@ run_loop:
                                         ; this call would otherwise
                                         ; clobber it before the check
                                         ; above ever ran
-            call    _glob_release       ; release the shell's own glob-
-                                        ; buffer reservation, if any --
-                                        ; MUST run AFTER _redir_teardown
-                                        ; above: a dual-redirect
-                                        ; reservation this child's own
-                                        ; run may have made nests INSIDE
-                                        ; the glob one (reserved later,
-                                        ; released first -- LIFO)
             lbr     run_loop
 
 run_bad_program:
@@ -572,7 +567,6 @@ run_bad_program:
             ; redir_stack_reserved are already clear in both cases, so
             ; this is a no-op then, not a double-release
             call    _redir_teardown
-            call    _glob_release       ; same LIFO ordering as above
             call    f_inmsg
             db      "Invalid program file.",13,10,0
             lbr     run_loop

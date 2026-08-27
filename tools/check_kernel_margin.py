@@ -84,7 +84,6 @@ DEFAULT_KOBJ_ASM = [
     "kernel/loader.asm",
     "kernel/batch.asm",
     "kernel/redir.asm",
-    "kernel/glob.asm",
     "lib/modload.asm",
     "lib/icall.asm",
 ]

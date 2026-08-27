@@ -107,7 +107,7 @@ reinventing:
 - **Several independent arguments**, such as deleting more than one
   file in a single command. Loop over the argument list, handle each one
   on its own, and if one fails, print an error for it and keep going
-  rather than stopping the whole command — several of the built-in
+  rather than stopping the whole command - several of the built-in
   commands (deleting files, copying files, changing attributes) all work
   this way, and stay quiet when everything succeeds.
 - **Wildcards.** A library module provides pattern matching that can be
@@ -158,8 +158,8 @@ my_iobuf:   ds      FCB_IOBUF_LEN   ; 512 bytes, this FCB's own sector buffer
 ```
 
 and passes pointers to both to `K_FILE_OPEN`. Every later call that
-touches this file — `K_FILE_CLOSE`, `K_FILE_READ`, `K_FILE_WRITE`,
-`K_FILE_SEEK` — takes the FCB pointer directly; there is no separate
+touches this file - `K_FILE_CLOSE`, `K_FILE_READ`, `K_FILE_WRITE`,
+`K_FILE_SEEK` - takes the FCB pointer directly; there is no separate
 small-integer handle to keep track of. The internal layout of an FCB is
 not documented here and should not be relied on. Treat it as an opaque
 block the kernel manages on the caller's behalf.
@@ -242,7 +242,7 @@ either a file or a directory.
 Begins a directory listing.
 - **Args:** `RD` = the directory's own starting cluster (0 means the
   root directory).
-- **Returns:** nothing meaningful — a following `K_DIR_READ` starts from
+- **Returns:** nothing meaningful - a following `K_DIR_READ` starts from
   the beginning.
 
 **`K_DIR_READ`**
@@ -256,7 +256,7 @@ Returns the next entry in a directory listing started by `K_DIR_OPEN`.
   | Field | Offset | Size | Contents |
   |---|---|---|---|
   | `DIRENT_NAME` | 0 | up to 127 chars | Null-terminated file name. |
-  | `DIRENT_ATTR` | 128 | 1 | Attribute byte — see `ATTR_DIR`/`ATTR_HIDDEN` below. |
+  | `DIRENT_ATTR` | 128 | 1 | Attribute byte - see `ATTR_DIR`/`ATTR_HIDDEN` below. |
   | `DIRENT_CLUST` | 129 | 2 | First cluster, big-endian. |
   | `DIRENT_SIZE` | 131 | 4 | File size in bytes, big-endian. |
   | `DIRENT_WRTTIME` | 135 | 2 | Last-write time, big-endian, packed: bits 15-11 = hour, 10-5 = minute, 4-0 = seconds/2. |
@@ -271,10 +271,10 @@ Returns the next entry in a directory listing started by `K_DIR_OPEN`.
 listing can be "in progress" at a time. These two calls let a program
 pause a listing, do something else (open a file, look something else
 up), and resume the listing exactly where it left off.
-- **`K_DIR_SAVE_STATE`** — **Args:** `RF` = pointer to a caller-owned
+- **`K_DIR_SAVE_STATE`** - **Args:** `RF` = pointer to a caller-owned
   `DIR_STATE_LEN`-byte buffer. **Returns:** nothing; the buffer is
   filled in.
-- **`K_DIR_RESTORE_STATE`** — **Args:** `RF` = pointer to a buffer
+- **`K_DIR_RESTORE_STATE`** - **Args:** `RF` = pointer to a buffer
   previously filled by `K_DIR_SAVE_STATE`. **Returns:** `DF` = 0 on
   success (the next `K_DIR_READ` resumes from the snapshot); `DF` = 1 if
   the disk could not be re-read to restore the scan position - treat
@@ -296,8 +296,8 @@ entries in it, `.`, `..`, or the root directory itself.
 ### Paths and drives
 
 **`K_PATH_RESOLVE`**
-Resolves a path — optionally prefixed with a drive letter (`C:` through
-`F:`) — into a parent directory and a final component, without looking
+Resolves a path - optionally prefixed with a drive letter (`C:` through
+`F:`) - into a parent directory and a final component, without looking
 up the final component itself. Every component before the last one must
 already be a real directory (`.` and `..` work automatically, since they
 are ordinary directory entries). This is the same resolution logic every
@@ -317,13 +317,13 @@ whether the final component should name a file or a directory.
 
 **`K_GETCURDIR`** / **`K_SETCURDIR`**
 Each drive remembers its own current directory independently, separate
-from which drive is currently active — the same convention classic
+from which drive is currently active - the same convention classic
 MS-DOS uses. Changing a drive's remembered directory does not switch to
 that drive.
-- **`K_GETCURDIR`** — **Args:** none. **Returns:** `RD` = the active
+- **`K_GETCURDIR`** - **Args:** none. **Returns:** `RD` = the active
   drive's current directory cluster (0 = root), `D` = the active drive
   index (0-3).
-- **`K_SETCURDIR`** — **Args:** `D` = drive index (0-3), `RD` = new
+- **`K_SETCURDIR`** - **Args:** `D` = drive index (0-3), `RD` = new
   current-directory cluster for that drive. **Returns:** nothing.
 
 **`K_SETDRIVE`**
@@ -333,8 +333,8 @@ Switches which drive is active.
   mounted (nothing changes in that case).
 
 **`K_GETSHELLDRIVE`**
-Reports which drive the command shell itself was found on at boot —
-almost always drive 0 (`C:`) — for use as a fallback location when
+Reports which drive the command shell itself was found on at boot -
+almost always drive 0 (`C:`) - for use as a fallback location when
 looking for a command.
 - **Args:** none.
 - **Returns:** `D` = that drive's index (0-3).
@@ -364,21 +364,19 @@ convenient for a short literal message:
 - **Returns:** nothing meaningful; execution continues right after the
   null byte.
 
-**`K_INPUTL`**
-Reads one line of input.
-- **Args:** `RF` = destination buffer, `RC` = its maximum length.
-- **Returns:** `DF` = 0 with a real line in the buffer. `DF` = 1 only if
-  input has been redirected from a file and that file has run out.
-  Live keyboard input never returns `DF` = 1, since there is no
-  "end of file" from a keyboard. Check `DF` if you loop on this call, so
-  a program reading from an exhausted redirected input doesn't spin
-  forever.
-
 **`K_READ`**
 Reads a single character, blocking until one is available. Aware of
-input redirection the same way `K_INPUTL` is.
+input redirection on its own: reading from a redirected file returns
+each byte from that file in turn; reading from a live keyboard blocks
+for a real keystroke.
 - **Args:** none.
-- **Returns:** `D` = the character read.
+- **Returns:** `D` = the character read. Once a redirected file has run
+  out, or input is redirected from the null device, every further call
+  returns `D` = 0 - the same value a genuine null byte in the file
+  would produce, so this call cannot tell the two apart on its own. A
+  program that needs to read whole lines, with a real and unambiguous
+  end-of-file signal, should use `read_line_ex` from the `lineedit.asm`
+  library module instead (see "Library Modules" below).
 
 **`K_TTY`**
 A direct passthrough to the console's own single-character output
@@ -433,18 +431,9 @@ what it reserved.
   = 1 if there isn't enough headroom (nothing changes in that case).
 
 **`K_HIMEM_RELEASE`**
-- **Args:** `RC` = bytes to release — must
+- **Args:** `RC` = bytes to release - must
   match a prior successful `K_HIMEM_RESERVE` call exactly.
 - **Returns:** nothing.
-
-**`K_GLOB_RESERVE`**
-Reserves a fixed-size block of high memory for wildcard-expansion use.
-Safe to call more than once — a later call while already reserved just
-returns the same address again, with no additional effect.
-- **Args:** none.
-- **Returns:** `DF` = 0 with `RD` = the reservation's base address
-  (`GLOB_BUF_LEN` bytes usable from there). `DF` = 1 if there isn't
-  enough headroom.
 
 ### Miscellaneous
 
@@ -458,14 +447,13 @@ Reads back the exit code of the last command that ran.
 | Name | Value | Meaning |
 |---|---|---|
 | `PROG_BASE` | (see `kernel_api.inc`) | The fixed address every program loads to. |
-| `LOADER_ARGS` | `PROG_BASE - 4` | Word 0 = `mem_base`, word 1 = `mem_top` — the program's usable memory range. |
+| `LOADER_ARGS` | `PROG_BASE - 4` | Word 0 = `mem_base`, word 1 = `mem_top` - the program's usable memory range. |
 | `FCB_LEN` | 32 | Size of a File Control Block a program must allocate for each open file. |
 | `FCB_IOBUF_LEN` | 512 | Size of the I/O buffer that goes with each FCB. |
 | `DIRENT_LEN` | 139 | Size of the result buffer `K_DIR_READ` and `K_STAT` fill in. |
 | `DIR_STATE_LEN` | 9 | Size of the snapshot buffer `K_DIR_SAVE_STATE`/`K_DIR_RESTORE_STATE` use. |
 | `ATTR_DIR` | `$10` | `DIRENT_ATTR` bit for a subdirectory. |
 | `ATTR_HIDDEN` | `$02` | `DIRENT_ATTR` bit for a hidden entry. |
-| `GLOB_BUF_LEN` | 768 | Size of `K_GLOB_RESERVE`'s own reservation. |
 
 ## Library Modules
 
@@ -483,7 +471,7 @@ them.
 | `heap_bump.asm` | A simple, fast memory allocator with no per-item `free`. |
 | `heap_malloc.asm` | A general-purpose allocator, with `free` and coalescing of freed blocks. |
 | `icall.asm` | Safely calling through an address that is only known while the program is running. |
-| `lineedit.asm` | Cursor movement and editing on a typed line — arrow keys, Home/End, and so on. |
+| `lineedit.asm` | Cursor movement and editing on a typed line - arrow keys, Home/End, and so on. |
 | `modload.asm` | Loading a relocatable module at whatever address is currently free. |
 | `move.asm` | Renaming a file where possible, falling back to copy-then-delete otherwise. |
 | `pathstr.asm` | Turning a directory's starting cluster back into a full path string. |
