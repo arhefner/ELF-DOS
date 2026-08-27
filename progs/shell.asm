@@ -2938,6 +2938,21 @@ rlwh_loop:
             xri     4                   ; Ctrl-D: delete at cursor
             lbz     rlwh_delete_at
 
+            ; Ctrl-P/Ctrl-N as synonyms for Up/Down (readline/Emacs
+            ; convention) -- lets history recall work on a keyboard/
+            ; terminal with no real arrow keys, or whenever the real
+            ; "ESC [ A"/"ESC [ B" sequence is too fast to read reliably
+            ; (e.g. bit-bang UART at higher baud rates -- see
+            ; rlwh_escape's own header for the full byte-drop history).
+            ; Jumps straight to the SAME handlers the real arrow keys
+            ; use below, not a duplicate implementation.
+            glo     rc
+            xri     16                  ; Ctrl-P: history up
+            lbz     rlwh_up
+            glo     rc
+            xri     14                  ; Ctrl-N: history down
+            lbz     rlwh_down
+
             ; ---- deferred: Ctrl-K/U/W/Y need a cut buffer, not
             ; implemented yet -- explicitly discarded rather than
             ; falling through to the ordinary-character path below
