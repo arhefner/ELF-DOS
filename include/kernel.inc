@@ -125,12 +125,29 @@
 ; this project's own established reasoning (2026-08-01): the krnboot-
 ; sector-reclaim benefit doesn't need exact equality, only that a loaded
 ; program be bigger than the gap between the two addresses, which any
-; real program always is. Needs its own isolated hardware round before
-; being trusted -- not yet tested.
-PROG_BASE:      equ     $4200       ; user programs load here -- moved
-                                    ; down from $4400 once the kernel
-                                    ; shrink pass freed real margin
-                                    ; back, see above
+; real program always is. Hardware-confirmed (2026-08-26) across several
+; substantial sessions of normal use, batch scripts, redirection, and
+; the loadable batch module -- no issues.
+;
+; MOVED to $4100 (2026-08-26), after the Phase 2 self-modifying-K_TYPE/
+; K_READ-vector redesign (kernel/redir.asm) freed another 272 bytes
+; (Highest address $4042 -> $3f32, deleting _io_tail_jump and shrinking
+; the redirect dispatchers more than offset the two new jump-table-
+; patching code paths). Checked with tools/check_kernel_margin.py
+; before moving: at $4100, the real floor (IO_TYPE_TARGET =
+; PROG_BASE-114) leaves 348 bytes of margin -- comfortably positive,
+; and actually a little MORE than the 332 bytes Phase 1 alone had at
+; $4200 before Phase 2's own savings existed. Deliberately not moved
+; further (e.g. to $40F0, reclaiming the full 272 bytes) -- the user's
+; own choice, banking 16 bytes of net margin gain alongside the 256-
+; byte program-RAM win rather than spending Phase 2's entire savings at
+; once. Boot margin (KERN_LOAD vs. sector-rounded size) is unaffected
+; as always, since it doesn't depend on PROG_BASE. Needs its own
+; isolated hardware round before being trusted -- not yet tested.
+PROG_BASE:      equ     $4100       ; user programs load here -- moved
+                                    ; down from $4200 once Phase 2's
+                                    ; self-modifying-vector redesign
+                                    ; freed real kernel margin, see above
 
 ; $0080-$00FF: the ROM's small boot-time stack lives here (see
 ; boot/mbr.asm) but is dead once the kernel sets up its own stack at
