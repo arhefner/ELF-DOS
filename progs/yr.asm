@@ -12,21 +12,28 @@
 ; complete (an empty/null header block).
 ;
 ; Flags:
-;   -u          use the disk-board UART directly (f_uread/f_utype) --
+;   (none)      use whatever device is currently the console, via
+;               K_READ/K_TYPE's own self-modified jump-table vector --
 ;               the default.
+;   -u          use the disk-board UART directly (f_uread/f_utype)
+;               instead, regardless of what the console currently is.
 ;   -b          use the onboard bit-bang serial port directly
-;               (f_bread/f_btype) instead.
+;               (f_bread/f_btype) instead, regardless of what the
+;               console currently is.
 ;   -y          overwrite existing files without asking.
 ;   -q          quiet -- suppress the per-file progress line, print
 ;               only the final summary.
 ;
-; -u/-b select which BIOS routines lib/ymodem.asm's own I/O primitives
-; call directly, bypassing K_READ/K_TYPE's own kernel-jump-table/RAM-
-; vector indirection -- same reasoning, same two device options, as
-; progs/mr.asm/progs/ms.asm's own identical flags (see either file's
-; header comment for the full account). UART mode additionally gets
-; real timeout/retry via f_utest polling; bit-bang mode cannot (see
-; lib/ymodem.asm's own header comment for why) and simply blocks,
+; DEVICE SELECTION (2026-09-01): matches progs/mr.asm/progs/ms.asm's
+; own identical redesign (see either file's header comment for the
+; full account) -- the default now follows the console automatically
+; via K_READ/K_TYPE's own self-modified vector, with "-u"/"-b" as an
+; explicit opt-out that lets a transfer run on a different physical
+; port than the console (watch debug/log output on the console while
+; a transfer runs elsewhere, or drive a transfer from outside a
+; terminal emulator entirely). UART mode additionally gets real
+; timeout/retry via f_utest polling; the other two modes cannot (see
+; lib/ymodem.asm's own header comment for why) and simply block,
 ; matching mr.asm/ms.asm's own pre-existing, accepted limitation.
 ;
 ; Register-liveness discipline follows mr.asm/ms.asm's own hardware-
@@ -93,7 +100,7 @@ start:
             ; -q (YR takes no positional arguments at all, unlike
             ; mr.asm's own single required filename).
             mov     rf, ym_io_mode
-            ldi     YM_IO_UART          ; default
+            ldi     YM_IO_CONSOLE       ; default
             str     rf
             mov     rf, yr_noask
             ldi     0

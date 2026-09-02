@@ -295,13 +295,13 @@ bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg | bin
 	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg
 	rm -f bin/ls.lkb
 
-bin/more: progs/more.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/more progs/more.prg lib/env.prg
-	rm -f bin/more.lkb
-
 bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg | bin
 	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg
 	rm -f bin/edlin.lkb
+
+bin/less: progs/less.prg lib/env.prg lib/lineedit.prg | bin
+	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/env.prg lib/lineedit.prg
+	rm -f bin/less.lkb
 
 bin/shell: progs/shell.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/shell progs/shell.prg lib/env.prg
@@ -322,6 +322,14 @@ bin/ys: progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg | bin
 bin/termsize: progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg | bin
 	$(LINK) $(LFLAGS) -o bin/termsize progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg
 	rm -f bin/termsize.lkb
+
+bin/mr: progs/mr.prg lib/fmt32.prg | bin
+	$(LINK) $(LFLAGS) -o bin/mr progs/mr.prg lib/fmt32.prg
+	rm -f bin/mr.lkb
+
+bin/ms: progs/ms.prg lib/fmt32.prg lib/file_glob.prg | bin
+	$(LINK) $(LFLAGS) -o bin/ms progs/ms.prg lib/fmt32.prg lib/file_glob.prg
+	rm -f bin/ms.lkb
 
 #------------------------------------------------------------------
 # Link rules

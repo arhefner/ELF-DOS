@@ -9,9 +9,14 @@
 ; assemble-time constant, not a real linked symbol, so it can't be
 ; extrn'd across files the way ym_io_mode (real memory) can; matches
 ; this project's own established restated-constant convention (e.g.
-; BPBBLK_* between kernel.inc/kernel_api.inc)
-YM_IO_UART:     equ     0       ; call f_uread/f_utype directly (default)
-YM_IO_BITBANG:  equ     1       ; call f_bread/f_btype directly
+; BPBBLK_* between kernel.inc/kernel_api.inc). Renumbered 2026-09-01
+; when a third mode (CONSOLE, via K_READ/K_TYPE) became the default --
+; see lib/ymodem.asm's own header comment for the full device-
+; selection design; keep this file in sync with lib/ymodem.asm if it
+; ever changes again.
+YM_IO_CONSOLE:  equ     0       ; call K_READ/K_TYPE (default)
+YM_IO_UART:     equ     1       ; call f_uread/f_utype directly
+YM_IO_BITBANG:  equ     2       ; call f_bread/f_btype directly
 
 YM_SOH:     equ     $01     ; 128-byte block follows
 YM_STX:     equ     $02     ; 1024-byte block follows ("-k" mode)

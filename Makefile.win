@@ -113,8 +113,8 @@ INCS =  include\bios.inc    \
 # ---- The progs\*.asm that link against lib\ -- see build_progs.bat's
 # own exclusion list, which must be kept in sync with this set ----
 SPECIAL_BINS = bin\printenv bin\export bin\unset \
-        bin\ls bin\more bin\edlin bin\move bin\xcopy bin\shell \
-        bin\yr bin\ys bin\termsize \
+        bin\ls bin\edlin bin\less bin\move bin\xcopy bin\shell \
+        bin\yr bin\ys bin\termsize bin\mr bin\ms \
         bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
         bin\stat bin\chkdsk
 
@@ -304,19 +304,19 @@ bin\ls: progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg bin
 	$(LINK) $(LFLAGS) -o bin\ls progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg
 	-del /F /Q bin\ls.lkb
 
-progs\more.prg: progs\more.asm include\kernel_api.inc include\bios.inc include\opcodes.def
-	cd progs && $(ASM) $(ASMFLAGS) more.asm
-
-bin\more: progs\more.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\more progs\more.prg lib\env.prg
-	-del /F /Q bin\more.lkb
-
 progs\edlin.prg: progs\edlin.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) edlin.asm
 
 bin\edlin: progs\edlin.prg lib\env.prg lib\lineedit.prg bin
 	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg lib\lineedit.prg
 	-del /F /Q bin\edlin.lkb
+
+progs\less.prg: progs\less.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\lineedit.inc
+	cd progs && $(ASM) $(ASMFLAGS) less.asm
+
+bin\less: progs\less.prg lib\env.prg lib\lineedit.prg bin
+	$(LINK) $(LFLAGS) -o bin\less progs\less.prg lib\env.prg lib\lineedit.prg
+	-del /F /Q bin\less.lkb
 
 progs\move.prg: progs\move.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) move.asm
@@ -352,6 +352,20 @@ progs\termsize.prg: progs\termsize.asm include\kernel_api.inc include\bios.inc i
 bin\termsize: progs\termsize.prg lib\ymodem.prg lib\fmt32.prg lib\env.prg bin
 	$(LINK) $(LFLAGS) -o bin\termsize progs\termsize.prg lib\ymodem.prg lib\fmt32.prg lib\env.prg
 	-del /F /Q bin\termsize.lkb
+
+progs\mr.prg: progs\mr.asm include\kernel_api.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) mr.asm
+
+bin\mr: progs\mr.prg lib\fmt32.prg bin
+	$(LINK) $(LFLAGS) -o bin\mr progs\mr.prg lib\fmt32.prg
+	-del /F /Q bin\mr.lkb
+
+progs\ms.prg: progs\ms.asm include\kernel_api.inc include\opcodes.def include\file_glob.inc
+	cd progs && $(ASM) $(ASMFLAGS) ms.asm
+
+bin\ms: progs\ms.prg lib\fmt32.prg lib\file_glob.prg bin
+	$(LINK) $(LFLAGS) -o bin\ms progs\ms.prg lib\fmt32.prg lib\file_glob.prg
+	-del /F /Q bin\ms.lkb
 
 progs\dir.prg: progs\dir.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\file_glob.inc include\vollabel.inc
 	cd progs && $(ASM) $(ASMFLAGS) dir.asm

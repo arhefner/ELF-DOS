@@ -156,7 +156,7 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | Command | Usage | What it does |
 |---|---|---|
 | `TYPE` | `TYPE <filename>` | Displays a text file on the screen. |
-| `MORE` | `MORE <filename>` | Like `TYPE`, but pauses after each screenful with a `-- More --` prompt. Press `Q` to stop early, any other key to continue. |
+| `LESS` | `LESS <filename>` | Pages through a file, forward AND backward, by screen or by line. `SPACE`/`F`/PgDn = next page, `B`/PgUp = previous page, `g` = go to the top, `G` = go to the end; Down-arrow/`J`/Ctrl-N/Ctrl-E = down one line, Up-arrow/`K`/Ctrl-P/Ctrl-Y = up one line (moving up or back past the point where `LESS` has any recorded history -- e.g. right after `G`, `g`, or a search match -- scans backward through the file for the true previous line/page instead of just stopping); `/` = search forward for text (case-sensitive), `N` = repeat the last search, `Q` = quit. |
 | `HEXDUMP` | `HEXDUMP <filename>` | Shows a file's raw bytes, in hexadecimal and as text, side by side. |
 | `COPY` | `COPY [-y] <source> <destination>` | Copies one file to another name, or one or more files into a directory. `-y` skips the "overwrite?" prompt. |
 | `MOVE` | `MOVE <source> <destination>` | Moves or renames one or more files, the same way `COPY` takes its arguments. |
@@ -203,14 +203,25 @@ computer running matching transfer software.
 
 | Command | Usage | What it does |
 |---|---|---|
-| `MR` | `MR [-u\|-b] <filename>` | Receives one file. |
-| `MS` | `MS [-u\|-b] <filename>` | Sends one file. |
+| `MR` | `MR [-u\|-b] [<destination>]` | Receives one or more files (the host decides how many). No destination given, or an existing directory, receives everything into that directory (or the current one) under each file's own name; any other name saves only the first file received, under that exact name. |
+| `MS` | `MS [-u\|-b] <filename> [filename...]` | Sends one or more files, using the MAX protocol. Filenames may contain `*`/`?` wildcards. |
 | `YR` | `YR [-u\|-b] [-y]` | Receives one or more files in a batch, using the YMODEM protocol. |
 | `YS` | `YS [-u\|-b] [-y] <filename...>` | Sends one or more files in a batch, using the YMODEM protocol. |
 
-All four accept `-u` or `-b` to choose which serial port to use, if the
-board has more than one; `-u` is the disk-board UART, `-b` is the
-onboard, bit-banged port.
+All four use the board's normal console I/O by default, so a transfer
+follows whatever serial port (or other device) the console is already
+using, with no port selection needed. If the board has more than one
+serial port, `-u` (the disk-board UART) or `-b` (the onboard, bit-
+banged port) sends the WHOLE transfer over that specific port instead,
+regardless of what the console currently is. This is useful for
+running a transfer on a different port than the one you're typing
+commands on -- for example, watching debug output on the console while
+a transfer runs on the other port, or driving a transfer from a
+separate program instead of a terminal session.
+
+`MR`/`MS`'s companion on the host side is `max-xfr` (`max-xfr -s
+<files...>` to send, `max-xfr -r [<destination>]` to receive) --
+matching syntax to `MR`/`MS` in each direction.
 
 ### Editing text
 

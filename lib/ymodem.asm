@@ -17,11 +17,26 @@
 ; more in indirection than it saves in code size.
 ;
 ; ym_io_mode (public, shared data) records which device the CALLING
-; program's own argv parsing selected ("-u", the default, or "-b") --
-; set once by yr.asm/ys.asm's own start:, read by every routine below
-; that touches the wire. Same convention mr.asm/ms.asm already
-; established (mr_io_mode/ms_io_mode), just shared here since both YR
-; and YS need it and the device-selection logic itself is identical.
+; program's own argv parsing selected -- CONSOLE (the default, via
+; K_READ/K_TYPE) or an explicit "-u"/"-b" override -- set once by
+; yr.asm/ys.asm's own start:, read by every routine below that touches
+; the wire. Same convention mr.asm/ms.asm already established
+; (mr_io_mode/ms_io_mode), just shared here since both YR and YS need
+; it and the device-selection logic itself is identical.
+;
+; DEVICE SELECTION (2026-09-01, redesigned from a UART-default,
+; UART/bitbang-only scheme -- see mr.asm's own header comment for the
+; full account of why, including the retracted "-u/-b is pointless
+; now that K_READ/K_TYPE are self-modified" reasoning this replaces):
+; now that K_TYPE/K_READ are self-modified jump-table slots reaching
+; whichever device is actually the CONSOLE, with no runtime redirect-
+; check branch and no register cost over a direct BIOS call, the
+; DEFAULT (no flag) is to use them -- a transfer then automatically
+; follows whatever the console currently is. "-u"/"-b" are an explicit
+; opt-out: they route every byte of the session directly to the
+; hardware UART (-u) or the onboard bit-banged UART (-b), bypassing
+; K_TYPE/K_READ's own vector entirely, so a transfer can run on a
+; DIFFERENT physical port than the console.
 ;
 ; Register-liveness discipline follows mr.asm/ms.asm's own hard-won,
 ; hardware-confirmed rule exactly (see either file's own header comment
@@ -46,8 +61,9 @@
             extrn   ym_io_mode
             extrn   ym_raw_digits
 
-YM_IO_UART:     equ     0           ; call f_uread/f_utype directly (default)
-YM_IO_BITBANG:  equ     1           ; call f_bread/f_btype directly
+YM_IO_CONSOLE:  equ     0           ; call K_READ/K_TYPE (default)
+YM_IO_UART:     equ     1           ; call f_uread/f_utype directly
+YM_IO_BITBANG:  equ     2           ; call f_bread/f_btype directly
 
 ;------------------------------------------------------------------
 ; ym_crc16: compute CRC16-CCITT (the "XMODEM" variant: poly $1021,
@@ -382,12 +398,13 @@ ypu_done:
             endp
 
 ;------------------------------------------------------------------
-; ym_getbyte: blocking, mode-aware single-byte read -- calls f_uread
-; or f_bread directly (never K_READ's own kernel-jump-table/RAM-vector
-; indirection), matching mr.asm's own established reasoning for why
-; the direct BIOS entry points are used at all. For infrequent,
-; once-per-block protocol bytes (handshake, header fields, ACK/NAK) --
-; the fast per-byte DATA loop is ym_recv_block below, not this.
+; ym_getbyte: blocking, mode-aware single-byte read -- CONSOLE mode
+; (the default) goes through K_READ's own self-modified vector; "-u"/
+; "-b" call f_uread/f_bread directly instead, bypassing it entirely --
+; see this file's own header comment for the full device-selection
+; design. For infrequent, once-per-block protocol bytes (handshake,
+; header fields, ACK/NAK) -- the fast per-byte DATA loop is
+; ym_recv_block below, not this.
 ; Args:    none (reads ym_io_mode)
 ; Returns: D = byte read
 ; Modifies: RD (and D)
@@ -397,6 +414,12 @@ ypu_done:
             ldn     rd
             xri     YM_IO_BITBANG
             lbz     ygb_bitbang
+            ldn     rd
+            xri     YM_IO_UART
+            lbz     ygb_uart
+            call    K_READ
+            rtn
+ygb_uart:
             call    f_uread
             rtn
 ygb_bitbang:
@@ -418,6 +441,13 @@ ygb_bitbang:
             ldn     rd
             xri     YM_IO_BITBANG
             lbz     ypb_bitbang
+            ldn     rd
+            xri     YM_IO_UART
+            lbz     ypb_uart
+            glo     rb
+            call    K_TYPE
+            rtn
+ypb_uart:
             glo     rb
             call    f_utype
             rtn
@@ -432,15 +462,17 @@ ypb_bitbang:
 ; iterations if none arrives -- UART mode only; see this file's own
 ; header comment and the project session notes for why bit-bang mode
 ; has no non-blocking "is a byte waiting" primitive at all (f_btest
-; is a BREAK-condition detector, not a data-ready test). In bit-bang
-; mode this just blocks on f_bread unconditionally, same as
-; ym_getbyte -- not a regression versus mr.asm/ms.asm, which have
-; never had timeout protection in either mode.
+; is a BREAK-condition detector, not a data-ready test), and CONSOLE
+; mode has no timeout primitive at all either (K_READ is a plain
+; blocking read, whatever device it's currently routed to). In both of
+; those modes this just blocks unconditionally, same as ym_getbyte --
+; not a regression versus mr.asm/ms.asm, which have never had timeout
+; protection in any mode.
 ; Args:    RD = poll budget (iterations, UART mode only -- ignored in
-;          bit-bang mode)
+;          the other two modes)
 ; Returns: DF = 0 with D = byte on success; DF = 1 if the poll budget
-;          was exhausted with nothing received (UART mode only -- bit-
-;          bang mode always returns DF = 0 eventually)
+;          was exhausted with nothing received (UART mode only -- the
+;          other two modes always return DF = 0 eventually)
 ; Modifies: RD (and D, DF)
 ;------------------------------------------------------------------
             proc    ym_getbyte_timeout
@@ -448,7 +480,15 @@ ypb_bitbang:
             ldn     rb
             xri     YM_IO_BITBANG
             lbz     ygbt_bitbang
+            ldn     rb
+            xri     YM_IO_UART
+            lbz     ygbt_uart
 
+            call    K_READ
+            clc
+            rtn
+
+ygbt_uart:
 ygbt_poll:
             ghi     rd
             lbnz    ygbt_have_budget
@@ -484,9 +524,10 @@ ygbt_bitbang:
 ; mr.asm's readlp_uart/readlp_bitbang and ms.asm's sendloop_uart/
 ; sendloop_bitbang, DELIBERATELY down to the exact loop-termination
 ; idiom: a genuine hand-written SHORT branch (bnz, not lbnz left for
-; -r to maybe shrink) is the entire reason -u/-b mode exists at all --
-; every extra byte of branch overhead here is real risk of a dropped
-; byte at high baud. The termination check itself (dec rc / ghi rc /
+; -r to maybe shrink) in every one of the three variants -- every
+; extra byte of branch overhead here is real risk of a dropped byte at
+; high baud, on whichever device is selected. The termination check
+; itself (dec rc / ghi rc /
 ; xri $ff / bnz) relies on RC arriving PRE-DECREMENTED by 1: a real
 ; block is always exactly 128 or 1024 bytes (never 0) by protocol
 ; definition, so this needs no zero-count guard, matching mr.asm's own
@@ -507,6 +548,21 @@ ygbt_bitbang:
             ldn     rd
             xri     YM_IO_BITBANG
             lbz     yrb_bitbang
+            ldn     rd
+            xri     YM_IO_UART
+            lbz     yrb_uart
+
+yrb_console:
+            call    K_READ
+            str     rf
+            inc     rf
+
+            dec     rc
+            ghi     rc
+            xri     $ff
+            bnz     yrb_console
+
+            rtn
 
 yrb_uart:
             call    f_uread
@@ -539,6 +595,20 @@ yrb_bitbang:
             ldn     rd
             xri     YM_IO_BITBANG
             lbz     ysb_bitbang
+            ldn     rd
+            xri     YM_IO_UART
+            lbz     ysb_uart
+
+ysb_console:
+            lda     rf
+            call    K_TYPE
+
+            dec     rc
+            ghi     rc
+            xri     $ff
+            bnz     ysb_console
+
+            rtn
 
 ysb_uart:
             lda     rf

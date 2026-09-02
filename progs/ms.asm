@@ -1,89 +1,120 @@
 ;
-; ms.asm - send a file via the MAX protocol
+; ms.asm - send one or more files via the MAX protocol
 ;
-; Usage: MS [-u|-b] <filename>
+; Usage: MS [-u|-b] <filename> [filename...]
 ;
 ; Companion to the host-side max-xfr tool (Elf-xfer/max-xfr), run as
 ; "max-xfr -r" to receive. mr and ms are two directions of the same
-; protocol; see progs/mr.asm's own header comment for the full
-; reasoning behind this file's structure (library-extraction goal,
-; why ms_send is a real proc/endp block placed on its own page via
-; ".link .align page").
+; batch-capable protocol; see mr.asm's own header comment for the full
+; account of the wire design (a header block -- name + 32-bit size --
+; ahead of each file's data, in the same spirit as YMODEM's own
+; extension of XMODEM, but reusing the ORIGINAL block mechanism
+; unchanged) and ms_session's own header comment below for this
+; direction's exact byte sequence.
 ;
-; IMPORTANT, hardware-confirmed 2026-07-11: this file's own first
-; hardware round found that RA is NOT safe to hold the send buffer's
-; address across the many intervening K_READ/K_TYPE calls in the per-
-; block loop below -- something inside repeated calls to those two
-; (f_read/f_type) clobbers it, contrary to the assumption this file
-; originally made (copied from the original Elf/OS ms.asm, which used
-; the identical "cache a pointer in a register for the whole transfer"
-; pattern and was, per the user, "very reliable" there -- so this is
-; most likely a genuine ELF-DOS f_read/f_type behavior difference
-; under repeated calls, not a design mistake ported from the
-; original). Symptom was a byte-exact repeating 512-byte block
-; throughout the received file instead of the real, varying content
-; -- RA silently reset to some fixed value early on, then every
-; "mov rf, ra" for the rest of the transfer read/sent that same wrong
-; address's (unchanging) content instead of advancing through the
-; real file. Fixed by moving the buffer address and the running
-; "address" header field (ms_addr_hi/ms_addr_lo) out of RA/RB
-; entirely -- see ms_buf and ms_addr_hi/lo below, and progs/mr.asm's
-; own header comment (mr_cnt_hi/mr_cnt_lo) for the identical fix
-; applied to that file's own R7 usage. Only R9's survival across
-; f_msg/f_inmsg/f_idewrite has ever been confirmed (gotcha #8 in
-; CLAUDE.md) -- nothing about K_READ/K_TYPE specifically was tested
-; before this. sendloop_uart/sendloop_bitbang's own use of RC across
-; their direct f_utype/f_btype calls (in the one loop that has to stay
-; fast) is NOT independently confirmed either, but is indirectly
-; supported by this fix producing a correctly-sized transfer end-to-
-; end (same register, same call shape, no observed size/count
-; corruption) -- left as-is rather than fixed, since fixing it would
-; cost real throughput in the one loop where that matters most.
+; Each argument may be a plain filename or a "*"/"?" wildcard, expanded
+; via lib/file_glob.asm's is_glob/glob_init/glob_next -- same pattern
+; this project already uses for COPY/MOVE/DEL/ATTRIB/TOUCH. A pattern
+; matching zero files falls back to attempting the literal, unexpanded
+; text (nullglob-off), which then simply reports "Not found" like any
+; other missing literal path. Every sent filename is just the
+; basename (e.g. "foo.txt"), never the resolved full/glob-matched
+; path -- matches YMODEM's own convention (the receiver decides where
+; the file lands) and matches how mr.asm itself treats whatever name
+; arrives as, at most, informational (see its own header comment for
+; when it's used and when it's ignored).
 ;
-; Direct-device send loop (2026-07-12, added alongside progs/mr.asm's
-; own identical feature): an optional "-u" (UART, the default) or "-b"
-; (bit-bang) flag before the filename selects which BIOS routine
-; sendloop_uart/sendloop_bitbang below calls directly for each outgoing
-; byte, bypassing K_TYPE entirely -- no kernel jump-table hop, no
-; f_type's own RAM-vector indirection through whatever "type" is
-; currently patched to (the device-abstraction layer that lets a BIOS
-; trap console I/O to something else, e.g. a directly connected
-; keyboard or an OLED terminal -- see progs/mr.asm's own header
-; comment for the user's fuller account of why that indirection exists
-; and its likely connection to intermittent Elf/OS transfer failures).
-; f_utype/f_btype (bios.inc, EBIOS+09h/+03h) are stable, already-
-; established BIOS entry points that reach the hardware UART/bit-bang
-; driver directly, independent of RE.1 and the device-abstraction
-; layer (same as f_utest/f_btest). Added here on the user's own
-; request for symmetry with mr.asm -- redirecting console I/O
-; elsewhere (keyboard/OLED) shouldn't silently redirect the serial
-; transfer protocol's own wire traffic too, so ms should reach the
-; real serial port directly the same way mr now does. Deferred, not
-; yet implemented: auto-selecting UART vs. bit-bang via an environment
-; variable or an f_getdev probe once either exists -- for now the
-; caller states it explicitly, defaulting to UART.
+; A LOCAL failure for one file (not found, is a directory, can't open,
+; a read error partway through) prints its own message and moves on to
+; the next file -- matches TOUCH/ATTRIB/DEL's own "note and continue"
+; convention. A WIRE/PROTOCOL failure (an echoed header/block field
+; that doesn't match, a missing block ack, or the final
+; acknowledgment never arriving) is different: the two ends are now
+; permanently out of lock-step, so it aborts the WHOLE batch
+; immediately, not just the current file -- there is no retry/cancel
+; signal in this minimal protocol (unlike YMODEM's CAN byte), matching
+; this project's own original single-file ms_send, which already
+; treated any echo mismatch as fully fatal.
+;
+; DEVICE SELECTION (2026-09-01, restored and redesigned -- see
+; mr.asm's own header comment for the full account, including the
+; retracted "-u/-b is pointless now" reasoning this replaces): now
+; that K_TYPE/K_READ are self-modified jump-table slots reaching
+; whichever device is actually the CONSOLE, with no runtime redirect-
+; check branch and no register cost over a direct BIOS call, the
+; DEFAULT (no flag) is to use them -- MS's own transfer then
+; automatically follows whatever the console currently is. "-u"/"-b"
+; are an explicit opt-out: they route every byte of THIS session's own
+; protocol directly to the hardware UART (-u) or the onboard bit-
+; banged UART (-b), bypassing K_TYPE/K_READ's own vector entirely, so
+; a transfer can run on a DIFFERENT physical port than the console
+; (watch debug/log output on the console while a transfer runs
+; elsewhere, or drive a transfer from outside a terminal emulator
+; entirely). ms_getbyte/ms_putbyte (ms_session's own local
+; subroutines, below) are the mode-aware dispatch point for every
+; PROTOCOL byte; the hot per-byte DATA loop (ms_sendbytes) gets its
+; own separate, page-aligned, hand-short-branched 3-way dispatch for
+; speed, mirroring lib/ymodem.asm's own ym_getbyte/ym_putbyte vs.
+; ym_send_block split exactly.
+;
+; The register-liveness caution this file has carried since 2026-07-11
+; is UNCHANGED: nothing is trusted to survive more than one call to
+; ms_getbyte/ms_putbyte (or, equivalently, K_READ/K_TYPE directly, in
+; CONSOLE mode) in a register -- every value that must survive a call
+; lives in memory instead (ms_addr_hi/ms_addr_lo and friends), reloaded
+; fresh immediately before use. The ONE loop that trusts a register
+; (RC/RF) across many repeated per-byte calls -- ms_sendbytes, the hot
+; per-byte transfer loop -- is exactly the same register/call shape
+; this project has relied on since ms.asm's very first version.
+;
+; ms_session is a real proc/endp block (extrn'd from start, ordinary
+; same-file cross-proc convention) rather than inline in start, purely
+; for size/organization -- it has no hand-written short branches of
+; its own and so needs no page alignment. ms_sendbytes (the hot
+; per-byte loop) is a SEPARATE, page-aligned proc, exactly matching the
+; original file's own ms_send/ms_sendbytes split: the handshake/
+; header-echo/batch-management code ahead of it in ms_session pushes
+; well past what a single page-aligned ms_session could still
+; guarantee for a hand-written short branch this deep into the file.
+;
 
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
+#include    include/file_glob.inc
 
-            extrn   ms_send
+            extrn   ms_session
             extrn   ms_sendbytes
+            extrn   fmt_size32
+            extrn   is_glob
+            extrn   glob_init
+            extrn   glob_next
 
-XFER_BUF_LEN:   equ     512
+XFER_BUF_LEN:       equ     512
 
-; ms_send I/O mode selector (ms_io_mode, set once in start, read once
-; per block in ms_send -- see sendloop_uart/sendloop_bitbang below)
-MS_IO_UART:         equ     0           ; call f_utype directly (default)
-MS_IO_BITBANG:      equ     1           ; call f_btype directly
+; MAXFER_NAME_MAX: matches DIRENT_NAME's own 127-char cap
+; (kernel_api.inc) and mr.asm's own identical bound on the receive
+; side.
+MAXFER_NAME_MAX:    equ     127
 
-; ms_send result codes (returned in D; 0 = success)
-MSERR_HANDSHAKE:    equ     1           ; host's initial sync byte
-                                        ; wasn't $AA
-MSERR_READ:         equ     2           ; K_FILE_READ failed
-MSERR_SEND:         equ     3           ; a header/block echo mismatch
-MSERR_COMMAND:      equ     4           ; host's post-EOF response
-                                        ; wasn't 'x'
+; ms_process_file's own return convention (D). ms_session's overall
+; return code (checked by start) is a separate, simpler generic
+; 0/1/2 -- see ms_session's own header comment for that one.
+MSF_OK:             equ     0       ; file sent cleanly
+MSF_LOCAL_ERR:      equ     1       ; local error (not found, is a
+                                    ; directory, can't open, a read
+                                    ; error) -- already printed, the
+                                    ; batch continues
+MSF_FATAL:          equ     2       ; wire/protocol error -- already
+                                    ; printed, the whole batch must
+                                    ; stop
+
+; ms_io_mode (start, below): which device every byte of this session's
+; own protocol goes over -- see this file's own header comment for the
+; full design. CONSOLE (0) is the default.
+MS_IO_CONSOLE:      equ     0       ; via K_READ/K_TYPE (default)
+MS_IO_UART:         equ     1       ; via f_uread/f_utype directly
+MS_IO_BITBANG:      equ     2       ; via f_bread/f_btype directly
 
             org     PROG_BASE
 
@@ -96,22 +127,19 @@ MSERR_COMMAND:      equ     4           ; host's post-EOF response
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = argv pointer, RC = argc (RC.0 alone is enough).
-            ; argv[0] is this program's own name. argv[1] may be an
-            ; optional "-u"/"-b" flag -- now a clean, standalone token
-            ; (the shell's own tokenizer already split on whitespace,
-            ; so no per-character space-boundary check is needed
-            ; anymore, just a direct 2-character-plus-NUL comparison);
-            ; the filename is argv[2] if a flag was given, else
-            ; argv[1]. ms_io_mode (memory) records the choice, since
-            ; ms_send -- a separate proc -- needs to read it once at
-            ; block-entry time, outside the tight loop itself. Defaults
-            ; to MS_IO_UART when no flag is given. See progs/mr.asm's
-            ; own start for the identical, already-verified parsing
-            ; logic this mirrors.
+            ; RA = argv pointer, RC = argc. argv[1], if present, may
+            ; be "-u"/"-b" (must come first, matching YR/YS's own
+            ; convention) selecting which physical port every byte of
+            ; this session's own protocol goes over -- see this file's
+            ; own header comment. Filenames start right after any
+            ; flag; at least one is always required.
             glo     rc
             smi     2
             lbnf    usage               ; argc < 2: nothing at all
+
+            mov     rf, ms_io_mode
+            ldi     MS_IO_CONSOLE       ; default
+            str     rf
 
             mov     rb, ra
             add16   rb, 2               ; RB = &argv[1]
@@ -123,192 +151,472 @@ start:
             mov     rf, rd
             ldn     rf                  ; D = argv[1][0]
             xri     '-'
-            lbnz    not_flag
+            lbnz    start_no_flag
 
+            mov     rf, rd
             inc     rf
             ldn     rf                  ; D = argv[1][1]
-            plo     r8                  ; R8.0 = the flag letter (temp)
+            plo     r8                  ; R8.0 = flag letter (temp)
 
+            mov     rf, rd
             inc     rf
-            ldn     rf                  ; D = argv[1][2] -- must be NUL
-                                        ; for "-u"/"-b" to be exactly
-                                        ; this whole token
-            lbnz    not_flag
+            inc     rf
+            ldn     rf                  ; D = argv[1][2] -- must be
+                                        ; NUL for "-u"/"-b" to be
+                                        ; exactly this whole token
+            lbnz    start_no_flag       ; not exactly 2 chars after
+                                        ; '-': fall back to treating
+                                        ; argv[1] as a filename
 
-            glo     r8                  ; D = flag letter again
+            glo     r8
             xri     'u'
-            lbz     flag_uart
+            lbz     start_flag_uart
             glo     r8
             xri     'b'
-            lbz     flag_bitbang
-            lbr     not_flag            ; unrecognized letter -- fall
-                                        ; back to treating argv[1]
-                                        ; itself as the (probably
-                                        ; invalid) filename
+            lbz     start_flag_bitbang
+            lbr     start_no_flag       ; unrecognized letter: same
+                                        ; fallback
 
-flag_uart:
-            glo     rc
-            smi     3
-            lbnf    usage               ; flag given but argc < 3: no
-                                        ; filename after it
-            mov     rb, ra
-            add16   rb, 4               ; RB = &argv[2]
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = argv[2] (filename)
+start_flag_uart:
             mov     rf, ms_io_mode
             ldi     MS_IO_UART
             str     rf
-            lbr     have_name_ptr
+            lbr     start_after_flag
 
-flag_bitbang:
-            glo     rc
-            smi     3
-            lbnf    usage
-            mov     rb, ra
-            add16   rb, 4               ; RB = &argv[2]
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = argv[2] (filename)
+start_flag_bitbang:
             mov     rf, ms_io_mode
             ldi     MS_IO_BITBANG
             str     rf
-            lbr     have_name_ptr
 
-not_flag:
-            ; RD already holds argv[1]'s pointer, untouched by the
-            ; flag-character checks above -- that's the filename
-            mov     rf, ms_io_mode
-            ldi     MS_IO_UART          ; default
+start_after_flag:
+            ; a flag was consumed as argv[1] -- at least one filename
+            ; must remain (argc >= 3), starting at argv[2]
+            glo     rc
+            smi     3
+            lbnf    usage
+            mov     rf, ms_files_start
+            ldi     2
             str     rf
-            lbr     have_name_ptr
+            lbr     start_have_files
+
+start_no_flag:
+            mov     rf, ms_files_start
+            ldi     1
+            str     rf
+
+start_have_files:
+            mov     rf, ms_argv
+            ghi     ra
+            str     rf
+            inc     rf
+            glo     ra
+            str     rf                  ; ms_argv = RA
+
+            mov     rf, ms_argc
+            glo     rc
+            str     rf                  ; ms_argc = RC.0
+
+            call    ms_session          ; prints its own per-file
+                                        ; progress and a final summary;
+                                        ; D = 0/1/2 -- see ms_session's
+                                        ; own header comment
+            plo     r8                  ; BUG-CLASS GUARD: stash the
+                                        ; result before anything below
+                                        ; (a "mov") clobbers D
+
+            glo     r8
+            lbz     start_success
+            ldi     1
+            rtn
+
+start_success:
+            ldi     0
+            rtn
 
 usage:
             call    K_INMSG
-            db      "Usage: MS [-u|-b] <filename>",13,10,0
-            ldi     1                   ; exit code 1 = error
-            rtn
-
-have_name_ptr:
-            mov     rf, rd              ; RF = filename
-            mov     rd, ms_fcb_struct   ; RD = our FCB struct
-            mov     ra, ms_iobuf        ; RA = our I/O buffer (movs
-                                        ; before the mode load below,
-                                        ; since mov clobbers D)
-            ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
-                                        ; ms_fcb_struct is a fixed
-                                        ; address, nothing to capture)
-            lbdf    open_error
-
-            mov     rd, ms_fcb_struct   ; RD = FCB pointer, passed to
-                                        ; ms_send as its own argument --
-                                        ; see progs/mr.asm's identical
-                                        ; note on why this stays an
-                                        ; explicit argument rather than
-                                        ; ms_send referencing
-                                        ; ms_fcb_struct directly
-            call    ms_send             ; D = result code (0 = success)
-            ; BUG-CLASS GUARD (see progs/type.asm/wtest.asm): stash the
-            ; result before "mov rf, ..." for K_FILE_CLOSE's own arg
-            ; setup clobbers D.
-            plo     r8                  ; R8.0 = ms_send's result
-
-            mov     rd, ms_fcb_struct
-            call    K_FILE_CLOSE        ; result/DF here intentionally
-                                        ; ignored -- ms_send's own
-                                        ; result is what we report
-
-            glo     r8
-            lbnz    xfer_failed
-
-            call    K_INMSG
-            db      "File sent.",13,10,0
-            ldi     0                   ; exit code 0 = success
-            rtn
-
-xfer_failed:
-            ; D = ms_send's numeric result code (1-4); print it
-            ; alongside a generic message rather than maintaining four
-            ; separate strings in this file too -- see ms_send's own
-            ; header comment for what each code means.
-            adi     '0'
-            plo     r8
-            call    K_INMSG
-            db      "Transfer failed (error ",0
-            glo     r8
-            call    K_TYPE
-            call    K_INMSG
-            db      ").",13,10,0
+            db      "Usage: MS [-u|-b] <filename> [filename...]",13,10,0
             ldi     1
             rtn
 
-open_error:
-            call    K_INMSG
-            db      "File not found.",13,10,0
-            ldi     1
-            rtn
-
-ms_fcb_struct:  ds      FCB_LEN
-ms_iobuf:       ds      FCB_IOBUF_LEN
+ms_argv:        dw      0
+ms_argc:        db      0
+ms_files_start: db      0
 ms_io_mode:     db      0
 
 ;==================================================================
-; ms_send: send an already-open file's contents over the console/
-; serial port, using ELF-DOS's own MAX-derived transfer protocol.
-;
-; Args:    RD = FCB pointer of an already-open file (mode 0 -- read)
-; Returns: D  = 0 on success, MSERR_* on failure (see equ's above)
-;          DF = 0 on success, DF = 1 on failure (redundant with D,
-;               kept for consistency with this project's other calls)
-; Clobbers: everything except the FCB itself and whatever the caller
-;          separately preserved -- this is a leaf worker, not a
-;          register-preserving subroutine. Does not close the FCB;
-;          the caller does that once, after this returns, regardless
-;          of success or failure -- see start/have_name_ptr above for
-;          the identical pattern progs/mr.asm's start/have_name_ptr
-;          also uses.
+; ms_session: send one or more files over the console/serial port,
+; using ELF-DOS's own MAX-derived batch transfer protocol.
 ;
 ; Protocol (matches max-xfr's "-r" / receive mode):
-;   1. Wait for $AA (sync) from the host. Reply with $55.
-;   2. Per block: send $01 (more data follows), wait for it to be
-;      echoed back, then send a 2-byte big-endian byte count and a
-;      2-byte running address (protocol fidelity only -- see mr.asm's
-;      note on why the address field goes unused on the receiving
-;      end), each verified against its own echo before continuing.
-;      The data bytes themselves follow with no per-byte echo
-;      (throughput); wait for a final $AA ACK once the whole block
-;      has been sent.
-;   3. At end of file, send $00 instead of $01, then send a final 'x'
-;      and finish -- no reply expected to the 'x'.
+;   1. Wait for $AA (sync) from the host. Reply with $55. Deferred
+;      until the FIRST file that actually opens successfully (a purely
+;      local failure -- e.g. every argument on the command line is a
+;      typo -- never touches the wire at all).
+;   2. For each file that opens successfully:
+;      a. HEADER BLOCK, sent via the ordinary block mechanism
+;         (ms_send_block below): $01 (echoed), a 2-byte big-endian
+;         byte count and a 2-byte running address (echoed as sent --
+;         the address field is unused on the receiving end, kept only
+;         for wire compatibility with the underlying raw memory-load
+;         format this protocol is derived from), then that many
+;         un-echoed payload bytes: the file's basename (null-
+;         terminated) followed by its 32-bit size, big-endian binary
+;         (not YMODEM's ASCII-octal convention) -- read straight out
+;         of K_STAT's own DIRENT_SIZE field, already in the exact byte
+;         order this header needs. Waits for a final $AA ack once the
+;         whole block has been received.
+;      b. DATA BLOCKS: the same block mechanism, one or more times,
+;         carrying the file's actual content.
+;      c. End of this file's data: sends $00 (NOT echoed, matching the
+;         original single-file protocol's own end-of-block-stream
+;         marker) and moves straight on to the NEXT file's own header
+;         block (step 2a) -- no wait for an ack or an 'x' here, that
+;         only happens once, at the very end of the whole batch.
+;   3. Once every file has been sent, sends $00 in the SAME
+;      "starting a new file" state every header block starts from --
+;      there's no separate empty-name sentinel needed, the state a
+;      $00 is sent in is what distinguishes "end of this file's data"
+;      (mid-file) from "end of the whole batch" (between files). Then
+;      sends a final 'x' and waits for it to come back unchanged
+;      (matching the original single-file protocol's own end
+;      sequence, where the host always echoes/re-sends 'x' once
+;      mrecv()/msend() finishes on its side).
 ;
-; Page-aligned (see .link .align page below): ms_send's whole body is
-; well under 256 bytes, so aligning its start to a page boundary
-; guarantees every branch directly within it is on the same page as
-; its target. The two hand-written short branches for the actual byte-
-; send loop live in a *separate* proc, ms_sendbytes, with its own
-; independent page alignment -- see that proc's own header comment for
-; why ms_send's own alignment isn't enough to cover them too.
+; Args:    none (reads ms_argv/ms_argc, set by start)
+; Returns: D  = 0 (every file sent cleanly, whole session completed
+;          without a protocol error), 1 (the protocol completed
+;          cleanly but at least one individual file failed locally),
+;          2 (a wire/protocol error aborted the whole session)
+;          DF = 0 on success, DF = 1 on failure (redundant with D,
+;          kept for consistency with this project's other calls)
+; Clobbers: everything -- a leaf worker, not register-preserving.
 ;==================================================================
 
-            .link   .align  page
-            proc    ms_send
-            mov     rf, ms_handle
+            proc    ms_session
+
+            mov     rf, ms_ok_count
+            ldi     0
+            str     rf
+            mov     rf, ms_err_count
+            ldi     0
+            str     rf
+            mov     rf, ms_handshake_done
+            ldi     0
+            str     rf
+            mov     rf, ms_abort
+            ldi     0
+            str     rf
+
+            mov     rf, ms_i
+            mov     rd, ms_files_start
+            ldn     rd
+            str     rf                  ; ms_i = ms_files_start (1, or
+                                        ; 2 if a "-u"/"-b" flag was
+                                        ; consumed as argv[1])
+
+;------------------------------------------------------------------
+; Outer loop: one iteration per argv entry (a literal filename or a
+; wildcard pattern).
+;------------------------------------------------------------------
+mss_loop:
+            mov     rf, ms_abort
+            ldn     rf
+            lbnz    mss_loop_done       ; a fatal error already ended
+                                        ; the session
+
+            mov     rf, ms_i
+            ldn     rf
+            str     r2                  ; M(X) = ms_i (subtrahend)
+            mov     rf, ms_argc
+            ldn     rf                  ; D = ms_argc (minuend)
+            sm                          ; D = ms_argc - ms_i
+            lbnf    mss_loop_done       ; ms_argc < ms_i: every
+                                        ; argument handled
+
+            ; RD = argv[ms_i]
+            mov     rf, ms_i
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            shl16   r8                  ; R8 = ms_i * 2
+            mov     rf, ms_argv
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = ms_argv (base)
+            add16   rb, r8              ; RB = &argv[ms_i]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[ms_i]
+
+            mov     rf, ms_cur_arg
             ghi     rd
             str     rf
             inc     rf
             glo     rd
-            str     rf                  ; ms_handle = RD (the FCB
-                                        ; pointer, received as this
-                                        ; proc's own argument)
+            str     rf                  ; ms_cur_arg = argv[ms_i]
 
-            ; ms_addr (memory, not a register) tracks the running
-            ; "address" header field (protocol fidelity only, unused
-            ; by mr) -- see this file's header comment for why this
-            ; can't be a register held across the many intervening
-            ; K_READ/K_TYPE calls below.
+            mov     rf, ms_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    is_glob             ; DF = 0/1
+            lbdf    mss_literal         ; DF=1: not a glob
+
+            ; --- is a glob: glob_init ---
+            mov     rf, ms_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            mov     rd, ms_glob_ctx
+            call    glob_init           ; DF = 0/1
+            lbdf    mss_glob_bad_path
+
+            mov     rf, ms_glob_found
+            ldi     0
+            str     rf
+
+mss_glob_loop:
+            mov     rf, ms_abort
+            ldn     rf
+            lbnz    mss_glob_done
+
+            mov     rd, ms_glob_ctx
+            call    glob_next           ; DF = 0/1, RF = match
+            lbdf    mss_glob_done       ; exhausted
+
+            ; BUG-CLASS GUARD (copy.asm's own established precedent):
+            ; stash the match pointer in R9 before anything below (a
+            ; "mov") clobbers RF.
+            mov     r9, rf
+
+            mov     rf, ms_glob_found
+            ldi     1
+            str     rf
+
+            mov     rf, r9              ; RF = matched full path again
+            call    ms_process_file     ; D = MSF_*
+            call    ms_handle_result
+            lbr     mss_glob_loop
+
+mss_glob_done:
+            mov     rf, ms_glob_found
+            ldn     rf
+            lbnz    mss_next            ; had at least one match: done
+
+            ; zero matches: nullglob-off fallback to the literal,
+            ; unexpanded text
+            mov     rf, ms_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    ms_process_file
+            call    ms_handle_result
+            lbr     mss_next
+
+mss_glob_bad_path:
+            call    K_INMSG
+            db      "Source file not found: ",0
+            mov     rf, ms_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      ".",13,10,0
+            mov     rf, ms_err_count
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     mss_next
+
+mss_literal:
+            mov     rf, ms_cur_arg
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    ms_process_file
+            call    ms_handle_result
+
+mss_next:
+            mov     rf, ms_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     mss_loop
+
+mss_loop_done:
+            mov     rf, ms_abort
+            ldn     rf
+            lbnz    mss_had_fatal
+
+            mov     rf, ms_handshake_done
+            ldn     rf
+            lbz     mss_result_check    ; nothing was ever sent at
+                                        ; all (every argument was a
+                                        ; purely local failure) --
+                                        ; nothing to close out on the
+                                        ; wire
+
+            ; --- outer "no more files" terminator + final ack ---
+            ldi     0
+            call    ms_putbyte
+            call    ms_getbyte
+            xri     'x'
+            lbz     mss_result_check
+
+            call    K_INMSG
+            db      "Protocol error: no final acknowledgment from host.",13,10,0
+            ldi     MSF_FATAL
+            lbr     mss_summarize
+
+mss_result_check:
+            mov     rf, ms_err_count
+            ldn     rf
+            lbz     mss_fully_clean
+            ldi     1
+            lbr     mss_summarize
+
+mss_fully_clean:
+            ldi     0
+            lbr     mss_summarize
+
+mss_had_fatal:
+            ldi     MSF_FATAL
+
+;------------------------------------------------------------------
+; mss_summarize: D already holds the session's own result code.
+; Stash it (a register can't survive fmt_size32's own "Modifies:
+; everything" -- see lib/fmt32.asm's own header), print the ok/err
+; counts, then reload it for the real return.
+;------------------------------------------------------------------
+mss_summarize:
+            plo     rc                  ; BUG-CLASS GUARD: stash D via
+                                        ; a register PLO (which
+                                        ; doesn't touch D) before "mov
+                                        ; rf, ..." clobbers it.
+            mov     rf, ms_result
+            glo     rc
+            str     rf
+
+            mov     rf, ms_ok_count
+            call    ms_print_count
+            call    K_INMSG
+            db      " file(s) sent.",13,10,0
+
+            mov     rf, ms_err_count
+            ldn     rf
+            lbz     mss_sum_skip_err
+            mov     rf, ms_err_count
+            call    ms_print_count
+            call    K_INMSG
+            db      " file(s) failed.",13,10,0
+mss_sum_skip_err:
+
+            mov     rf, ms_result
+            ldn     rf
+            lbz     mss_summarize_ok
+            stc
+            rtn
+mss_summarize_ok:
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; ms_process_file: send one already-resolved file (a literal argv
+; entry, or one glob match) as a single header block + data blocks +
+; per-file EOF marker. Performs the session's ONE-TIME handshake
+; itself, the first time it's ever called with a file that actually
+; opens for reading.
+; Args:    RF = source path
+; Returns: D = MSF_OK / MSF_LOCAL_ERR / MSF_FATAL (see the equ's
+;          above) -- every outcome has already printed its own
+;          message
+; Modifies: everything
+;------------------------------------------------------------------
+ms_process_file:
+            mov     rd, ms_cur_path
+            ghi     rf
+            str     rd
+            inc     rd
+            glo     rf
+            str     rd                  ; ms_cur_path = RF
+
+            ; --- K_STAT: existence + directory check + size ---
+            mov     rf, ms_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            mov     rd, ms_stat_buf
+            call    K_STAT              ; DF = 0/1
+            lbdf    mpf_not_found
+
+            mov     rf, ms_stat_buf
+            add16   rf, DIRENT_ATTR
+            ldn     rf
+            ani     ATTR_DIR
+            lbnz    mpf_is_dir
+
+            ; --- open for read ---
+            mov     rf, ms_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            mov     rd, ms_fcb
+            mov     ra, ms_iobuf
+            ldi     0                   ; mode = read
+            call    K_FILE_OPEN         ; DF = 0/1
+            lbdf    mpf_cannot_open
+
+            ; --- one-time session handshake ---
+            mov     rf, ms_handshake_done
+            ldn     rf
+            lbnz    mpf_have_shake
+
+            call    ms_getbyte
+            xri     $aa
+            lbz     mpf_shake_ok
+
+            mov     rd, ms_fcb
+            call    K_FILE_CLOSE
+            call    K_INMSG
+            db      "No response from host.",13,10,0
+            ldi     MSF_FATAL
+            rtn
+
+mpf_shake_ok:
+            ldi     $55
+            call    ms_putbyte
+            mov     rf, ms_handshake_done
+            ldi     1
+            str     rf
+
+mpf_have_shake:
+            call    ms_basename         ; ms_basename_buf = basename
+                                        ; of ms_cur_path, bounded to
+                                        ; MAXFER_NAME_MAX chars
+
+            ; ms_addr (the block header's own running "address" field,
+            ; protocol fidelity only, unused by the receiver) resets
+            ; to 0 at the start of every file, matching the original
+            ; single-file protocol's own per-transfer reset.
             mov     rf, ms_addr_hi
             ldi     0
             str     rf
@@ -316,131 +624,273 @@ ms_io_mode:     db      0
             ldi     0
             str     rf
 
-;------------------------------------------------------------------
-; Handshake: wait for $AA (sync) from the host, reply with $55.
-;------------------------------------------------------------------
-            call    K_READ
-            xri     $aa
-            lbz     ms_shake
+            ; --- build the header payload: basename + NUL + 4-byte
+            ; big-endian size (copied straight from K_STAT's own
+            ; DIRENT_SIZE field -- already the exact byte order this
+            ; header needs, no repacking) ---
+            mov     rf, ms_hdr_buf
+            mov     rd, ms_basename_buf
+mpf_hdr_copy:
+            lda     rd
+            str     rf
+            lbz     mpf_hdr_have_nul
+            inc     rf
+            lbr     mpf_hdr_copy
 
-            ldi     MSERR_HANDSHAKE
-            lbr     ms_exit
+mpf_hdr_have_nul:
+            inc     rf                  ; RF = one past the NUL just
+                                        ; written
+            mov     r8, rf              ; R8 = size-field write cursor
+            mov     rd, ms_stat_buf
+            add16   rd, DIRENT_SIZE
+            lda     rd
+            str     r8
+            inc     r8
+            lda     rd
+            str     r8
+            inc     r8
+            lda     rd
+            str     r8
+            inc     r8
+            ldn     rd
+            str     r8                  ; R8 now points at the last
+                                        ; size byte written
 
-ms_shake:   ldi     $55
-            call    K_TYPE
+            ; header payload length = (R8 - ms_hdr_buf) + 1
+            mov     rf, r8
+            mov     rd, ms_hdr_buf
+            sub16   rf, rd              ; RF = R8 - ms_hdr_buf
+            mov     rc, rf
+            add16   rc, 1
+
+            mov     rf, ms_hdr_buf
+            call    ms_send_block       ; DF = 0/1
+            lbdf    mpf_fatal_close
 
 ;------------------------------------------------------------------
-; Per-block loop.
-;
-; ms_handle (not a register) holds the FCB pointer across K_FILE_READ
-; calls: file_read uses RB as its own internal scratch (see
-; progs/type.asm's own note), so nothing kept in a register here would
-; reliably survive the call.
+; Data blocks.
 ;------------------------------------------------------------------
-ms_next:    mov     rf, ms_buf          ; RF = send buffer
-            mov     rc, XFER_BUF_LEN
-            ; RD needs the FCB pointer, a 2-byte value stashed in
-            ; ms_handle -- RB is the scratch address register used to
-            ; fetch it, leaving RF/RC (buffer/count) untouched
-            mov     rb, ms_handle
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = the FCB pointer
-            call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
-            lbdf    ms_rderr
+mpf_data_loop:
+            mov     rf, ms_databuf
+            ldi     low XFER_BUF_LEN
+            plo     rc
+            ldi     high XFER_BUF_LEN
+            phi     rc
+            mov     rd, ms_fcb
+            call    K_FILE_READ         ; RC = bytes actually read,
+                                        ; DF = 0/1
+            lbdf    mpf_read_err
 
             glo     rc
-            lbnz    sendblk
+            lbnz    mpf_have_chunk
             ghi     rc
-            lbnz    sendblk
+            lbz     mpf_data_eof
 
-            ; RC == 0: end of file. Send the EOF marker, then wait for
-            ; the host's final 'x'.
+mpf_have_chunk:
+            mov     rf, ms_databuf      ; RF = buffer; RC still holds
+                                        ; the real byte count from
+                                        ; K_FILE_READ -- untouched by
+                                        ; the zero-check or this mov
+            call    ms_send_block       ; DF = 0/1
+            lbdf    mpf_fatal_close
+            lbr     mpf_data_loop
+
+mpf_data_eof:
             ldi     0
-            call    K_TYPE
+            call    ms_putbyte              ; per-file EOF marker -- NOT
+                                        ; echoed, and (unlike the
+                                        ; original single-file
+                                        ; protocol) NOT followed by a
+                                        ; wait for the host's 'x' here
+                                        ; -- that only happens once, at
+                                        ; the very end of the whole
+                                        ; batch (see ms_session's own
+                                        ; header comment)
 
-            call    K_READ
-            xri     'x'
-            lbz     ms_success
+            mov     rd, ms_fcb
+            call    K_FILE_CLOSE
+            call    K_INMSG
+            db      "Sent ",0
+            mov     rf, ms_basename_buf
+            call    K_MSG
+            call    K_INMSG
+            db      ".",13,10,0
+            ldi     MSF_OK
+            rtn
 
-            ldi     MSERR_COMMAND
-            lbr     ms_exit
+mpf_read_err:
+            mov     rd, ms_fcb
+            call    K_FILE_CLOSE
+            call    K_INMSG
+            db      "Read error: ",0
+            mov     rf, ms_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      ".",13,10,0
+            ldi     MSF_FATAL           ; the receiver is already
+                                        ; mid-file, expecting more
+                                        ; data blocks we can no longer
+                                        ; produce -- there's no mid-
+                                        ; file abort signal in this
+                                        ; protocol, so the whole
+                                        ; session has to stop (matches
+                                        ; the original single-file
+                                        ; ms_send's own identical
+                                        ; treatment of this case)
+            rtn
 
-ms_success: ldi     0
-            lbr     ms_exit
+mpf_fatal_close:
+            mov     rd, ms_fcb
+            call    K_FILE_CLOSE
+            call    K_INMSG
+            db      "Protocol error talking to host.",13,10,0
+            ldi     MSF_FATAL
+            rtn
 
-ms_rderr:   ldi     MSERR_READ
-            lbr     ms_exit
+mpf_not_found:
+            call    K_INMSG
+            db      "Not found: ",0
+            mov     rf, ms_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      ".",13,10,0
+            ldi     MSF_LOCAL_ERR
+            rtn
+
+mpf_is_dir:
+            call    K_INMSG
+            db      "Is a directory: ",0
+            mov     rf, ms_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      ".",13,10,0
+            ldi     MSF_LOCAL_ERR
+            rtn
+
+mpf_cannot_open:
+            call    K_INMSG
+            db      "Cannot open ",0
+            mov     rf, ms_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    K_MSG
+            call    K_INMSG
+            db      ".",13,10,0
+            ldi     MSF_LOCAL_ERR
+            rtn
 
 ;------------------------------------------------------------------
-; sendblk: send one data block (ms_buf = buffer, RC = byte count > 0).
-;
-; Each header field (command byte, count hi/lo, address hi/lo) is sent
-; then verified against its own echo before the next one goes out --
-; matches the original protocol's own lock-step per-field handshake.
-; The count/address fields use the stack (stxd/irx) to hold the just-
-; sent value across the K_TYPE/K_READ pair for comparison -- already
-; safe regardless of whether K_TYPE preserves D across the call, since
-; stxd stashes the original value in memory (on the stack) before the
-; call runs, not in a register (same reasoning as mr.asm's own
-; mr_cmdbyte fix, just via the hardware stack instead of a named
-; byte).
+; ms_send_block: send one block (header OR data -- identical wire
+; shape either way) via the standard echo-verified mechanism, then
+; wait for the final $AA ack. Each header field (command byte, count
+; hi/lo, address hi/lo) is sent then verified against its own echo
+; before the next one goes out -- the count/address fields use the
+; hardware stack (stxd/irx) to hold the just-sent value across the
+; K_TYPE/K_READ pair for comparison, safe regardless of whether K_TYPE
+; preserves D across the call, since stxd stashes the original value
+; in memory (on the stack), not a register -- matches the original
+; single-file protocol's own identical mechanism exactly.
+; Args:    RF = payload buffer, RC = payload byte count (must be > 0
+;          -- every caller already only calls this with a real,
+;          nonzero chunk)
+; Returns: DF = 0 (sent and acked), DF = 1 (an echo or ack mismatch --
+;          fatal to the whole session, the two ends are now out of
+;          lock-step)
+; Modifies: everything
 ;------------------------------------------------------------------
-sendblk:    ldi     1                   ; 'more data follows'
-            call    K_TYPE
-            call    K_READ
+ms_send_block:
+            mov     rd, ms_blk_buf
+            ghi     rf
+            str     rd
+            inc     rd
+            glo     rf
+            str     rd                  ; ms_blk_buf = RF (payload)
+
+            mov     rd, ms_blk_count
+            ghi     rc
+            str     rd
+            inc     rd
+            glo     rc
+            str     rd                  ; ms_blk_count = RC (length)
+
+            ldi     1                   ; 'more data follows'
+            call    ms_putbyte
+            call    ms_getbyte
             xri     1
-            lbnz    ms_snderr
+            lbnz    msb_err
 
-            ghi     rc                  ; count high byte
+            mov     rf, ms_blk_count
+            ldn     rf                  ; D = count high byte
             stxd
-            call    K_TYPE
-            call    K_READ
+            call    ms_putbyte
+            call    ms_getbyte
             irx
             xor
-            lbnz    ms_snderr
+            lbnz    msb_err
 
-            glo     rc                  ; count low byte
+            mov     rf, ms_blk_count
+            inc     rf
+            ldn     rf                  ; D = count low byte
             stxd
-            call    K_TYPE
-            call    K_READ
+            call    ms_putbyte
+            call    ms_getbyte
             irx
             xor
-            lbnz    ms_snderr
+            lbnz    msb_err
 
             mov     rf, ms_addr_hi
-            ldn     rf                  ; D = address high byte
+            ldn     rf
             stxd
-            call    K_TYPE
-            call    K_READ
+            call    ms_putbyte
+            call    ms_getbyte
             irx
             xor
-            lbnz    ms_snderr
+            lbnz    msb_err
 
             mov     rf, ms_addr_lo
-            ldn     rf                  ; D = address low byte
+            ldn     rf
             stxd
-            call    K_TYPE
-            call    K_READ
+            call    ms_putbyte
+            call    ms_getbyte
             irx
             xor
-            lbnz    ms_snderr
+            lbnz    msb_err
 
-            ; ms_addr += rc: pure computation, no call in between, so a
-            ; register (R7) is safe to use transiently here -- unlike
-            ; the buffer pointer/header fields above, which must
-            ; survive real K_READ/K_TYPE calls and so live in memory.
-            ; Two separate loads (not lda's auto-increment) since
-            ; ms_addr_hi/ms_addr_lo's adjacency in memory isn't relied
-            ; on anywhere else in this file.
+            ; ms_addr += payload count: pure computation, no call in
+            ; between, so a register (R7/R8) is safe to use
+            ; transiently here -- unlike the buffer/header fields
+            ; above, which must survive real K_READ/K_TYPE calls and
+            ; so live in memory.
             mov     rf, ms_addr_hi
             ldn     rf
             phi     r7
             mov     rf, ms_addr_lo
             ldn     rf
             plo     r7
-            add16   r7, rc
+            mov     rf, ms_blk_count
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = payload count
+            add16   r7, r8
             mov     rf, ms_addr_hi
             ghi     r7
             str     rf
@@ -448,102 +898,303 @@ sendblk:    ldi     1                   ; 'more data follows'
             glo     r7
             str     rf
 
-            mov     rf, ms_buf          ; RF = send buffer
-            dec     rc                  ; ms_sendbytes runs COUNT times
-                                        ; when seeded with COUNT-1 --
-                                        ; matches mr.asm's own receive-
-                                        ; side loop exactly
-            call    ms_sendbytes        ; sends RC+1 bytes from RF, via
-                                        ; whichever device ms_io_mode
-                                        ; selects -- a separate proc
-                                        ; (own page-alignment, see its
-                                        ; own header comment) since by
-                                        ; this point in ms_send the
-                                        ; handshake+header-echo code
-                                        ; already preceding it pushes
-                                        ; past where a single .link
-                                        ; .align page at ms_send's own
-                                        ; start could still guarantee
-                                        ; in-page short branches here
+            ; --- send the payload bytes via ms_sendbytes ---
+            mov     rf, ms_blk_buf
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, r8              ; RF = payload buffer
 
-            call    K_READ              ; final block ACK
+            mov     rc, ms_blk_count
+            lda     rc
+            phi     r8
+            ldn     rc
+            plo     r8
+            mov     rc, r8              ; RC = payload count
+            dec     rc                  ; ms_sendbytes runs COUNT
+                                        ; times when seeded with
+                                        ; COUNT-1
+            call    ms_sendbytes
+
+            call    ms_getbyte              ; final block ACK
             xri     $aa
-            lbz     ms_next
+            lbnz    msb_err
 
-ms_snderr:  ldi     MSERR_SEND
+            clc
+            rtn
 
-ms_exit:    ; D = result code (0 = success); set DF to match
-            lbz     ms_ok
+msb_err:
             stc
-            lbr     ms_ret
-ms_ok:      clc
-ms_ret:     rtn
+            rtn
 
-ms_handle:      dw      0           ; the FCB pointer (2 bytes -- was a
-                                    ; 1-byte small-int handle)
-ms_addr_hi:     db      0
-ms_addr_lo:     db      0
-ms_buf:         ds      XFER_BUF_LEN
+;------------------------------------------------------------------
+; ms_handle_result: given ms_process_file's own D return value, update
+; the running ok/err counters, or set ms_abort on a fatal result.
+; Args:    D = MSF_OK / MSF_LOCAL_ERR / MSF_FATAL
+; Modifies: everything
+;------------------------------------------------------------------
+ms_handle_result:
+            plo     rc                  ; BUG-CLASS GUARD: stash D via
+                                        ; PLO before "mov" clobbers it
+            mov     rf, mhr_val
+            glo     rc
+            str     rf
+
+            ldn     rf
+            lbz     mhr_ok
+            ldn     rf
+            smi     MSF_FATAL
+            lbz     mhr_fatal
+
+            mov     rf, ms_err_count
+            ldn     rf
+            adi     1
+            str     rf
+            rtn
+
+mhr_ok:
+            mov     rf, ms_ok_count
+            ldn     rf
+            adi     1
+            str     rf
+            rtn
+
+mhr_fatal:
+            mov     rf, ms_abort
+            ldi     1
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; ms_basename: extract the basename (text after the last '/', or the
+; whole string if none) of ms_cur_path into ms_basename_buf, bounded
+; to MAXFER_NAME_MAX chars -- matches mr.asm's own identical cap on
+; the receive side.
+; Modifies: everything
+;------------------------------------------------------------------
+ms_basename:
+            mov     rf, ms_cur_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     r8, rd              ; R8 = scan pointer
+            mov     r9, rd              ; R9 = basename start pointer
+
+msbn_scan:
+            ldn     r8
+            lbz     msbn_scan_done
+            xri     '/'
+            lbnz    msbn_scan_next
+            inc     r8
+            mov     r9, r8
+            lbr     msbn_scan
+msbn_scan_next:
+            inc     r8
+            lbr     msbn_scan
+
+msbn_scan_done:
+            mov     rd, r9              ; RD = basename source pointer
+            mov     rf, ms_basename_buf
+            ldi     0
+            plo     r7                  ; R7.0 = chars written
+
+msbn_copy:
+            ldn     rd
+            lbz     msbn_copy_done
+
+            glo     r7
+            smi     MAXFER_NAME_MAX
+            lbdf    msbn_copy_skip
+
+            ldn     rd
+            str     rf
+            inc     rf
+            glo     r7
+            adi     1
+            plo     r7
+
+msbn_copy_skip:
+            inc     rd
+            lbr     msbn_copy
+
+msbn_copy_done:
+            ldi     0
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; ms_print_count: print a 1-byte counter's decimal value via
+; fmt_size32 + K_MSG.
+; Args:    RF = pointer to the 1-byte counter
+; Modifies: everything
+;------------------------------------------------------------------
+ms_print_count:
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = zero-extended count
+            ldi     0
+            phi     rd
+            ldi     0
+            plo     rd                  ; RD = 0 (high word)
+            mov     rf, ms_numbuf
+            call    fmt_size32
+            mov     rf, ms_numbuf
+            call    K_MSG
+            rtn
+
+;------------------------------------------------------------------
+; ms_getbyte / ms_putbyte: mode-aware single-byte read/write for
+; every PROTOCOL byte in this session (handshake, header-field echo,
+; acks) -- NOT used for the hot per-byte DATA loop (ms_sendbytes, a
+; separate page-aligned proc with its own inline 3-way dispatch, for
+; speed -- see its own header comment). Reads ms_io_mode (flat data,
+; set once by start) fresh every call; see this file's own header
+; comment for the full device-selection design.
+;------------------------------------------------------------------
+ms_getbyte:
+            mov     rd, ms_io_mode
+            ldn     rd
+            xri     MS_IO_BITBANG
+            lbz     mgb_bitbang
+
+            ldn     rd
+            xri     MS_IO_UART
+            lbz     mgb_uart
+
+            call    K_READ
+            rtn
+
+mgb_uart:
+            call    f_uread
+            rtn
+
+mgb_bitbang:
+            call    f_bread
+            rtn
+
+ms_putbyte:
+            plo     rb                  ; stash the byte -- the mov
+                                        ; below clobbers D (gotcha #4)
+            mov     rd, ms_io_mode
+            ldn     rd
+            xri     MS_IO_BITBANG
+            lbz     mpb_bitbang
+
+            ldn     rd
+            xri     MS_IO_UART
+            lbz     mpb_uart
+
+            glo     rb
+            call    K_TYPE
+            rtn
+
+mpb_uart:
+            glo     rb
+            call    f_utype
+            rtn
+
+mpb_bitbang:
+            glo     rb
+            call    f_btype
+            rtn
+
+ms_ok_count:         db      0
+ms_err_count:        db      0
+ms_handshake_done:   db      0
+ms_abort:            db      0
+ms_i:                db      0
+ms_cur_arg:          dw      0
+ms_cur_path:         dw      0
+ms_glob_found:       db      0
+ms_glob_ctx:         ds      GLOB_CTX_LEN
+ms_result:           db      0
+mhr_val:             db      0
+ms_addr_hi:          db      0
+ms_addr_lo:          db      0
+ms_blk_buf:          dw      0
+ms_blk_count:        dw      0
+ms_basename_buf:     ds      MAXFER_NAME_MAX+1
+ms_hdr_buf:           ds     MAXFER_NAME_MAX+5
+ms_numbuf:            ds     14
+ms_stat_buf:          ds     DIRENT_LEN
+ms_fcb:               ds     FCB_LEN
+ms_iobuf:             ds     FCB_IOBUF_LEN
+ms_databuf:           ds     XFER_BUF_LEN
+
             endp
 
 ;==================================================================
-; ms_sendbytes: send one data block, byte by byte, via whichever
-; device ms_io_mode currently selects. Split out into its own proc
-; (rather than living inline in ms_send's own sendblk) specifically so
-; it can carry its own ".link .align page" -- ms_send's own copy of
-; that directive only guarantees a page-aligned proc *start*, and by
-; the time control reaches the send loop, the handshake and the five-
-; field header-echo exchange (each with its own stxd/call/call/irx/xor
-; sequence) ahead of it have already pushed too far into the page for
-; that single guarantee to cover a hand-written short branch way down
-; here too (confirmed the hard way: linking without this split hit
-; Link/02's own out-of-page short-branch abort). A second, independent
-; proc gets its own fresh page anchor, exactly like mr.asm's own
-; readlp_uart/readlp_bitbang rely on mr_receive's.
+; ms_sendbytes: send one data block, byte by byte. Split out into its
+; own proc (rather than living inline in ms_send_block above)
+; specifically so it can carry its own ".link .align page" --
+; ms_session's own page alignment (if it had any) would only guarantee
+; a page-aligned proc *start*, and by the time control reaches this
+; send loop, the handshake and the five-field header-echo exchange
+; ahead of it have already pushed too far into the page for a single
+; guarantee to still cover a hand-written short branch this deep --
+; confirmed the hard way in the original single-file file (linking
+; without this split hit Link/02's own out-of-page short-branch
+; abort). A second, independent proc gets its own fresh page anchor.
+; Three variants, selected once per call (not per byte) -- see this
+; file's own header comment for the full device-selection design;
+; ms_io_mode is read fresh here rather than trusted to have survived
+; from ms_session (a genuinely different proc), matching how every
+; other cross-call value in this file already lives in memory, never
+; a register.
 ;
-; Args:    RF = buffer, RC = count-1 (pre-decremented, same convention
-;          the caller already used for the old inline loop)
+; Args:    RF = buffer, RC = count-1 (pre-decremented, matching the
+;          caller's own established convention)
 ; Returns: nothing meaningful in D/DF
 ; Clobbers: everything -- a leaf worker, not register-preserving.
 ;==================================================================
 
             .link   .align  page
             proc    ms_sendbytes
+
             mov     rd, ms_io_mode
             ldn     rd
             xri     MS_IO_BITBANG
-            lbz     sendloop_bitbang
+            lbz     sb_bitbang
+            ldn     rd
+            xri     MS_IO_UART
+            lbz     sb_uart
 
-;------------------------------------------------------------------
-; sendloop_uart / sendloop_bitbang: the one loop in this whole file
-; that has to be fast -- see progs/mr.asm's own readlp_uart/
-; readlp_bitbang for the full reasoning (same throughput constraint,
-; same hand-written short branches). Both variants call their BIOS
-; routine (f_utype/f_btype) directly instead of going through K_TYPE,
-; skipping K_TYPE's own two indirection hops -- see this file's
-; top-of-file header comment for the motivation.
-;------------------------------------------------------------------
-sendloop_uart:
+sb_console:
+            lda     rf
+            call    K_TYPE
+
+            dec     rc
+            ghi     rc
+            xri     $ff
+            bnz     sb_console
+
+            rtn
+
+sb_uart:
             lda     rf
             call    f_utype
 
             dec     rc
             ghi     rc
             xri     $ff
-            bnz     sendloop_uart
+            bnz     sb_uart
 
             rtn
 
-sendloop_bitbang:
+sb_bitbang:
             lda     rf
             call    f_btype
 
             dec     rc
             ghi     rc
             xri     $ff
-            bnz     sendloop_bitbang
+            bnz     sb_bitbang
 
             rtn
+
             endp
 
             end     start

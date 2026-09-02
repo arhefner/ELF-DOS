@@ -13,10 +13,10 @@
 ; Flags (must precede the filename list -- the first argv token that
 ; isn't an exact "-u"/"-b"/"-k"/"-y"/"-q" match ends flag parsing and
 ; starts the filename list; at least one filename is required):
-;   -u          use the disk-board UART directly (f_uread/f_utype) --
-;               the default.
+;   -u          use the disk-board UART directly (f_uread/f_utype)
+;               instead of the console (see below).
 ;   -b          use the onboard bit-bang serial port directly
-;               (f_bread/f_btype) instead.
+;               (f_bread/f_btype) instead of the console (see below).
 ;   -k          send 1024-byte (STX) data blocks instead of the
 ;               default 128-byte (SOH) blocks. Header blocks are
 ;               always 128 bytes regardless of this flag -- matches
@@ -32,10 +32,12 @@
 ; local files to send -- there is nothing local for -y to protect.
 ; Confirmed with the user before implementation.
 ;
-; -u/-b select which BIOS routines lib/ymodem.asm's own I/O primitives
-; call directly, bypassing K_READ/K_TYPE's own kernel-jump-table/RAM-
-; vector indirection -- same reasoning as progs/yr.asm's identical
-; flags (see its header comment for the full account).
+; DEVICE SELECTION (2026-09-01): matches progs/yr.asm's own identical
+; redesign (see its header comment, or progs/mr.asm's, for the full
+; account) -- with no "-u"/"-b" given, every byte of this session goes
+; through K_READ/K_TYPE's own self-modified vector, automatically
+; following whatever the console currently is; "-u"/"-b" opt out of
+; that, targeting a specific physical port regardless of the console.
 ;
 ; Wildcard support via lib/file_glob.asm's is_glob/glob_init/glob_next,
 ; same pattern as DEL/COPY/MOVE/ATTRIB/TOUCH -- a plain filename is
@@ -134,7 +136,7 @@ start:
             lbnf    usage               ; argc < 2: nothing at all
 
             mov     rf, ym_io_mode
-            ldi     YM_IO_UART          ; default
+            ldi     YM_IO_CONSOLE       ; default
             str     rf
             mov     rf, ys_use1024
             ldi     0

@@ -84,7 +84,7 @@ set_cols:   ldi     0
             ldi     1
             call    env_setenv          ; set COLUMNS = <columns>
 
-            rtn  
+            rtn
 
 size_buf:   ds      16                  ; buffer for terminal size response
 rows:       db      "ROWS",0

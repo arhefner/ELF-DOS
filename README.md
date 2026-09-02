@@ -95,7 +95,7 @@ behind everything summarized here.
 | `CD <path>` | Change the current directory (per-drive) |
 | `PWD` | Print the current directory's full path |
 | `TYPE <file>` | Print a file's contents |
-| `MORE <file>` | Page through a file's contents, screen at a time |
+| `LESS <file>` | Page through a file's contents, forward and backward, by screen or line, with search |
 | `HEXDUMP <file>` | `hexdump -C`-style hex/ASCII dump of a file |
 | `COPY [-y] <src> <dst>` | Copy file(s); into a directory, wildcards, overwrite prompt |
 | `MOVE <src> <dst>` | Move/rename file(s) (fast rename when possible) |
