@@ -287,6 +287,10 @@ test/bin/big64test: test/big64test.prg lib/fmt32.prg | test/bin
 	$(LINK) $(LFLAGS) -o test/bin/big64test test/big64test.prg lib/fmt32.prg
 	rm -f test/bin/big64test.lkb
 
+test/bin/rwboundtest: test/rwboundtest.prg lib/fmt32.prg | test/bin
+	$(LINK) $(LFLAGS) -o test/bin/rwboundtest test/rwboundtest.prg lib/fmt32.prg
+	rm -f test/bin/rwboundtest.lkb
+
 test/bin/corrupt: test/corrupt.prg lib/ymodem.prg lib/fmt32.prg | test/bin
 	$(LINK) $(LFLAGS) -o test/bin/corrupt test/corrupt.prg lib/ymodem.prg lib/fmt32.prg
 	rm -f test/bin/corrupt.lkb

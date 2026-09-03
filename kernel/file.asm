@@ -1669,18 +1669,85 @@ gsn_build_ext_done:
 ; different registers at each site, and read vs write is a genuinely
 ; different final call), so only this common middle section moved.
 ;
+; BUG FIX (2026-09-02): FCB_CSECT can legitimately be handed to this
+; proc already AT bpb_spc (never more -- every caller only ever
+; increments it by exactly 1, right after a sector-boundary wrap,
+; before the next real sector-load) whenever the sector that was just
+; finished was the last one in its cluster. Resolving that -- calling
+; fat_get() to find the next cluster in the chain, then wrapping
+; FCB_CSECT back to 0 -- used to be done SPECULATIVELY inside
+; file_read's/file_write's own copy loop, immediately after every
+; sector-boundary crossing, regardless of whether the caller's
+; current request had already been fully satisfied by the bytes
+; already copied. A transient fat_get() failure during that
+; speculative lookahead then got reported as THIS call's own I/O
+; error -- discarding an otherwise-fully-successful read (reported
+; externally: a K_FILE_READ landing exactly on a sector/cluster
+; boundary could return DF=1 even though every requested byte was
+; already copied into the caller's buffer).
+;
+; Moving the resolution HERE instead makes it lazy: it only ever runs
+; at the one point a sector genuinely needs to be loaded next, which
+; by construction only happens when the caller's own request isn't
+; finished yet (file_read's/file_write's own loop only re-enters
+; "ensure IOBUF holds sector" -- the one place that calls this proc
+; -- when RC != 0, i.e. there's still more data to deliver). A
+; fat_get() failure here now therefore only ever fails a call that
+; genuinely still needed more data, never one that had already fully
+; succeeded -- and it leaves FCB_CCLUST/FCB_CSECT completely
+; unmodified on failure (see fslai_err below), so a later retry on
+; the same FCB naturally re-attempts the same resolution instead of
+; silently using a stale or out-of-range sector address.
+;
+; This proc is used by both file_read and file_write, but file_write
+; keeps FCB_CSECT already normalized to [0,bpb_spc) itself, via its
+; own separate (and, unlike this one, allocate-on-grow-capable)
+; cluster-boundary handling -- so the resolve block below is a real,
+; load-bearing fix for file_read, and an inert no-op for file_write
+; (its own eager handling means FCB_CSECT is never == bpb_spc by the
+; time it calls this proc). Deliberately NOT given fat_alloc/growth
+; capability itself -- a read must never implicitly grow a file.
+;
 ; Args:    RB = FCB base pointer
-; Returns: R7:R8 = target sector's LBA; RF = this FCB's own I/O
-;          buffer pointer (== R9, matching what every call site
+; Returns: DF = 0: R7:R8 = target sector's LBA; RF = this FCB's own
+;          I/O buffer pointer (== R9, matching what every call site
 ;          already did with it via "mov rf, r9" right after)
+;          DF = 1: fat_get() failed resolving the next cluster in the
+;          chain (a real I/O error -- see fat_get's own header; a
+;          genuine end-of-chain is DF=0 from fat_get, not this path).
+;          FCB_CCLUST/FCB_CSECT are left completely unmodified.
 ; Modifies: R7, R8, R9, RD, RF (matches the union of everything
-;          _fcb_load_cclust/_cluster_to_lba/_fcb_load_iobuf already
-;          modify -- RB itself is read-only throughout, confirmed by
-;          re-reading each of the 3 original call sites before this
-;          was extracted)
+;          _fcb_load_cclust/_fcb_store_cclust/fat_get/_cluster_to_lba/
+;          _fcb_load_iobuf already modify -- RB itself is read-only
+;          throughout, confirmed by re-reading every call site)
 ; ----------------------------------------------------------------
             proc    _fcb_sector_lba_and_iobuf
 
+            ; ---- is FCB_CSECT already out of range for this cluster? ----
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            ldn     rf                  ; D = FCB_CSECT
+            str     r2
+            mov     rf, bpb_spc
+            ldn     rf                  ; D = bpb_spc
+            sm                          ; D = bpb_spc - FCB_CSECT
+            lbnz    fslai_no_resolve    ; not equal: already in range
+
+            ; FCB_CSECT == bpb_spc: resolve the next cluster now, right
+            ; before it's actually needed (not speculatively -- see the
+            ; BUG FIX note above)
+            call    _fcb_load_cclust
+            call    fat_get             ; RD = next cluster, or EOC
+            lbdf    fslai_err           ; I/O error: leave FCB untouched
+
+            call    _fcb_store_cclust
+
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            ldi     0
+            str     rf                  ; FCB_CSECT = 0
+
+fslai_no_resolve:
             call    _fcb_load_cclust
             call    _cluster_to_lba     ; R7/R8 = LBA of first sector
                                         ; of cluster
@@ -1701,6 +1768,11 @@ gsn_build_ext_done:
 
             call    _fcb_load_iobuf
             mov     rf, r9
+            clc                         ; DF = 0, success
+            rtn
+
+fslai_err:
+            stc                         ; DF = 1, error
             rtn
 
             endp
@@ -5152,6 +5224,10 @@ fread_remaining_done:
             push    rc
 
             call    _fcb_sector_lba_and_iobuf
+            lbdf    fread_ioerr_cleanup ; failed resolving the next
+                                        ; cluster in the chain
+                                        ; (2026-09-02 -- see that
+                                        ; proc's own header comment)
             call    f_ideread
             lbdf    fread_ioerr_cleanup
 
@@ -5302,44 +5378,17 @@ fread_copy_done:
             add16   rf, FCB_CSECT
             ldn     rf
             adi     1
-            str     rf                  ; FCB_CSECT++
+            str     rf                  ; FCB_CSECT++ (2026-09-02: no
+                                        ; longer resolved speculatively
+                                        ; here, even if this reaches
+                                        ; bpb_spc -- resolving which
+                                        ; cluster comes next is now
+                                        ; done lazily, only once a
+                                        ; sector actually needs to be
+                                        ; loaded -- see
+                                        ; _fcb_sector_lba_and_iobuf's
+                                        ; own header comment for why)
 
-            ; did we also cross a cluster boundary?
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldn     rf                  ; D = new FCB_CSECT
-            str     r2
-            mov     rf, bpb_spc
-            ldn     rf                  ; D = bpb_spc
-            sm                          ; D = bpb_spc - FCB_CSECT
-            lbnz    fread_no_cluster_wrap   ; not equal: still within this cluster
-
-            ; FCB_CSECT == bpb_spc: advance to the next cluster in the chain
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldi     0
-            str     rf                  ; FCB_CSECT = 0
-
-            push    r9
-            push    ra
-            push    rb
-            push    rc
-            call    _fcb_load_cclust
-
-            call    fat_get             ; RD = next cluster
-            pop     rc
-            pop     rb
-            pop     ra
-            pop     r9
-            lbdf    fread_ioerr         ; I/O error from fat_get
-
-            call    _fcb_store_cclust
-            ; if this is now an end-of-chain marker, the next iteration's
-            ; FCB_FPOS/FCB_FSIZE check stops the loop before we'd ever
-            ; try to load a sector from it, provided the directory
-            ; entry's size is consistent with its cluster chain
-
-fread_no_cluster_wrap:
             ; clear this FCB's own IOVALID flag so the next iteration
             ; reloads the sector (position just advanced into new
             ; territory) -- $EF clears just bit $10 (FCB_F_IOVALID),
@@ -5814,12 +5863,17 @@ fwrite_no_grow:
             sm                          ; D = bpb_spc - FCB_CSECT
             lbnz    fwrite_no_cluster_wrap  ; not equal: still within this cluster
 
-            ; FCB_CSECT == bpb_spc: need the next cluster in the chain
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldi     0
-            str     rf                  ; FCB_CSECT = 0
-
+            ; FCB_CSECT == bpb_spc: need the next cluster in the chain.
+            ; BUG FIX (2026-09-02): FCB_CSECT used to be committed to 0
+            ; HERE, unconditionally, before fat_get had even run -- so
+            ; a fat_get failure left the FCB permanently inconsistent
+            ; (FCB_CSECT=0 pointing at the START of a cluster that
+            ; FCB_CCLUST, left stale/unadvanced, never actually
+            ; describes). The commit now happens only once fat_get is
+            ; confirmed to have succeeded (right after fwrite_fgok
+            ; below), matching the same "don't commit until resolution
+            ; is known to have worked" ordering _fcb_sector_lba_and_
+            ; iobuf's own read-side fix already established.
             push    r9
             push    ra
             push    rb
@@ -5832,7 +5886,14 @@ fwrite_no_grow:
             pop     rb
             pop     ra
             pop     r9
-            lbdf    fwrite_ioerr        ; I/O error from fat_get
+            lbdf    fwrite_fatget_failed
+
+fwrite_fgok:
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            ldi     0
+            str     rf                  ; FCB_CSECT = 0 (fat_get
+                                        ; confirmed successful)
 
             ; is this end-of-chain? (cluster >= FAT_EOC = $FFF8)
             ghi     rd
@@ -5930,6 +5991,51 @@ fwrite_have_next:
             call    _fcb_store_cclust
 
 fwrite_no_cluster_wrap:
+            lbr     fwrite_iovalid_clear
+
+; BUG FIX (2026-09-02): a plain fat_get failure here (RD undefined,
+; nothing allocated or linked -- see fat_get's own header, a genuine
+; end-of-chain is DF=0/EOC, not this path) used to be reported as
+; THIS write call's own I/O error unconditionally, even when every
+; requested byte had already been copied into the FCB's IOBUF and
+; durably written to disk earlier in this SAME loop iteration (the
+; read-modify-write + f_idewrite far above, long before this
+; speculative "does the chain need to grow" lookahead ever runs) --
+; discarding an otherwise-fully-successful write. Mirrors the
+; identical fix already made to file_read/_fcb_sector_lba_and_iobuf
+; (see that proc's own header comment for the general reasoning).
+;
+; Deliberately scoped to ONLY this one failure point, not the
+; fat_alloc/fat_set/fat_flush chain below (whose own "lbdf
+; fwrite_ioerr" sites are UNCHANGED) -- fat_get has zero side effects
+; on failure (nothing allocated or linked), so deferring it is safe
+; by the same reasoning that already justifies the read-side fix. A
+; fat_alloc/fat_set/fat_flush failure, by contrast, can leave a real,
+; consequential disk-state change half-committed (a newly claimed
+; cluster, a FAT link) -- silently reporting success there would risk
+; a later access retrying against an inconsistent chain. Those three
+; keep today's already-hardware-proven "always fail this call"
+; behavior untouched.
+;
+; FCB_CSECT is deliberately left AT bpb_spc here (the commit at
+; fwrite_fgok above never ran) and FCB_CCLUST is untouched -- the
+; same "leave the FCB completely unmodified on failure" contract
+; _fcb_sector_lba_and_iobuf's own fix already established, so a later
+; access naturally re-attempts this exact resolution instead of using
+; a stale or inconsistent position. IOVALID still needs clearing
+; either way (FCB_BOFF was already reset to 0 above, so the cached
+; IOBUF -- still describing the OLD, now-fully-written sector -- must
+; not be trusted for a later read at BOFF=0).
+fwrite_fatget_failed:
+            glo     rc
+            lbnz    fwrite_ioerr        ; more left to write in THIS
+            ghi     rc                  ; call: unchanged, real failure
+            lbnz    fwrite_ioerr
+            lbr     fwrite_iovalid_clear ; RC==0: this call's own
+                                        ; request already fully
+                                        ; succeeded -- report success
+
+fwrite_iovalid_clear:
             ; clear this FCB's own IOVALID flag so the next iteration
             ; reloads the sector (position just advanced into new
             ; territory) -- $EF clears just bit $10 (FCB_F_IOVALID)
