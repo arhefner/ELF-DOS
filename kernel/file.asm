@@ -130,6 +130,7 @@
             extrn   _fcb_store_fpos32
             extrn   _check_name_dotdot
             extrn   _fcb_sector_lba_and_iobuf
+            extrn   fwrite_resolve_cluster
             extrn   _store_fo_name
             extrn   _resolve_fo_name
             extrn   _file_create
@@ -5461,11 +5462,21 @@ fread_calc_read:
             ;      each chunk in this FCB's own IOBUF, rather than
             ;      deferring via FCB_F_DIRTY (a future optimization,
             ;      see kernel.inc).
-            ;   3. Crossing a cluster boundary tries fat_get first
-            ;      (an existing chain may already continue past this
-            ;      point, e.g. overwriting the middle of a file); only
-            ;      on end-of-chain does it fat_alloc a new cluster and
-            ;      fat_set the link.
+            ;   3. Crossing a cluster boundary is resolved LAZILY
+            ;      (2026-09-03 redesign -- see fwrite_resolve_cluster's
+            ;      own header comment near the end of this proc for
+            ;      the full history): the main loop only tracks that a
+            ;      boundary was crossed (FCB_CSECT reaching bpb_spc);
+            ;      the actual resolution -- fat_get first (an existing
+            ;      chain may already continue past this point, e.g.
+            ;      overwriting the middle of a file), fat_alloc a new
+            ;      cluster and fat_set the link only on genuine end-of-
+            ;      chain -- happens in fwrite_resolve_cluster, called
+            ;      from the "ensure IOBUF holds sector" pre-check, only
+            ;      once a real chunk is actually about to be written.
+            ;      A write whose own last byte lands exactly on a
+            ;      cluster boundary therefore never allocates a
+            ;      cluster it doesn't end up using.
             ;   4. Before any of that: if FCB_CCLUST is still 0 (a
             ;      freshly created, never-written file -- see
             ;      file_open's fopen_notfound/_file_create), the
@@ -5599,6 +5610,25 @@ fwrite_have_more:
             push    ra
             push    rb
             push    rc
+
+            ; BUG FIX (2026-09-03): resolve (or, at true end-of-chain,
+            ; allocate) the pending cluster boundary HERE, lazily --
+            ; only now that we KNOW a sector genuinely needs to be
+            ; loaded for real data. This used to run speculatively,
+            ; immediately after finishing whatever chunk crossed the
+            ; boundary, regardless of whether the caller's own
+            ; request needed anything more -- see
+            ; fwrite_resolve_cluster's own header comment (near the
+            ; end of this proc) for the full history and reasoning.
+            ; RA/RB/RC are already protected by the pushes just above,
+            ; covering both this call and the two immediately below it
+            ; (fwrite_resolve_cluster itself preserves them internally
+            ; too, but explicit protection here costs nothing and
+            ; matches this project's own standing "never trust an
+            ; unaudited call's register survival, protect explicitly"
+            ; discipline regardless).
+            call    fwrite_resolve_cluster
+            lbdf    fwrite_resolve_err
 
             call    _fcb_sector_lba_and_iobuf
             call    f_ideread
@@ -5851,191 +5881,19 @@ fwrite_no_grow:
             add16   rf, FCB_CSECT
             ldn     rf
             adi     1
-            str     rf                  ; FCB_CSECT++
+            str     rf                  ; FCB_CSECT++ (2026-09-03: no
+                                        ; longer resolved OR allocated
+                                        ; here, even if this reaches
+                                        ; bpb_spc -- both are now
+                                        ; deferred entirely to
+                                        ; fwrite_resolve_cluster,
+                                        ; called lazily from the
+                                        ; "ensure IOBUF holds sector"
+                                        ; pre-check, the NEXT time a
+                                        ; chunk genuinely needs
+                                        ; writing -- see that block's
+                                        ; own header comment for why)
 
-            ; did we also cross a cluster boundary?
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldn     rf                  ; D = new FCB_CSECT
-            str     r2
-            mov     rf, bpb_spc
-            ldn     rf                  ; D = bpb_spc
-            sm                          ; D = bpb_spc - FCB_CSECT
-            lbnz    fwrite_no_cluster_wrap  ; not equal: still within this cluster
-
-            ; FCB_CSECT == bpb_spc: need the next cluster in the chain.
-            ; BUG FIX (2026-09-02): FCB_CSECT used to be committed to 0
-            ; HERE, unconditionally, before fat_get had even run -- so
-            ; a fat_get failure left the FCB permanently inconsistent
-            ; (FCB_CSECT=0 pointing at the START of a cluster that
-            ; FCB_CCLUST, left stale/unadvanced, never actually
-            ; describes). The commit now happens only once fat_get is
-            ; confirmed to have succeeded (right after fwrite_fgok
-            ; below), matching the same "don't commit until resolution
-            ; is known to have worked" ordering _fcb_sector_lba_and_
-            ; iobuf's own read-side fix already established.
-            push    r9
-            push    ra
-            push    rb
-            push    rc
-            call    _fcb_load_cclust
-
-            call    fat_get             ; RD = next cluster, or EOC
-
-            pop     rc
-            pop     rb
-            pop     ra
-            pop     r9
-            lbdf    fwrite_fatget_failed
-
-fwrite_fgok:
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldi     0
-            str     rf                  ; FCB_CSECT = 0 (fat_get
-                                        ; confirmed successful)
-
-            ; is this end-of-chain? (cluster >= FAT_EOC = $FFF8)
-            ghi     rd
-            smi     $FF
-            lbnf    fwrite_have_next    ; high byte < $FF: valid next cluster
-            glo     rd
-            smi     $F8
-            lbnf    fwrite_have_next    ; < $FFF8: valid next cluster
-
-            ; end of chain: allocate a new cluster and link
-            ; old_cluster -> new_cluster via fat_set. fat_alloc
-            ; itself calls fat_set to claim the cluster (marking it
-            ; end-of-chain), which clobbers RB internally (fat_set
-            ; uses RB for its own "value to write" argument) -- our
-            ; FCB-base RB must be protected across this call too, not
-            ; just R9/RA/RC.
-            push    r9
-            push    ra
-            push    rb
-            push    rc
-            call    fat_alloc           ; RD = new cluster; DF=0/1
-            pop     rc
-            pop     rb
-            pop     ra
-            pop     r9
-            lbdf    fwrite_ioerr        ; disk full or I/O error
-
-            ; RD = new cluster. Stash it in R8 (free here) before we
-            ; need RD again for the OLD cluster (fat_set's argument).
-            ghi     rd
-            phi     r8
-            glo     rd
-            plo     r8                  ; R8 = new cluster
-
-            ; fetch old (current) cluster into RD -- fat_set's arg
-            call    _fcb_load_cclust        ; RD = old cluster
-
-            ; RB is our FCB-base register throughout this loop, but
-            ; fat_set also uses RB for its "value to write" argument
-            ; -- save FCB base and substitute the new cluster value,
-            ; restoring FCB base right after. R8 (new cluster) is
-            ; also protected since fat_set clobbers it internally.
-            push    rb                  ; save FCB base
-            push    r8                  ; save new cluster
-            ghi     r8
-            phi     rb
-            glo     r8
-            plo     rb                  ; RB = new cluster (fat_set's value arg)
-
-            push    r9
-            push    ra
-            push    rc
-            call    fat_set             ; RD=old cluster, RB=new cluster; DF=0/1
-            pop     rc
-            pop     ra
-            pop     r9
-
-            pop     r8                  ; restore new cluster
-            pop     rb                  ; restore FCB base
-            lbdf    fwrite_ioerr
-
-            ; switch to the new cluster: FCB_CCLUST = new cluster (R8)
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; FCB_CCLUST = new cluster
-
-            ; BUG FIX: flush the FAT immediately after this fat_alloc,
-            ; same reasoning as fc_grow's own fix (see its comment) --
-            ; an unflushed allocation can be silently reverted if the
-            ; single-sector FAT cache gets evicted for a different
-            ; sector before this one is written. fat_flush documents
-            ; R7/R8/R9/RB/RC/RD/RF as clobbered -- R9/RA/RB/RC are this
-            ; routine's own stable loop registers, so all four are
-            ; protected here (matching the surrounding fat_alloc/
-            ; fat_set calls' own style).
-            push    r9
-            push    ra
-            push    rb
-            push    rc
-            call    fat_flush
-            pop     rc
-            pop     rb
-            pop     ra
-            pop     r9
-            lbdf    fwrite_ioerr
-
-            lbr     fwrite_no_cluster_wrap
-
-fwrite_have_next:
-            ; fat_get returned a valid existing next cluster (RD)
-            call    _fcb_store_cclust
-
-fwrite_no_cluster_wrap:
-            lbr     fwrite_iovalid_clear
-
-; BUG FIX (2026-09-02): a plain fat_get failure here (RD undefined,
-; nothing allocated or linked -- see fat_get's own header, a genuine
-; end-of-chain is DF=0/EOC, not this path) used to be reported as
-; THIS write call's own I/O error unconditionally, even when every
-; requested byte had already been copied into the FCB's IOBUF and
-; durably written to disk earlier in this SAME loop iteration (the
-; read-modify-write + f_idewrite far above, long before this
-; speculative "does the chain need to grow" lookahead ever runs) --
-; discarding an otherwise-fully-successful write. Mirrors the
-; identical fix already made to file_read/_fcb_sector_lba_and_iobuf
-; (see that proc's own header comment for the general reasoning).
-;
-; Deliberately scoped to ONLY this one failure point, not the
-; fat_alloc/fat_set/fat_flush chain below (whose own "lbdf
-; fwrite_ioerr" sites are UNCHANGED) -- fat_get has zero side effects
-; on failure (nothing allocated or linked), so deferring it is safe
-; by the same reasoning that already justifies the read-side fix. A
-; fat_alloc/fat_set/fat_flush failure, by contrast, can leave a real,
-; consequential disk-state change half-committed (a newly claimed
-; cluster, a FAT link) -- silently reporting success there would risk
-; a later access retrying against an inconsistent chain. Those three
-; keep today's already-hardware-proven "always fail this call"
-; behavior untouched.
-;
-; FCB_CSECT is deliberately left AT bpb_spc here (the commit at
-; fwrite_fgok above never ran) and FCB_CCLUST is untouched -- the
-; same "leave the FCB completely unmodified on failure" contract
-; _fcb_sector_lba_and_iobuf's own fix already established, so a later
-; access naturally re-attempts this exact resolution instead of using
-; a stale or inconsistent position. IOVALID still needs clearing
-; either way (FCB_BOFF was already reset to 0 above, so the cached
-; IOBUF -- still describing the OLD, now-fully-written sector -- must
-; not be trusted for a later read at BOFF=0).
-fwrite_fatget_failed:
-            glo     rc
-            lbnz    fwrite_ioerr        ; more left to write in THIS
-            ghi     rc                  ; call: unchanged, real failure
-            lbnz    fwrite_ioerr
-            lbr     fwrite_iovalid_clear ; RC==0: this call's own
-                                        ; request already fully
-                                        ; succeeded -- report success
-
-fwrite_iovalid_clear:
             ; clear this FCB's own IOVALID flag so the next iteration
             ; reloads the sector (position just advanced into new
             ; territory) -- $EF clears just bit $10 (FCB_F_IOVALID)
@@ -6082,6 +5940,257 @@ fwrite_calc_written:
             plo     rc                  ; RC = bytes_written (return value)
             rtn
 
+fwrite_resolve_err:
+            ; fwrite_resolve_cluster failed -- unwind the ra/rb/rc
+            ; pushed at fwrite_have_more (right before its call) and
+            ; report a real, unconditional failure. Unlike the
+            ; earlier, narrower fix this supersedes, no RC==0 check is
+            ; needed here any more: this whole block is now reached
+            ; ONLY from the "ensure IOBUF holds sector" pre-check,
+            ; itself only reached when fwrite_loop's own top-of-loop
+            ; check has already confirmed RC != 0 -- there is always
+            ; genuinely more to write whenever this runs, so a failure
+            ; here can never discard an already-fully-satisfied
+            ; request (there wouldn't have been a way to reach this
+            ; point at all if the request were already done).
+            pop     rc
+            pop     rb
+            pop     ra
+            lbr     fwrite_ioerr
+
+            endp
+
+; ----------------------------------------------------------------
+; fwrite_resolve_cluster: if FCB_CSECT is currently AT bpb_spc (a
+; pending cluster-boundary crossing left unresolved by a previous
+; chunk), resolve it now: follow the existing chain via fat_get if it
+; continues past this point, or allocate a brand-new cluster (and
+; link it via fat_set) if genuinely at end-of-chain. A no-op (DF=0,
+; nothing touched) if FCB_CSECT is already in range.
+;
+; REDESIGN (2026-09-03): this logic used to run SPECULATIVELY, in
+; file_write's own main loop, immediately after finishing whatever
+; chunk crossed the boundary -- regardless of whether the caller's
+; own request needed anything more. Two real, confirmed consequences:
+;   1. A plain fat_get I/O failure there discarded an otherwise-
+;      fully-successful write (fixed narrowly first, by suppressing
+;      just that one failure when RC==0 -- see git history/CLAUDE.md
+;      for that earlier, now-superseded patch).
+;   2. A write whose own LAST byte landed exactly on a cluster
+;      boundary ALWAYS allocated one cluster more than the file
+;      actually needed, even though nothing more was ever going to be
+;      written into it -- confirmed on real hardware via
+;      test/rwboundtest.asm + fsck ("cluster chain length is >
+;      262144 bytes... truncating file to 262144 bytes"). Not data
+;      corruption (the file's own recorded size, and every byte of
+;      real content, were already correct -- fsck's own repair is
+;      lossless, it only frees the one unused cluster) but a real,
+;      repeatable storage-space leak on every exact-boundary write.
+;
+; Moving the resolve/allocate here -- called ONLY from file_write's
+; own "ensure IOBUF holds sector" pre-check, itself only reached when
+; there is genuinely more to write (see fwrite_have_more) -- fixes
+; both, structurally, not just by special-casing RC==0 on failure:
+; this proc is now reached exclusively when a real chunk is about to
+; be written, so (a) ANY failure here is now a genuine,
+; unconditional error (see fwrite_resolve_err above -- no RC-based
+; suppression needed any more, since the caller's own request
+; literally cannot be satisfied without a valid sector to write
+; into), and (b) a request that finishes exactly at a boundary simply
+; never reaches this proc again -- fwrite_loop's own top-of-loop
+; RC==0 check exits before ever re-entering the "ensure IOBUF holds
+; sector" block -- so no cluster is ever allocated before it is
+; actually needed.
+;
+; This mirrors _fcb_sector_lba_and_iobuf's own lazy redesign for the
+; read side exactly (see that proc's own header comment), but can't
+; reuse it directly: that proc is deliberately incapable of
+; allocation ("a read must never implicitly grow a file"), and write
+; genuinely needs to be able to. Hence this separate, write-only
+; resolve proc instead of teaching the shared one to grow files.
+;
+; Args:    RB = FCB base pointer
+; Returns: DF = 0 on success (FCB_CSECT/FCB_CCLUST resolved, or were
+;          already in range -- nothing to do)
+;          DF = 1 on a genuine failure (fat_get I/O error, disk full,
+;          fat_set/fat_flush failure) -- FCB_CSECT is left AT bpb_spc
+;          (never committed to 0) and FCB_CCLUST is untouched, so a
+;          later retry on this same FCB naturally re-attempts this
+;          exact resolution instead of using a stale or inconsistent
+;          position (same "leave the FCB completely unmodified on
+;          failure" contract _fcb_sector_lba_and_iobuf's own fix
+;          already established).
+; Modifies: R7, R8, RD, RF as genuine scratch. R9/RA/RB/RC are each
+;          individually push/pop-protected around every sub-call that
+;          could touch them (fat_get/fat_alloc/fat_set/fat_flush) and
+;          never used as scratch outside those protected spans, so
+;          all four are provably unchanged on return -- verified by
+;          re-tracing every use of each register in this proc, not
+;          assumed. The caller (fwrite_have_more) still wraps its own
+;          call to this proc in explicit push/pop anyway, matching
+;          this project's own standing "protect explicitly, don't
+;          rely on a callee's real behavior going unaudited" practice.
+; ----------------------------------------------------------------
+            proc    fwrite_resolve_cluster
+
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            ldn     rf                  ; D = FCB_CSECT
+            str     r2
+            mov     rf, bpb_spc
+            ldn     rf                  ; D = bpb_spc
+            sm                          ; D = bpb_spc - FCB_CSECT
+            lbnz    fwrc_ok             ; not equal: already in range,
+                                        ; nothing to resolve
+
+            ; FCB_CSECT == bpb_spc: need the next cluster in the chain
+            push    r9
+            push    ra
+            push    rb
+            push    rc
+            call    _fcb_load_cclust
+
+            call    fat_get             ; RD = next cluster, or EOC
+
+            pop     rc
+            pop     rb
+            pop     ra
+            pop     r9
+            lbdf    fwrc_err
+
+            ; BUG FIX: FCB_CSECT is deliberately NOT committed to 0
+            ; here yet, even though fat_get has already succeeded --
+            ; if this turns out to be end-of-chain (below), allocation
+            ; can still fail (fat_alloc/fat_set), and committing here
+            ; unconditionally would repeat the exact "commit before
+            ; the WHOLE operation is known to have worked" bug this
+            ; proc's own header comment already describes fixing for
+            ; fat_get alone -- it applies just as much to the
+            ; allocate chain. Both success paths below
+            ; (fwrc_have_next's own fallthrough, and the allocate
+            ; chain's own success tail) now commit FCB_CSECT=0 via the
+            ; shared fwrc_commit_csect tail, only once EVERYTHING
+            ; needed has actually succeeded.
+
+            ; is this end-of-chain? (cluster >= FAT_EOC = $FFF8)
+            ghi     rd
+            smi     $FF
+            lbnf    fwrc_have_next      ; high byte < $FF: valid next cluster
+            glo     rd
+            smi     $F8
+            lbnf    fwrc_have_next      ; < $FFF8: valid next cluster
+
+            ; end of chain: allocate a new cluster and link
+            ; old_cluster -> new_cluster via fat_set. fat_alloc
+            ; itself calls fat_set to claim the cluster (marking it
+            ; end-of-chain), which clobbers RB internally (fat_set
+            ; uses RB for its own "value to write" argument) -- our
+            ; FCB-base RB must be protected across this call too, not
+            ; just R9/RA/RC.
+            push    r9
+            push    ra
+            push    rb
+            push    rc
+            call    fat_alloc           ; RD = new cluster; DF=0/1
+            pop     rc
+            pop     rb
+            pop     ra
+            pop     r9
+            lbdf    fwrc_err            ; disk full or I/O error
+
+            ; RD = new cluster. Stash it in R8 (free here) before we
+            ; need RD again for the OLD cluster (fat_set's argument).
+            ghi     rd
+            phi     r8
+            glo     rd
+            plo     r8                  ; R8 = new cluster
+
+            ; fetch old (current) cluster into RD -- fat_set's arg
+            call    _fcb_load_cclust        ; RD = old cluster
+
+            ; RB is our FCB-base register throughout this proc, but
+            ; fat_set also uses RB for its "value to write" argument
+            ; -- save FCB base and substitute the new cluster value,
+            ; restoring FCB base right after. R8 (new cluster) is
+            ; also protected since fat_set clobbers it internally.
+            push    rb                  ; save FCB base
+            push    r8                  ; save new cluster
+            ghi     r8
+            phi     rb
+            glo     r8
+            plo     rb                  ; RB = new cluster (fat_set's value arg)
+
+            push    r9
+            push    ra
+            push    rc
+            call    fat_set             ; RD=old cluster, RB=new cluster; DF=0/1
+            pop     rc
+            pop     ra
+            pop     r9
+
+            pop     r8                  ; restore new cluster
+            pop     rb                  ; restore FCB base
+            lbdf    fwrc_err
+
+            ; switch to the new cluster: FCB_CCLUST = new cluster (R8)
+            mov     rf, rb
+            add16   rf, FCB_CCLUST
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf                  ; FCB_CCLUST = new cluster
+
+            ; flush the FAT immediately after this fat_alloc, same
+            ; reasoning as fc_grow's own fix -- an unflushed
+            ; allocation can be silently reverted if the single-sector
+            ; FAT cache gets evicted for a different sector before
+            ; this one is written. fat_flush documents
+            ; R7/R8/R9/RB/RC/RD/RF as clobbered -- R9/RA/RB/RC are
+            ; this routine's own stable registers at this point, so
+            ; all four are protected here.
+            push    r9
+            push    ra
+            push    rb
+            push    rc
+            call    fat_flush
+            pop     rc
+            pop     rb
+            pop     ra
+            pop     r9
+            lbdf    fwrc_err
+
+            lbr     fwrc_commit_csect
+
+fwrc_have_next:
+            ; fat_get returned a valid existing next cluster (RD)
+            call    _fcb_store_cclust
+            ; falls through to fwrc_commit_csect
+
+fwrc_commit_csect:
+            ; reached ONLY once the whole resolve -- whether "chain
+            ; continues" (fwrc_have_next, just above) or "allocated a
+            ; new cluster" (the fat_alloc/fat_set/fat_flush chain
+            ; above that) -- has fully, successfully completed. See
+            ; the BUG FIX note earlier in this proc for why this can't
+            ; be committed any earlier.
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            ldi     0
+            str     rf                  ; FCB_CSECT = 0
+            clc
+            rtn
+
+fwrc_ok:
+            clc
+            rtn
+
+fwrc_err:
+            stc
+            rtn
+
+            endp
+
 ; ----------------------------------------------------------------
 ; file_seek: reposition an open file's read/write cursor.
 ; Args:    RD = FCB pointer (the same one passed to file_open)
@@ -6111,7 +6220,6 @@ fwrite_calc_written:
 ;          must stash to memory first, per this file's own standing
 ;          register-survival discipline).
 ; ----------------------------------------------------------------
-            endp
 
             proc    file_seek
 
