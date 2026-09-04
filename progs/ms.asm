@@ -6,11 +6,10 @@
 ; Companion to the host-side max-xfr tool (Elf-xfer/max-xfr), run as
 ; "max-xfr -r" to receive. mr and ms are two directions of the same
 ; batch-capable protocol; see mr.asm's own header comment for the full
-; account of the wire design (a header block -- name + 32-bit size --
-; ahead of each file's data, in the same spirit as YMODEM's own
-; extension of XMODEM, but reusing the ORIGINAL block mechanism
-; unchanged) and ms_session's own header comment below for this
-; direction's exact byte sequence.
+; account of the length-prefixed, doubly-acknowledged chunk design
+; (2026-09-04 redesign, replacing the earlier command-byte/address-
+; field framing entirely) and ms_session's own header comment below for
+; this direction's exact byte sequence.
 ;
 ; Each argument may be a plain filename or a "*"/"?" wildcard, expanded
 ; via lib/file_glob.asm's is_glob/glob_init/glob_next -- same pattern
@@ -61,7 +60,7 @@
 ; is UNCHANGED: nothing is trusted to survive more than one call to
 ; ms_getbyte/ms_putbyte (or, equivalently, K_READ/K_TYPE directly, in
 ; CONSOLE mode) in a register -- every value that must survive a call
-; lives in memory instead (ms_addr_hi/ms_addr_lo and friends), reloaded
+; lives in memory instead (ms_blk_buf/ms_blk_count and friends), reloaded
 ; fresh immediately before use. The ONE loop that trusts a register
 ; (RC/RF) across many repeated per-byte calls -- ms_sendbytes, the hot
 ; per-byte transfer loop -- is exactly the same register/call shape
@@ -246,42 +245,45 @@ ms_io_mode:     db      0
 
 ;==================================================================
 ; ms_session: send one or more files over the console/serial port,
-; using ELF-DOS's own MAX-derived batch transfer protocol.
+; using ELF-DOS's own length-prefixed, doubly-acknowledged chunk
+; protocol (matches max-xfr's "-r" / receive mode).
 ;
-; Protocol (matches max-xfr's "-r" / receive mode):
+; Protocol:
 ;   1. Wait for $AA (sync) from the host. Reply with $55. Deferred
 ;      until the FIRST file that actually opens successfully (a purely
 ;      local failure -- e.g. every argument on the command line is a
 ;      typo -- never touches the wire at all).
-;   2. For each file that opens successfully:
-;      a. HEADER BLOCK, sent via the ordinary block mechanism
-;         (ms_send_block below): $01 (echoed), a 2-byte big-endian
-;         byte count and a 2-byte running address (echoed as sent --
-;         the address field is unused on the receiving end, kept only
-;         for wire compatibility with the underlying raw memory-load
-;         format this protocol is derived from), then that many
-;         un-echoed payload bytes: the file's basename (null-
-;         terminated) followed by its 32-bit size, big-endian binary
-;         (not YMODEM's ASCII-octal convention) -- read straight out
-;         of K_STAT's own DIRENT_SIZE field, already in the exact byte
-;         order this header needs. Waits for a final $AA ack once the
-;         whole block has been received.
-;      b. DATA BLOCKS: the same block mechanism, one or more times,
-;         carrying the file's actual content.
-;      c. End of this file's data: sends $00 (NOT echoed, matching the
-;         original single-file protocol's own end-of-block-stream
-;         marker) and moves straight on to the NEXT file's own header
-;         block (step 2a) -- no wait for an ack or an 'x' here, that
-;         only happens once, at the very end of the whole batch.
-;   3. Once every file has been sent, sends $00 in the SAME
-;      "starting a new file" state every header block starts from --
-;      there's no separate empty-name sentinel needed, the state a
-;      $00 is sent in is what distinguishes "end of this file's data"
-;      (mid-file) from "end of the whole batch" (between files). Then
-;      sends a final 'x' and waits for it to come back unchanged
-;      (matching the original single-file protocol's own end
-;      sequence, where the host always echoes/re-sends 'x' once
-;      mrecv()/msend() finishes on its side).
+;   2. Every further exchange is a CHUNK: we write a 2-byte big-endian
+;      LENGTH, then wait for a $AA ack (this ack just means "length
+;      received," not "chunk fully processed"). If LENGTH is nonzero,
+;      we then write that many un-echoed payload bytes (via
+;      ms_sendbytes below), and wait for a SECOND $AA -- sent by the
+;      far end only once it has genuinely finished doing something
+;      with that payload (a disk write, or opening the destination
+;      file), not just once the bytes are off the wire, which is what
+;      makes this protocol self-throttling: we can never get more than
+;      one length-field ahead of what the far end has actually
+;      finished processing. A LENGTH of 0 needs only the one ack -- no
+;      payload phase at all -- and is how a "no more data"/"no more
+;      files" end marker is sent (ms_send_end_marker below); there is
+;      no separate command byte or address field anywhere in this
+;      protocol.
+;   3. For each file that opens successfully:
+;      a. HEADER CHUNK: the file's basename (null-terminated) followed
+;         by its 32-bit size, big-endian binary (not YMODEM's ASCII-
+;         octal convention) -- read straight out of K_STAT's own
+;         DIRENT_SIZE field, already in the exact byte order this
+;         header needs.
+;      b. DATA CHUNKS: the file's actual content, one or more times.
+;      c. End of this file's data: a zero-length chunk, moving
+;         straight on to the NEXT file's own header chunk (step 3a).
+;   4. Once every file has been sent, a zero-length chunk in the SAME
+;      "starting a new file" state every header chunk starts from --
+;      that's what distinguishes "end of this file's data" (mid-file)
+;      from "end of the whole batch" (between files). Then reads the
+;      host's final 'x' (written unconditionally by max-xfr's own
+;      main() once receive_batch() returns, matching the original
+;      single-file protocol's own end sequence).
 ;
 ; Args:    none (reads ms_argv/ms_argc, set by start)
 ; Returns: D  = 0 (every file sent cleanly, whole session completed
@@ -472,12 +474,14 @@ mss_loop_done:
                                         ; wire
 
             ; --- outer "no more files" terminator + final ack ---
-            ldi     0
-            call    ms_putbyte
+            call    ms_send_end_marker
+            lbdf    mss_final_err
+
             call    ms_getbyte
             xri     'x'
             lbz     mss_result_check
 
+mss_final_err:
             call    K_INMSG
             db      "Protocol error: no final acknowledgment from host.",13,10,0
             ldi     MSF_FATAL
@@ -613,17 +617,6 @@ mpf_have_shake:
                                         ; of ms_cur_path, bounded to
                                         ; MAXFER_NAME_MAX chars
 
-            ; ms_addr (the block header's own running "address" field,
-            ; protocol fidelity only, unused by the receiver) resets
-            ; to 0 at the start of every file, matching the original
-            ; single-file protocol's own per-transfer reset.
-            mov     rf, ms_addr_hi
-            ldi     0
-            str     rf
-            mov     rf, ms_addr_lo
-            ldi     0
-            str     rf
-
             ; --- build the header payload: basename + NUL + 4-byte
             ; big-endian size (copied straight from K_STAT's own
             ; DIRENT_SIZE field -- already the exact byte order this
@@ -696,16 +689,17 @@ mpf_have_chunk:
             lbr     mpf_data_loop
 
 mpf_data_eof:
-            ldi     0
-            call    ms_putbyte              ; per-file EOF marker -- NOT
-                                        ; echoed, and (unlike the
-                                        ; original single-file
-                                        ; protocol) NOT followed by a
-                                        ; wait for the host's 'x' here
-                                        ; -- that only happens once, at
-                                        ; the very end of the whole
-                                        ; batch (see ms_session's own
-                                        ; header comment)
+            call    ms_send_end_marker      ; per-file EOF marker: a
+                                        ; zero-length chunk, genuinely
+                                        ; ack'd -- unlike the original
+                                        ; single-file protocol, this
+                                        ; does NOT wait for the host's
+                                        ; 'x' here, only for the chunk's
+                                        ; own ack; 'x' only happens
+                                        ; once, at the very end of the
+                                        ; whole batch (see ms_session's
+                                        ; own header comment)
+            lbdf    mpf_fatal_close
 
             mov     rd, ms_fcb
             call    K_FILE_CLOSE
@@ -798,21 +792,21 @@ mpf_cannot_open:
             rtn
 
 ;------------------------------------------------------------------
-; ms_send_block: send one block (header OR data -- identical wire
-; shape either way) via the standard echo-verified mechanism, then
-; wait for the final $AA ack. Each header field (command byte, count
-; hi/lo, address hi/lo) is sent then verified against its own echo
-; before the next one goes out -- the count/address fields use the
-; hardware stack (stxd/irx) to hold the just-sent value across the
-; K_TYPE/K_READ pair for comparison, safe regardless of whether K_TYPE
-; preserves D across the call, since stxd stashes the original value
-; in memory (on the stack), not a register -- matches the original
-; single-file protocol's own identical mechanism exactly.
+; ms_send_block: send one chunk (header OR data -- identical wire
+; shape either way): a 2-byte big-endian length, wait for the length
+; ack, then the payload bytes (via ms_sendbytes), then wait for the
+; payload ack. The far end sends the payload ack only once it has
+; genuinely finished processing this chunk (a disk write, or opening
+; the destination file) -- not merely once the bytes are off the wire
+; -- which is what makes the whole protocol self-throttling; nothing
+; special is needed here to benefit from that, we just wait for the
+; ack as always.
 ; Args:    RF = payload buffer, RC = payload byte count (must be > 0
 ;          -- every caller already only calls this with a real,
-;          nonzero chunk)
-; Returns: DF = 0 (sent and acked), DF = 1 (an echo or ack mismatch --
-;          fatal to the whole session, the two ends are now out of
+;          nonzero chunk; a zero-length "no more data" marker goes
+;          through ms_send_end_marker instead)
+; Returns: DF = 0 (sent and acked), DF = 1 (an ack mismatch -- fatal
+;          to the whole session, the two ends are now out of
 ;          lock-step)
 ; Modifies: everything
 ;------------------------------------------------------------------
@@ -831,72 +825,17 @@ ms_send_block:
             glo     rc
             str     rd                  ; ms_blk_count = RC (length)
 
-            ldi     1                   ; 'more data follows'
-            call    ms_putbyte
-            call    ms_getbyte
-            xri     1
-            lbnz    msb_err
-
             mov     rf, ms_blk_count
             ldn     rf                  ; D = count high byte
-            stxd
             call    ms_putbyte
-            call    ms_getbyte
-            irx
-            xor
-            lbnz    msb_err
-
             mov     rf, ms_blk_count
             inc     rf
             ldn     rf                  ; D = count low byte
-            stxd
             call    ms_putbyte
-            call    ms_getbyte
-            irx
-            xor
-            lbnz    msb_err
 
-            mov     rf, ms_addr_hi
-            ldn     rf
-            stxd
-            call    ms_putbyte
-            call    ms_getbyte
-            irx
-            xor
+            call    ms_getbyte              ; length ack
+            xri     $aa
             lbnz    msb_err
-
-            mov     rf, ms_addr_lo
-            ldn     rf
-            stxd
-            call    ms_putbyte
-            call    ms_getbyte
-            irx
-            xor
-            lbnz    msb_err
-
-            ; ms_addr += payload count: pure computation, no call in
-            ; between, so a register (R7/R8) is safe to use
-            ; transiently here -- unlike the buffer/header fields
-            ; above, which must survive real K_READ/K_TYPE calls and
-            ; so live in memory.
-            mov     rf, ms_addr_hi
-            ldn     rf
-            phi     r7
-            mov     rf, ms_addr_lo
-            ldn     rf
-            plo     r7
-            mov     rf, ms_blk_count
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; R8 = payload count
-            add16   r7, r8
-            mov     rf, ms_addr_hi
-            ghi     r7
-            str     rf
-            mov     rf, ms_addr_lo
-            glo     r7
-            str     rf
 
             ; --- send the payload bytes via ms_sendbytes ---
             mov     rf, ms_blk_buf
@@ -917,7 +856,7 @@ ms_send_block:
                                         ; COUNT-1
             call    ms_sendbytes
 
-            call    ms_getbyte              ; final block ACK
+            call    ms_getbyte              ; payload ack
             xri     $aa
             lbnz    msb_err
 
@@ -925,6 +864,32 @@ ms_send_block:
             rtn
 
 msb_err:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; ms_send_end_marker: send a zero-length chunk (2-byte length=0) and
+; wait for its ack -- used both for "no more data for THIS file" and,
+; separately, for "no more files at all" (matches mr.asm's own
+; symmetric design: the SAME zero-length exchange, distinguished only
+; by which state the far end is in when it arrives).
+; Returns: DF = 0 (ack received), DF = 1 (ack mismatch -- fatal)
+; Modifies: everything
+;------------------------------------------------------------------
+ms_send_end_marker:
+            ldi     0
+            call    ms_putbyte
+            ldi     0
+            call    ms_putbyte
+
+            call    ms_getbyte
+            xri     $aa
+            lbnz    msem_err
+
+            clc
+            rtn
+
+msem_err:
             stc
             rtn
 
@@ -1112,8 +1077,6 @@ ms_glob_found:       db      0
 ms_glob_ctx:         ds      GLOB_CTX_LEN
 ms_result:           db      0
 mhr_val:             db      0
-ms_addr_hi:          db      0
-ms_addr_lo:          db      0
 ms_blk_buf:          dw      0
 ms_blk_count:        dw      0
 ms_basename_buf:     ds      MAXFER_NAME_MAX+1

@@ -24,13 +24,24 @@
 ;
 ; Companion to the host-side max-xfr tool, run as "max-xfr -s" to
 ; send. See mr_session's own header comment below for the exact wire
-; protocol -- a batch-capable extension of ELF-DOS's original MAX-
-; derived single-file protocol, adding a per-file header block (name +
-; 32-bit size) ahead of each file's data, in the same spirit as
-; YMODEM's own extension of XMODEM, but reusing the ORIGINAL block
-; mechanism unchanged (same 5-byte echoed header, same un-echoed
-; payload, same $AA ack) -- the header block is nothing more than an
-; ordinary block whose payload both ends agree to interpret specially.
+; protocol -- a length-prefixed, doubly-acknowledged chunk protocol
+; (2026-09-04 redesign, replacing the earlier command-byte/address-
+; field framing entirely): every chunk the sender writes is preceded
+; by its own 2-byte length and followed by waiting for an explicit
+; ack, and -- critically -- that ack is sent only once the receiver
+; has FINISHED its own processing of the chunk (a disk write, or
+; opening the destination file), not merely once the bytes are off
+; the wire. This closes a real hardware bug found the same day: the
+; OLD protocol's un-echoed, un-acknowledged end-of-file/end-of-batch
+; marker bytes were being silently dropped on a receiver with no
+; hardware UART FIFO, since nothing throttled the sender from writing
+; them back-to-back right after the receiver's slowest step (a real
+; disk write for the file's last data block). Every OTHER byte in the
+; old protocol was already naturally throttled (echo-verified header
+; fields, or a per-byte "-d" delay for payload) -- this redesign
+; extends that same "the sender never gets ahead of the receiver"
+; guarantee to cover the whole protocol uniformly, with no exceptions
+; left, instead of just tuning a delay to paper over the one gap.
 ;
 ; DEVICE SELECTION (2026-09-01, restored and redesigned from the
 ; earlier 2026-08-27/09-01 "remove -u/-b entirely" pass -- see the
@@ -42,26 +53,27 @@
 ; MR's own transfer then automatically follows whatever the console
 ; currently is, serial or otherwise. "-u"/"-b" are an explicit,
 ; deliberate OPT-OUT of that default: they route every byte of THIS
-; transfer's own protocol (handshake, header echo, data, acks --
-; everything, not just the hot data loop) directly to the hardware
-; UART (-u, f_uread/f_utype) or the onboard bit-banged UART (-b,
-; f_bread/f_btype), bypassing K_READ/K_TYPE's own vector entirely,
-; regardless of what the console is currently routed to. The user's
-; own motivation: this lets a transfer run on a DIFFERENT physical
-; port than the one being used as the interactive console (e.g. watch
-; debug/log output on the console while a transfer runs on the other
-; UART, or drive a transfer from outside a terminal emulator entirely
-; for easier traffic capture) -- something a console-only design can
-; never do, and something the retracted "-u/-b is pointless now"
-; reasoning below didn't account for (it only weighed the THROUGHPUT
-; argument for bypassing K_READ/K_TYPE, which the self-modified vector
-; genuinely does moot -- not this independent, still-real reason to
-; target a specific port). mr_getbyte/mr_putbyte (mr_session's own
-; local subroutines, below) are the mode-aware dispatch point for
-; every PROTOCOL byte; the hot per-byte DATA loop (mr_readbytes) gets
-; its own separate, page-aligned, hand-short-branched 3-way dispatch
-; for speed, mirroring lib/ymodem.asm's own ym_getbyte/ym_putbyte vs.
-; ym_recv_block split exactly -- see mr_readbytes's own header comment.
+; transfer's own protocol (handshake, chunk length/ack, data, the
+; trailing 'x' -- everything, not just the hot data loop) directly to
+; the hardware UART (-u, f_uread/f_utype) or the onboard bit-banged
+; UART (-b, f_bread/f_btype), bypassing K_READ/K_TYPE's own vector
+; entirely, regardless of what the console is currently routed to.
+; The user's own motivation: this lets a transfer run on a DIFFERENT
+; physical port than the one being used as the interactive console
+; (e.g. watch debug/log output on the console while a transfer runs on
+; the other UART, or drive a transfer from outside a terminal emulator
+; entirely for easier traffic capture) -- something a console-only
+; design can never do, and something the retracted "-u/-b is
+; pointless now" reasoning below didn't account for (it only weighed
+; the THROUGHPUT argument for bypassing K_READ/K_TYPE, which the
+; self-modified vector genuinely does moot -- not this independent,
+; still-real reason to target a specific port). mr_getbyte/mr_putbyte
+; (mr_session's own local subroutines, below) are the mode-aware
+; dispatch point for every PROTOCOL byte; the hot per-byte DATA loop
+; (mr_readbytes) gets its own separate, page-aligned, hand-short-
+; branched 3-way dispatch for speed, mirroring lib/ymodem.asm's own
+; ym_getbyte/ym_putbyte vs. ym_recv_block split exactly -- see
+; mr_readbytes's own header comment.
 ;
 ; RETRACTED reasoning, kept for history: the 2026-08-27 self-modifying-
 ; vector work genuinely did eliminate the THROUGHPUT/register-cost
@@ -109,7 +121,7 @@
             extrn   fmt_size32
 
 ; MAXFER_NAME_MAX: matches DIRENT_NAME's own 127-char cap (kernel_api.inc)
-; -- a header block's name field is never expected to exceed this from
+; -- a header chunk's name field is never expected to exceed this from
 ; our own ms.asm, but mr_parse_header (mr_session's own local routine)
 ; still bounds its copy against it defensively.
 MAXFER_NAME_MAX:    equ     127
@@ -131,9 +143,11 @@ MR_IO_BITBANG:      equ     2       ; via f_bread/f_btype directly
 
 ; mr_session result codes (returned in D; 0 = success)
 MRERR_HANDSHAKE:    equ     1       ; sync byte never arrived/matched
-MRERR_COMMAND:      equ     2       ; unrecognized per-block command
-                                    ; byte, or the final 'x' didn't
-                                    ; arrive/match
+MRERR_COMMAND:      equ     2       ; a chunk's own length was too
+                                    ; large to fit our buffer (a
+                                    ; genuinely malformed/desynced
+                                    ; session), or the final 'x'
+                                    ; didn't arrive/match
 MRERR_WRITE:        equ     3       ; K_FILE_WRITE failed -- fatal to
                                     ; the whole session (unlike a
                                     ; single file's own open failure,
@@ -331,36 +345,40 @@ mr_io_mode:     db      0
 
 ;==================================================================
 ; mr_session: receive a batch of one or more files over the console/
-; serial port, using ELF-DOS's own MAX-derived batch transfer
-; protocol.
+; serial port, using ELF-DOS's own length-prefixed, doubly-
+; acknowledged chunk protocol (matches max-xfr's "-s" / send mode).
 ;
-; Protocol (matches max-xfr's "-s" / send mode):
+; Protocol:
 ;   1. Host sends $55 (sync). We ACK with $AA.
-;   2. For each file the host has to send:
-;      a. HEADER BLOCK, sent via the ordinary block mechanism below:
-;         host sends $01 (echoed), a 2-byte big-endian byte count and
-;         a 2-byte address field (each echoed as read -- the address
-;         field is unused, kept only for wire compatibility with the
-;         underlying raw memory-load format this protocol is derived
-;         from), then that many un-echoed payload bytes: the file's
-;         name (null-terminated) followed by its 32-bit size, big-
-;         endian binary (not YMODEM's ASCII-octal convention). We ACK
-;         with $AA once the whole block has been received.
-;      b. DATA BLOCKS: the same block mechanism, one or more times,
-;         carrying the file's actual content.
-;      c. End of this file's data: host sends $00 (NOT echoed, exactly
-;         like the end-of-block-stream marker in the original single-
-;         file protocol). We do NOT expect a trailing 'x' here --
-;         that only happens once, at the very end of the whole
-;         session (step 3) -- we simply go back to expecting the NEXT
-;         file's own header block (step 2a), or the batch terminator
-;         (step 3) if there isn't one.
-;   3. Once the host has no more files, it sends $00 in the SAME
-;      "expecting a header block" state that starts every file --
-;      there's no separate empty-name sentinel needed, the state a
-;      $00 arrives in is what distinguishes "end of this file's data"
-;      (mid-file) from "end of the whole batch" (between files). We
-;      then read the host's final 'x' and finish, exactly like the
+;   2. Every further exchange is a CHUNK: the host writes a 2-byte
+;      big-endian LENGTH, and we ACK it immediately with $AA -- this
+;      ack means only "length received," not "chunk fully processed".
+;      If LENGTH is 0, the chunk is over right there: no payload
+;      follows, and no second ack is needed (the length-ack already
+;      covered the whole exchange). If LENGTH is nonzero, the host
+;      then writes that many un-echoed payload bytes (paced by its own
+;      "-d" delay), and we send a SECOND $AA -- but only once we've
+;      actually finished doing something with that payload (see
+;      below), not just once the bytes are off the wire. This is what
+;      makes the whole protocol self-throttling: the host can never
+;      get more than one length-field ahead of what we've actually
+;      finished processing, closing a real hardware bug where the old
+;      protocol's un-acknowledged end-of-file/end-of-batch markers
+;      were silently dropped on a receiver with no UART FIFO.
+;   3. A simple two-state machine, driven purely by "was this chunk's
+;      length zero":
+;        expecting a HEADER: a nonzero-length chunk's payload is the
+;        file's name (null-terminated) followed by its 32-bit size,
+;        big-endian binary -- open (or discard) the destination, ack
+;        once that's decided, and switch to expecting DATA. A zero-
+;        length chunk here means the whole batch is over.
+;        expecting DATA: a nonzero-length chunk's payload is the
+;        file's actual content -- write it (or discard it), ack once
+;        the write has actually completed, and stay in this state. A
+;        zero-length chunk here means this file's data is done --
+;        close it, switch back to expecting a HEADER.
+;   4. Once the batch-ending zero-length header chunk has been ack'd,
+;      read the host's final 'x' and finish, exactly like the
 ;      original single-file protocol's own end sequence.
 ;
 ; A file's own open failure (bad name from a malformed header, the
@@ -369,9 +387,9 @@ mr_io_mode:     db      0
 ; in lock-step with the host) and the batch continues, matching this
 ; project's established "note the error, keep going" convention for
 ; DEL/COPY/TOUCH's own multi-argument loops. A genuine PROTOCOL error
-; (an unrecognized command byte, a write failure, the trailing 'x'
-; missing) IS fatal to the whole session -- the two ends have no way
-; to resynchronize once the block-level lock-step is broken.
+; (a chunk too large to fit our buffer, a write failure, the trailing
+; 'x' missing) IS fatal to the whole session -- the two ends have no
+; way to resynchronize once the chunk-level lock-step is broken.
 ;
 ; Prints its own per-file progress line and a final summary
 ; ("N file(s) received.", plus "M file(s) failed."/"K file(s)
@@ -430,10 +448,13 @@ mrs_shake:  ldi     $aa
 ; Outer loop: one iteration per file.
 ;------------------------------------------------------------------
 mrs_outer:
-            call    mr_recv_block       ; D = 0 (end marker) / 1
-                                        ; (block ready, mr_buf/
-                                        ; mr_blk_count filled) / 2
-                                        ; (fatal: bad command byte)
+            call    mr_recv_block       ; D = 0 (end-of-batch marker,
+                                        ; already fully ack'd) / 1
+                                        ; (header ready in mr_buf/
+                                        ; mr_blk_count, payload ack not
+                                        ; yet sent -- see
+                                        ; mrs_inner_start below) / 2
+                                        ; (fatal: chunk too large)
             ; BUG-CLASS GUARD: stash D via a register PLO (which
             ; doesn't touch D) before "mov rf, ..." clobbers it.
             plo     rc
@@ -448,7 +469,8 @@ mrs_outer:
             smi     2
             lbz     mrs_fatal_command
 
-            ; --- have a HEADER block ---
+            ; --- have a HEADER chunk (payload ack owed -- see
+            ; mrs_inner_start) ---
             call    mr_parse_header     ; DF ignored here -- even a
                                         ; malformed header (DF=1) still
                                         ; leaves a printable
@@ -576,11 +598,25 @@ mrs_open_ok:
             db      " bytes)...",13,10,0
 
 mrs_inner_start:
+            call    mr_send_ack         ; header's payload ack -- sent
+                                        ; only now that we're genuinely
+                                        ; ready for data (file opened,
+                                        ; a "cannot create" error
+                                        ; already noted and discarding,
+                                        ; or an extra file in single-
+                                        ; file mode already noted and
+                                        ; discarding -- every path
+                                        ; above converges here)
 ;------------------------------------------------------------------
-; Inner loop: one iteration per DATA block of the current file.
+; Inner loop: one iteration per DATA chunk of the current file.
 ;------------------------------------------------------------------
 mrs_inner:
-            call    mr_recv_block
+            call    mr_recv_block       ; D = 0 (end-of-file marker,
+                                        ; already fully ack'd) / 1
+                                        ; (data ready in mr_buf/
+                                        ; mr_blk_count, payload ack not
+                                        ; yet sent) / 2 (fatal: chunk
+                                        ; too large)
             ; BUG-CLASS GUARD: same as mrs_outer above.
             plo     rc
             mov     rf, mrb_result
@@ -594,27 +630,47 @@ mrs_inner:
             smi     2
             lbz     mrs_fatal_command_close
 
-            ; --- have a DATA block ---
+            ; --- have a DATA chunk (payload ack owed) ---
             mov     rf, mr_discard_flag
             ldn     rf
-            lbnz    mrs_inner           ; discarding: don't write
+            lbnz    mrs_inner_discard
 
             mov     rf, mr_buf
             mov     r8, mr_blk_count
             lda     r8
             phi     rc
             ldn     r8
-            plo     rc                  ; RC = full block byte count
+            plo     rc                  ; RC = full chunk byte count
             mov     rd, mr_fcb
             call    K_FILE_WRITE        ; DF = 0/1
-            lbnf    mrs_inner
+            lbdf    mrs_write_err
 
+            call    mr_send_ack         ; ack AFTER the write
+                                        ; completes -- the whole point
+                                        ; of this redesign: the sender
+                                        ; genuinely waits for the disk
+                                        ; write, not just the wire read
+            lbr     mrs_inner
+
+mrs_inner_discard:
+            call    mr_send_ack         ; still ack even when
+                                        ; discarding -- we just skip
+                                        ; the write itself
+            lbr     mrs_inner
+
+mrs_write_err:
             mov     rd, mr_fcb
             call    K_FILE_CLOSE
             call    K_INMSG
             db      "Write error.",13,10,0
             ldi     MRERR_WRITE
-            lbr     mrs_summarize
+            lbr     mrs_summarize       ; no ack sent -- fatal, the
+                                        ; sender is left waiting (same
+                                        ; policy this protocol has
+                                        ; always had for this exact
+                                        ; case: there's nothing left to
+                                        ; recover once a write fails
+                                        ; mid-session)
 
 mrs_file_end:
             mov     rf, mr_discard_flag
@@ -700,72 +756,44 @@ mrs_summarize_ok:
             rtn
 
 ;------------------------------------------------------------------
-; mr_recv_block: read one block's leading command byte and, if it's
-; $01, the rest of that block's 5-byte header (count hi/lo, address
-; hi/lo -- unused, kept only for wire compatibility) plus its payload,
-; via mr_readbytes. Every header field is individually echoed back to
-; the sender as it's read, matching the sender's own per-field
-; verification. Ordinary intra-proc subroutine (no page alignment
-; needed -- no hand-written short branches here).
+; mr_recv_block: read one chunk's 2-byte big-endian length and ack it
+; immediately (this ack means "length received," not "chunk fully
+; processed"). If the length is 0, that's the WHOLE exchange -- no
+; payload follows, nothing more for the caller to do. If nonzero, read
+; that many payload bytes into mr_buf via mr_readbytes -- but do NOT
+; send the payload's own ack here. The caller sends it (via
+; mr_send_ack, below) only once it has finished its own processing of
+; that payload (a disk write, or opening the destination file) -- see
+; this file's own header comment for why that distinction is the whole
+; point of this protocol. Ordinary intra-proc subroutine (no page
+; alignment needed -- no hand-written short branches here).
 ;
-; Returns: D = 0 (command byte was $00 -- not echoed, matches the
-;          sender's own convention of not expecting an echo for a
-;          terminal marker at any level), 1 (a real block was
-;          received: mr_buf holds its payload, mr_blk_count its
-;          length), 2 (fatal: the command byte was neither $00 nor
-;          $01)
+; Returns: D = 0 (length was 0 -- an end marker, already fully ack'd),
+;          1 (a real chunk: mr_buf holds its payload, mr_blk_count its
+;          length -- caller must call mr_send_ack once its own
+;          processing of this chunk is complete), 2 (fatal: the length
+;          was too large to fit mr_buf -- a genuinely malformed/
+;          desynced session)
 ; Modifies: everything
 ;------------------------------------------------------------------
 mr_recv_block:
-            call    mr_getbyte
-            lbz     mrb_zero
-
-            ; BUG-CLASS GUARD: stash the command byte in memory before
-            ; the "mov" below clobbers D.
-            plo     rc
-            mov     rf, mr_cmdbyte
-            glo     rc
-            str     rf
-
-            ldn     rf
-            call    mr_putbyte              ; echo it
-
-            mov     rf, mr_cmdbyte
-            ldn     rf
-            smi     1
-            lbz     mrb_cmd01
-
-            ldi     2
-            rtn
-
-mrb_zero:
-            ldi     0
-            rtn
-
-mrb_cmd01:
             call    mr_getbyte
             plo     rc
             mov     rf, mr_cnt_hi
             glo     rc
             str     rf
-            call    mr_putbyte
 
             call    mr_getbyte
             plo     rc
             mov     rf, mr_cnt_lo
             glo     rc
             str     rf
-            call    mr_putbyte
 
-            call    mr_getbyte              ; address hi (unused)
-            call    mr_putbyte
+            call    mr_send_ack         ; length ack -- always safe to
+                                        ; send right away, regardless
+                                        ; of what the length turns out
+                                        ; to be
 
-            call    mr_getbyte              ; address lo (unused)
-            call    mr_putbyte
-
-            ; reconstruct count from memory (bug-class guard, same as
-            ; the original single-file protocol's own mr_cmd01) and
-            ; stash it as mr_blk_count for the caller
             mov     rf, mr_cnt_hi
             ldn     rf
             phi     rc
@@ -780,35 +808,60 @@ mrb_cmd01:
             glo     rc
             str     rf
 
-            ; defensive: a genuinely 0-length block can't come from
-            ; either of this project's own senders (a header is always
-            ; >= 5 bytes, a data block is only ever sent for a nonzero
-            ; chunk), but "dec rc" on RC==0 would wrap to $FFFF and
-            ; hand mr_readbytes a 65536-iteration loop -- cheap enough
-            ; to guard against outright rather than trust that
-            ; assumption forever
             ghi     rc
-            lbnz    mrb_have_bytes
+            lbnz    mrb_have_len
             glo     rc
-            lbz     mrb_ack
+            lbz     mrb_len_zero
 
-mrb_have_bytes:
+mrb_have_len:
+            ; defensive: reject a chunk too large for mr_buf (512
+            ; bytes) -- can't happen from either of this project's own
+            ; senders (a header maxes out at MAXFER_NAME_MAX+5=132
+            ; bytes, a data chunk at BLOCK_BUF_LEN=512), but a
+            ; genuinely malformed/desynced session shouldn't be
+            ; allowed to overrun mr_buf
+            ghi     rc
+            smi     3
+            lbdf    mrb_too_big         ; RC.hi >= 3 -> RC >= 768
+
+            ghi     rc
+            xri     2
+            lbnz    mrb_size_ok         ; RC.hi is 0 or 1 -> RC <= 511
+
+            glo     rc
+            lbnz    mrb_too_big         ; RC.hi == 2, RC.lo != 0 ->
+                                        ; RC > 512
+
+mrb_size_ok:
             mov     rf, mr_buf
             dec     rc                  ; mr_readbytes runs COUNT
                                         ; times when seeded with
                                         ; COUNT-1
             call    mr_readbytes
 
-mrb_ack:
+            ldi     1
+            rtn
+
+mrb_len_zero:
+            ldi     0
+            rtn
+
+mrb_too_big:
+            ldi     2
+            rtn
+
+;------------------------------------------------------------------
+; mr_send_ack: write a single $AA ack byte.
+; Modifies: everything (via mr_putbyte)
+;------------------------------------------------------------------
+mr_send_ack:
             ldi     $aa
             call    mr_putbyte
-
-            ldi     1
             rtn
 
 ;------------------------------------------------------------------
 ; mr_parse_header: interpret mr_buf[0..mr_blk_count-1] as a header
-; block (name, NUL, 4-byte big-endian size) sent ahead of a new file's
+; chunk (name, NUL, 4-byte big-endian size) sent ahead of a new file's
 ; data. Assumes mr_blk_count's own HIGH byte is 0 -- true for any
 ; well-formed header from this project's own ms.asm (MAXFER_NAME_MAX
 ; keeps every real header well under 256 bytes); a genuinely malformed
@@ -997,8 +1050,8 @@ mr_print_count:
 
 ;------------------------------------------------------------------
 ; mr_getbyte / mr_putbyte: mode-aware single-byte read/write for
-; every PROTOCOL byte in this session (handshake, header-field echo,
-; acks, the trailing 'x') -- NOT used for the hot per-byte DATA loop
+; every PROTOCOL byte in this session (handshake, chunk length/ack,
+; the trailing 'x') -- NOT used for the hot per-byte DATA loop
 ; (mr_readbytes, a separate page-aligned proc with its own inline
 ; 3-way dispatch, for speed -- see its own header comment). Reads
 ; mr_io_mode (flat data, set once by start) fresh every call; see
@@ -1059,7 +1112,6 @@ mr_extra_noted:     db      0
 mr_discard_flag:    db      0
 mrb_result:         db      0
 mrs_result:         db      0
-mr_cmdbyte:         db      0
 mr_cnt_hi:          db      0
 mr_cnt_lo:          db      0
 mr_blk_count:       dw      0
@@ -1075,12 +1127,12 @@ mr_buf:             ds      512
 
 ;==================================================================
 ; mr_readbytes: the one loop in this whole file that has to be fast --
-; runs once per incoming byte with no per-byte handshake from the host
-; (only the block-level $AA ack throttles it), so at the top end of
-; whichever transport is in use every extra instruction here is real
-; risk of an overrun and a dropped byte. A genuine hand-written short
-; branch for each loop-back, not an lbnz left for -r to shrink after
-; the fact -- safe specifically because of the .link .align page
+; runs once per incoming payload byte with no per-byte handshake from
+; the host (only the chunk-level $AA acks throttle it), so at the top
+; end of whichever transport is in use every extra instruction here is
+; real risk of an overrun and a dropped byte. A genuine hand-written
+; short branch for each loop-back, not an lbnz left for -r to shrink
+; after the fact -- safe specifically because of the .link .align page
 ; below, which guarantees this whole (well under 256 bytes) proc lands
 ; on a page boundary, so every short branch is always within range of
 ; its own target regardless of where this proc ends up in the final
