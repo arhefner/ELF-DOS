@@ -22,6 +22,33 @@
 ;                      the host stuck waiting for an ack that never
 ;                      comes.
 ;
+; NO MID-SESSION CONSOLE OUTPUT (2026-09-04, found via a real hardware
+; hang): mr_session prints NOTHING between the handshake and the final
+; summary -- no per-file "Receiving..." line, no "Cannot create ..."
+; error, no "Ignoring additional file(s)..." notice. This looks like a
+; regression from earlier versions of this file, but it's deliberate:
+; in the DEFAULT (console) mode, K_INMSG/K_MSG route through the exact
+; same physical channel mr_getbyte/mr_putbyte use for the transfer
+; itself (K_TYPE/K_READ's self-modified vector) -- there is no ELF-DOS
+; equivalent of a separate stderr stream the way max-xfr.c has on the
+; host side. Printing "Receiving ihex.c (3,178 bytes)..." mid-transfer
+; means the far end's next blocking read -- expecting a real $AA ack --
+; instead reads 'R' (0x52), exactly the failure this project hit
+; running MR through minicom's own external-protocol launcher (which
+; necessarily shares minicom's own already-open serial connection):
+; the host reported "Error waiting for payload ack (ack = 52)", aborted,
+; and MR then hung forever waiting for bytes the host would never send
+; again. This isn't specific to minicom or to any one mode (-u/-b would
+; hit the identical problem whenever their target happens to be the
+; same physical wire as the console, which there is no reliable way for
+; a userland program to detect) -- so nothing prints until mrs_summarize,
+; reached only once the whole session's own wire protocol has fully
+; finished (the trailing 'x' already read). The aggregate ok/err/skip
+; counts still survive to that point and print there; only the per-file
+; name/size detail and the specific "Cannot create.../Ignoring..."
+; messages are lost, in exchange for genuinely never being able to
+; corrupt an in-progress transfer.
+;
 ; Companion to the host-side max-xfr tool, run as "max-xfr -s" to
 ; send. See mr_session's own header comment below for the exact wire
 ; protocol -- a length-prefixed, doubly-acknowledged chunk protocol
@@ -443,9 +470,6 @@ mr_io_mode:     db      0
             mov     rf, mr_single_used
             ldi     0
             str     rf
-            mov     rf, mr_extra_noted
-            ldi     0
-            str     rf
 
 ;------------------------------------------------------------------
 ; Handshake: wait for $55 (sync), ACK with $AA.
@@ -557,15 +581,20 @@ mrs_mode2_extra:
             adi     1
             str     rf
 
-            mov     rf, mr_extra_noted
-            ldn     rf
-            lbnz    mrs_inner_start
-            mov     rf, mr_extra_noted
-            ldi     1
-            str     rf
-            call    K_INMSG
-            db      "Ignoring additional file(s) sent by host (single-file mode).",13,10,0
-            lbr     mrs_inner_start
+            lbr     mrs_inner_start     ; already noted (mr_skip_count
+                                        ; bumped above) -- the specific
+                                        ; "ignoring extra file(s)"
+                                        ; detail is deliberately not
+                                        ; printed here (see this file's
+                                        ; own header comment: NOTHING
+                                        ; prints mid-session, since
+                                        ; console output and the
+                                        ; transfer's own wire are the
+                                        ; identical channel in console
+                                        ; mode -- the aggregate skip
+                                        ; count still shows up in
+                                        ; mrs_summarize, once the wire
+                                        ; is genuinely idle)
 
 mrs_have_dest:
             mov     rf, mr_discard_flag
@@ -577,45 +606,21 @@ mrs_have_dest:
             mov     ra, mr_iobuf
             ldi     1                   ; mode = write (create/truncate)
             call    K_FILE_OPEN         ; DF = 0/1
-            lbnf    mrs_open_ok
+            lbnf    mrs_inner_start     ; opened cleanly -- nothing to
+                                        ; print mid-session (see
+                                        ; mrs_mode2_extra's own comment
+                                        ; above), go straight to data
 
             mov     rf, mr_discard_flag
             ldi     1
             str     rf
-            call    K_INMSG
-            db      "Cannot create ",0
-            mov     rf, mr_destpath
-            call    K_MSG
-            call    K_INMSG
-            db      ".",13,10,0
             mov     rf, mr_err_count
             ldn     rf
             adi     1
             str     rf
-            lbr     mrs_inner_start
-
-mrs_open_ok:
-            call    K_INMSG
-            db      "Receiving ",0
-            mov     rf, mr_destpath
-            call    K_MSG
-            call    K_INMSG
-            db      " (",0
-            mov     rf, mr_hdrsize
-            lda     rf
-            phi     rd
-            lda     rf
-            plo     rd
-            lda     rf
-            phi     r8
-            ldn     rf
-            plo     r8                  ; RD:R8 = 32-bit size
-            mov     rf, mr_numbuf
-            call    fmt_size32
-            mov     rf, mr_numbuf
-            call    K_MSG
-            call    K_INMSG
-            db      " bytes)...",13,10,0
+            ; deliberately no "Cannot create ..." print here -- see
+            ; mrs_mode2_extra's own comment above; mr_err_count alone
+            ; carries this forward to mrs_summarize
 
 mrs_inner_start:
             call    mr_send_ack         ; header's payload ack -- sent
@@ -681,9 +686,12 @@ mrs_inner_discard:
 mrs_write_err:
             mov     rd, mr_fcb
             call    K_FILE_CLOSE
-            call    K_INMSG
-            db      "Write error.",13,10,0
-            ldi     MRERR_WRITE
+            ldi     MRERR_WRITE         ; deliberately no "Write error."
+                                        ; print here -- see this file's
+                                        ; own header comment; mrs_result
+                                        ; still carries this to start's
+                                        ; own D/DF return, so the exit
+                                        ; code reflects it either way
             lbr     mrs_summarize       ; no ack sent -- fatal, the
                                         ; sender is left waiting (same
                                         ; policy this protocol has
@@ -1164,7 +1172,6 @@ mr_ok_count:        db      0
 mr_err_count:       db      0
 mr_skip_count:      db      0
 mr_single_used:     db      0
-mr_extra_noted:     db      0
 mr_discard_flag:    db      0
 mrb_result:         db      0
 mrs_result:         db      0
