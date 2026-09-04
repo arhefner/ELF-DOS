@@ -351,32 +351,51 @@ mr_io_mode:     db      0
 ; Protocol:
 ;   1. Host sends $55 (sync). We ACK with $AA.
 ;   2. Every further exchange is a CHUNK: the host writes a 2-byte
-;      big-endian LENGTH, and we ACK it immediately with $AA -- this
-;      ack means only "length received," not "chunk fully processed".
-;      If LENGTH is 0, the chunk is over right there: no payload
-;      follows, and no second ack is needed (the length-ack already
-;      covered the whole exchange). If LENGTH is nonzero, the host
-;      then writes that many un-echoed payload bytes (paced by its own
-;      "-d" delay), and we send a SECOND $AA -- but only once we've
-;      actually finished doing something with that payload (see
-;      below), not just once the bytes are off the wire. This is what
-;      makes the whole protocol self-throttling: the host can never
-;      get more than one length-field ahead of what we've actually
-;      finished processing, closing a real hardware bug where the old
-;      protocol's un-acknowledged end-of-file/end-of-batch markers
-;      were silently dropped on a receiver with no UART FIFO.
+;      big-endian LENGTH. If LENGTH is nonzero, we ACK it immediately
+;      with $AA (this ack means only "length received," not "chunk
+;      fully processed"), the host then writes that many un-echoed
+;      payload bytes (paced by its own "-d" delay), and we send a
+;      SECOND $AA -- but only once we've actually finished doing
+;      something with that payload (see below), not just once the
+;      bytes are off the wire. If LENGTH is 0, the chunk is over right
+;      there -- no payload follows -- but we do NOT ack it immediately:
+;      the ack is deferred until whatever processing a zero-length
+;      chunk implies on our end (closing the file we were just writing
+;      to, most of the time) has actually finished. Both deferrals
+;      exist for the identical reason: they're what makes the whole
+;      protocol self-throttling -- the host can never get more than
+;      one length-field ahead of what we've actually finished
+;      processing, on hardware with no UART FIFO to absorb it if it
+;      does. This closes two real hardware bugs, found on two
+;      different days: the original protocol's un-acknowledged end-of-
+;      file/end-of-batch markers being silently dropped (2026-09-04,
+;      fixed by this whole chunk redesign), and then a second,
+;      narrower miss found the same day in the redesign's own first
+;      draft -- the zero-length chunk's ack was being sent
+;      unconditionally, immediately upon reading the length, which is
+;      safe on its own but let the host race ahead and write the NEXT
+;      thing (another file's header, or the outer batch-end marker)
+;      while we were still busy closing the current file, exactly
+;      recreating the class of bug the redesign exists to close, just
+;      one step later. Fixed by moving the zero-length chunk's ack out
+;      of mr_recv_block entirely and into whichever caller actually
+;      knows when its own processing is done (mrs_file_end,
+;      mrs_batch_end).
 ;   3. A simple two-state machine, driven purely by "was this chunk's
 ;      length zero":
 ;        expecting a HEADER: a nonzero-length chunk's payload is the
 ;        file's name (null-terminated) followed by its 32-bit size,
 ;        big-endian binary -- open (or discard) the destination, ack
 ;        once that's decided, and switch to expecting DATA. A zero-
-;        length chunk here means the whole batch is over.
+;        length chunk here means the whole batch is over -- ack it
+;        (nothing more to do before the final 'x' below), then proceed
+;        to step 4.
 ;        expecting DATA: a nonzero-length chunk's payload is the
 ;        file's actual content -- write it (or discard it), ack once
 ;        the write has actually completed, and stay in this state. A
 ;        zero-length chunk here means this file's data is done --
-;        close it, switch back to expecting a HEADER.
+;        close it (or, if discarding, there's nothing to close), ack,
+;        then switch back to expecting a HEADER.
 ;   4. Once the batch-ending zero-length header chunk has been ack'd,
 ;      read the host's final 'x' and finish, exactly like the
 ;      original single-file protocol's own end sequence.
@@ -449,7 +468,8 @@ mrs_shake:  ldi     $aa
 ;------------------------------------------------------------------
 mrs_outer:
             call    mr_recv_block       ; D = 0 (end-of-batch marker,
-                                        ; already fully ack'd) / 1
+                                        ; ack NOT yet sent -- see
+                                        ; mrs_batch_end below) / 1
                                         ; (header ready in mr_buf/
                                         ; mr_blk_count, payload ack not
                                         ; yet sent -- see
@@ -612,11 +632,11 @@ mrs_inner_start:
 ;------------------------------------------------------------------
 mrs_inner:
             call    mr_recv_block       ; D = 0 (end-of-file marker,
-                                        ; already fully ack'd) / 1
-                                        ; (data ready in mr_buf/
-                                        ; mr_blk_count, payload ack not
-                                        ; yet sent) / 2 (fatal: chunk
-                                        ; too large)
+                                        ; ack NOT yet sent -- see
+                                        ; mrs_file_end below) / 1 (data
+                                        ; ready in mr_buf/mr_blk_count,
+                                        ; payload ack not yet sent) / 2
+                                        ; (fatal: chunk too large)
             ; BUG-CLASS GUARD: same as mrs_outer above.
             plo     rc
             mov     rf, mrb_result
@@ -675,7 +695,8 @@ mrs_write_err:
 mrs_file_end:
             mov     rf, mr_discard_flag
             ldn     rf
-            lbnz    mrs_outer           ; discarding: nothing to close
+            lbnz    mrs_file_end_discard  ; discarding: nothing to
+                                        ; close, ack right away
 
             mov     rd, mr_fcb
             call    K_FILE_CLOSE
@@ -683,6 +704,27 @@ mrs_file_end:
             ldn     rf
             adi     1
             str     rf
+            call    mr_send_ack         ; end-of-file ack, deliberately
+                                        ; deferred until AFTER the
+                                        ; close -- see mr_recv_block's
+                                        ; own header comment for why:
+                                        ; K_FILE_CLOSE is real disk I/O,
+                                        ; and acking any earlier would
+                                        ; let the sender race ahead and
+                                        ; write the next thing (another
+                                        ; file's header, or the outer
+                                        ; batch-end marker) before we're
+                                        ; genuinely back to reading --
+                                        ; exactly the class of bug this
+                                        ; whole protocol redesign exists
+                                        ; to close, just relocated to a
+                                        ; spot the first pass missed
+                                        ; (found via a real hardware
+                                        ; hang, 2026-09-04)
+            lbr     mrs_outer
+
+mrs_file_end_discard:
+            call    mr_send_ack
             lbr     mrs_outer
 
 mrs_fatal_command_close:
@@ -700,6 +742,11 @@ mrs_fatal_command:
             lbr     mrs_summarize
 
 mrs_batch_end:
+            call    mr_send_ack         ; batch-end ack, deferred from
+                                        ; mr_recv_block -- nothing slow
+                                        ; follows here (just the
+                                        ; trailing 'x' read below), so
+                                        ; sending it right away is safe
             call    mr_getbyte
             xri     'x'
             lbz     mrs_clean
@@ -756,24 +803,32 @@ mrs_summarize_ok:
             rtn
 
 ;------------------------------------------------------------------
-; mr_recv_block: read one chunk's 2-byte big-endian length and ack it
-; immediately (this ack means "length received," not "chunk fully
-; processed"). If the length is 0, that's the WHOLE exchange -- no
-; payload follows, nothing more for the caller to do. If nonzero, read
-; that many payload bytes into mr_buf via mr_readbytes -- but do NOT
-; send the payload's own ack here. The caller sends it (via
-; mr_send_ack, below) only once it has finished its own processing of
-; that payload (a disk write, or opening the destination file) -- see
-; this file's own header comment for why that distinction is the whole
-; point of this protocol. Ordinary intra-proc subroutine (no page
+; mr_recv_block: read one chunk's 2-byte big-endian length. If the
+; length is 0, that's the WHOLE exchange -- no payload follows, and NO
+; ack is sent here: the caller sends it (via mr_send_ack, below) only
+; once it has finished whatever processing a zero-length chunk implies
+; on ITS end (closing the just-received file, for instance) -- see
+; this file's own header comment for why that distinction matters
+; (K_FILE_CLOSE is real disk I/O; acking before it completes would let
+; the sender race ahead and write the next thing while we're not yet
+; back to listening, on hardware with no UART FIFO to absorb it --
+; found via a real hardware hang, 2026-09-04). If the length is
+; nonzero, send the length ack (safe immediately here, since nothing
+; slow happens before the payload starts flowing) and read that many
+; payload bytes into mr_buf via mr_readbytes -- but do NOT send the
+; payload's own ack. The caller sends that one too, only once it has
+; finished its own processing of the payload (a disk write, or opening
+; the destination file). Ordinary intra-proc subroutine (no page
 ; alignment needed -- no hand-written short branches here).
 ;
-; Returns: D = 0 (length was 0 -- an end marker, already fully ack'd),
-;          1 (a real chunk: mr_buf holds its payload, mr_blk_count its
-;          length -- caller must call mr_send_ack once its own
-;          processing of this chunk is complete), 2 (fatal: the length
-;          was too large to fit mr_buf -- a genuinely malformed/
-;          desynced session)
+; Returns: D = 0 (length was 0 -- an end marker; NO ack sent, caller
+;          must call mr_send_ack once ready), 1 (a real chunk: mr_buf
+;          holds its payload, mr_blk_count its length; the length ack
+;          has already been sent, but the PAYLOAD ack has not --
+;          caller must call mr_send_ack once its own processing of
+;          this chunk is complete), 2 (fatal: the length was too large
+;          to fit mr_buf -- a genuinely malformed/desynced session; no
+;          ack sent, matching the length=0 case)
 ; Modifies: everything
 ;------------------------------------------------------------------
 mr_recv_block:
@@ -788,11 +843,6 @@ mr_recv_block:
             mov     rf, mr_cnt_lo
             glo     rc
             str     rf
-
-            call    mr_send_ack         ; length ack -- always safe to
-                                        ; send right away, regardless
-                                        ; of what the length turns out
-                                        ; to be
 
             mov     rf, mr_cnt_hi
             ldn     rf
@@ -833,6 +883,11 @@ mrb_have_len:
                                         ; RC > 512
 
 mrb_size_ok:
+            call    mr_send_ack         ; length ack -- safe right
+                                        ; away here, since nothing slow
+                                        ; happens before the payload
+                                        ; itself starts flowing
+
             mov     rf, mr_buf
             dec     rc                  ; mr_readbytes runs COUNT
                                         ; times when seeded with
@@ -844,7 +899,8 @@ mrb_size_ok:
 
 mrb_len_zero:
             ldi     0
-            rtn
+            rtn                         ; NO ack sent -- see this
+                                        ; proc's own header comment
 
 mrb_too_big:
             ldi     2
