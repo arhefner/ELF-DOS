@@ -1,7 +1,7 @@
 ;
 ; mr.asm - receive one or more files over the serial port
 ;
-; Usage: MR [-u|-b] [<destination>]
+; Usage: MR [-u|-b] [-v] [<destination>]
 ;   MR                receive every file the host sends (batch mode),
 ;                      writing each one under its own transmitted name
 ;                      into the current directory.
@@ -21,33 +21,50 @@
 ;                      session still ends cleanly instead of leaving
 ;                      the host stuck waiting for an ack that never
 ;                      comes.
+;   -v                 print per-file progress ("Receiving <name>
+;                      (<size> bytes)...") and error detail
+;                      ("Cannot create...", "Ignoring additional
+;                      file(s)...") live, during the transfer, in
+;                      addition to the always-printed final summary.
 ;
-; NO MID-SESSION CONSOLE OUTPUT (2026-09-04, found via a real hardware
-; hang): mr_session prints NOTHING between the handshake and the final
-; summary -- no per-file "Receiving..." line, no "Cannot create ..."
-; error, no "Ignoring additional file(s)..." notice. This looks like a
-; regression from earlier versions of this file, but it's deliberate:
-; in the DEFAULT (console) mode, K_INMSG/K_MSG route through the exact
-; same physical channel mr_getbyte/mr_putbyte use for the transfer
-; itself (K_TYPE/K_READ's self-modified vector) -- there is no ELF-DOS
-; equivalent of a separate stderr stream the way max-xfr.c has on the
-; host side. Printing "Receiving ihex.c (3,178 bytes)..." mid-transfer
-; means the far end's next blocking read -- expecting a real $AA ack --
-; instead reads 'R' (0x52), exactly the failure this project hit
-; running MR through minicom's own external-protocol launcher (which
-; necessarily shares minicom's own already-open serial connection):
-; the host reported "Error waiting for payload ack (ack = 52)", aborted,
-; and MR then hung forever waiting for bytes the host would never send
-; again. This isn't specific to minicom or to any one mode (-u/-b would
-; hit the identical problem whenever their target happens to be the
-; same physical wire as the console, which there is no reliable way for
-; a userland program to detect) -- so nothing prints until mrs_summarize,
-; reached only once the whole session's own wire protocol has fully
-; finished (the trailing 'x' already read). The aggregate ok/err/skip
-; counts still survive to that point and print there; only the per-file
-; name/size detail and the specific "Cannot create.../Ignoring..."
-; messages are lost, in exchange for genuinely never being able to
-; corrupt an in-progress transfer.
+; MID-SESSION CONSOLE OUTPUT IS OPT-IN, VIA -v (2026-09-04, found via a
+; real hardware hang; -v added the same day at the user's request): by
+; DEFAULT, mr_session prints NOTHING between the handshake and the
+; final summary. This looks like a regression from earlier versions of
+; this file, but it's deliberate: in the DEFAULT (console) mode,
+; K_INMSG/K_MSG route through the exact same physical channel
+; mr_getbyte/mr_putbyte use for the transfer itself (K_TYPE/K_READ's
+; self-modified vector) -- there is no ELF-DOS equivalent of a separate
+; stderr stream the way max-xfr.c has on the host side. Printing
+; "Receiving ihex.c (3,178 bytes)..." mid-transfer means the far end's
+; next blocking read -- expecting a real $AA ack -- instead reads 'R'
+; (0x52), exactly the failure this project hit running MR through
+; minicom's own external-protocol launcher (which necessarily shares
+; minicom's own already-open serial connection): the host reported
+; "Error waiting for payload ack (ack = 52)", aborted, and MR then hung
+; forever waiting for bytes the host would never send again. This isn't
+; specific to minicom or to any one mode -- -u/-b hit the identical
+; problem whenever their target happens to be the same physical wire as
+; the console, which there is no reliable way for a userland program to
+; detect (the kernel's own IO_TYPE_TARGET/IO_READ_TARGET, which WOULD
+; answer that question, are explicitly documented as kernel/boot-
+; internal only). So the default stays silent regardless of mode --
+; -v is a deliberate, informed opt-in: the user is asserting that
+; whatever port mr_getbyte/mr_putbyte are actually using genuinely
+; isn't shared with anything else reading the same wire (their own
+; interactive terminal, most commonly a SEPARATE connection entirely
+; from the one driving the transfer, or minicom's own external-protocol
+; launcher pointed at a different port than the one it's using as its
+; own console). Getting this wrong (using -v when the wire genuinely is
+; shared) reproduces the exact hang -v exists to let the user opt out
+; of avoiding -- this file has no way to protect against that, since it
+; can't see what -v actually implies about the physical wiring; -v
+; means "I know what I'm doing here." Without -v (the default), the
+; aggregate ok/err/skip counts still survive to mrs_summarize and print
+; there, once the wire is guaranteed idle (the trailing 'x' already
+; read) -- only the per-file name/size detail and the specific "Cannot
+; create.../Ignoring..." messages are silent, in exchange for genuinely
+; never being able to corrupt an in-progress transfer.
 ;
 ; Companion to the host-side max-xfr tool, run as "max-xfr -s" to
 ; send. See mr_session's own header comment below for the exact wire
@@ -192,100 +209,93 @@ MRERR_WRITE:        equ     3       ; K_FILE_WRITE failed -- fatal to
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = argv pointer, RC = argc. argv[1], if present, may
-            ; be "-u"/"-b" (must come first, matching YR/YS's own
-            ; established "flags precede everything else" convention)
-            ; selecting which physical port every byte of this
-            ; transfer's own protocol goes over -- see this file's own
-            ; header comment. Whatever remains after an optional flag
-            ; is the optional destination (a directory for batch mode,
-            ; or an exact filename for single mode -- decided below
-            ; via K_STAT). At most one flag and one destination, so
-            ; argc can be at most 3.
+            ; RA = argv pointer, RC = argc. argv[1] and/or argv[2] may
+            ; each independently be "-u"/"-b" (device) or "-v"
+            ; (verbose), in EITHER order -- both are optional and
+            ; combinable (matching YR/YS's own established "flags
+            ; precede everything else" convention, just extended to
+            ; more than one flag). Whatever remains after however many
+            ; leading flags were recognized is the optional destination
+            ; (a directory for batch mode, or an exact filename for
+            ; single mode -- decided below via K_STAT). At most 2 flags
+            ; and 1 destination, so argc can be at most 4.
             glo     rc
-            smi     4
-            lbdf    usage               ; argc >= 4: too many args
+            smi     5
+            lbdf    usage               ; argc >= 5: too many args
 
             mov     rf, mr_io_mode
             ldi     MR_IO_CONSOLE       ; default
+            str     rf
+            mov     rf, mr_verbose
+            ldi     0                   ; default: quiet -- see this
+                                        ; file's own header comment for
+                                        ; why (console output and the
+                                        ; transfer's own wire are the
+                                        ; same channel by default)
             str     rf
 
             glo     rc
             smi     1
             lbz     start_no_dest       ; argc == 1: nothing to parse
 
+            ; --- argv[1]: could be a flag or the destination ---
             mov     rb, ra
             add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rd
             ldn     rb
-            plo     rd                  ; RD = argv[1] pointer
-
+            plo     rd                  ; RD = argv[1]
             mov     rf, rd
-            ldn     rf                  ; D = argv[1][0]
-            xri     '-'
-            lbnz    start_have_dest_at_1
+            call    mr_try_flag         ; DF = 0 (recognized, applied)
+                                        ; / 1 (not a flag)
+            lbnf    start_after_flag1
 
-            mov     rf, rd
-            inc     rf
-            ldn     rf                  ; D = argv[1][1]
-            plo     r8                  ; R8.0 = flag letter (temp)
-
-            mov     rf, rd
-            inc     rf
-            inc     rf
-            ldn     rf                  ; D = argv[1][2] -- must be
-                                        ; NUL for "-u"/"-b" to be
-                                        ; exactly this whole token
-            lbnz    start_have_dest_at_1  ; not exactly 2 chars after
-                                        ; '-': fall back to treating
-                                        ; the whole token as a
-                                        ; destination instead of
-                                        ; guessing/erroring
-
-            glo     r8
-            xri     'u'
-            lbz     start_flag_uart
-            glo     r8
-            xri     'b'
-            lbz     start_flag_bitbang
-            lbr     start_have_dest_at_1   ; unrecognized letter: same
-                                        ; fallback
-
-start_flag_uart:
-            mov     rf, mr_io_mode
-            ldi     MR_IO_UART
-            str     rf
-            lbr     start_after_flag
-
-start_flag_bitbang:
-            mov     rf, mr_io_mode
-            ldi     MR_IO_BITBANG
-            str     rf
-
-start_after_flag:
+            ; not a flag: argv[1] must be the ONLY argument
             glo     rc
             smi     2
-            lbz     start_no_dest       ; argc == 2: flag only, no
-                                        ; destination
+            lbnz    usage
+            lbr     start_have_dest_ptr ; RD already = argv[1]
 
-            ; argc must be 3 here (argc >= 4 was already rejected
-            ; above): the destination is argv[2]
+start_after_flag1:
+            glo     rc
+            smi     2
+            lbz     start_no_dest       ; argc == 2: one flag, no dest
+
+            ; --- argv[2]: could be a SECOND flag or the destination ---
             mov     rb, ra
             add16   rb, 4               ; RB = &argv[2]
             lda     rb
             phi     rd
             ldn     rb
             plo     rd                  ; RD = argv[2]
-            lbr     start_have_dest_ptr
+            mov     rf, rd
+            call    mr_try_flag
+            lbnf    start_after_flag2
 
-start_have_dest_at_1:
-            ; RD already holds argv[1]'s own pointer (untouched by the
-            ; flag-character checks above) -- no flag was given, so
-            ; this must be the ONLY argument
+            ; not a flag: argv[2] must be the destination, and argc
+            ; must be exactly 3 (cmd + 1 flag + 1 dest)
             glo     rc
-            smi     2
+            smi     3
             lbnz    usage
+            lbr     start_have_dest_ptr ; RD already = argv[2]
+
+start_after_flag2:
+            glo     rc
+            smi     3
+            lbz     start_no_dest       ; argc == 3: two flags, no dest
+
+            ; two flags already consumed -- argv[3], if present, must
+            ; be the destination, and argc must be exactly 4
+            glo     rc
+            smi     4
+            lbnz    usage
+
+            mov     rb, ra
+            add16   rb, 6               ; RB = &argv[3]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[3]
 
 start_have_dest_ptr:
             mov     rf, mr_dest_arg
@@ -361,14 +371,81 @@ start_success:
 
 usage:
             call    K_INMSG
-            db      "Usage: MR [-u|-b] [<destination>]",13,10,0
+            db      "Usage: MR [-u|-b] [-v] [<destination>]",13,10,0
             ldi     1                   ; exit code 1 = error
+            rtn
+
+;------------------------------------------------------------------
+; mr_try_flag: RF = a candidate argv token. If it's exactly "-u",
+; "-b", or "-v" (nothing more), applies it (sets mr_io_mode or
+; mr_verbose) and returns DF=0. Otherwise returns DF=1 with nothing
+; changed -- the caller then treats the token as the destination
+; instead. A repeated or contradictory flag (e.g. "-u -b") is not
+; specially rejected -- the last one applied simply wins, matching
+; this project's own established preference for falling back over
+; guessing/erroring on an unusual but harmless combination.
+; Modifies: RF, R8, R9 -- NOT RD, deliberately (start's own callers
+; rely on RD -- the argv pointer just classified -- surviving this
+; call unchanged, since a "not a flag" result reuses it directly as
+; the destination pointer without reloading it).
+;------------------------------------------------------------------
+mr_try_flag:
+            ldn     rf
+            xri     '-'
+            lbnz    mtf_not_flag
+
+            mov     r8, rf
+            inc     r8
+            ldn     r8                  ; D = char[1]
+            plo     r9                  ; R9.0 = flag letter (temp)
+
+            inc     r8
+            ldn     r8                  ; D = char[2] -- must be NUL
+                                        ; for "-X" to be exactly this
+                                        ; whole token
+            lbnz    mtf_not_flag
+
+            glo     r9
+            xri     'u'
+            lbz     mtf_u
+            glo     r9
+            xri     'b'
+            lbz     mtf_b
+            glo     r9
+            xri     'v'
+            lbz     mtf_v
+            lbr     mtf_not_flag
+
+mtf_u:
+            mov     rf, mr_io_mode
+            ldi     MR_IO_UART
+            str     rf
+            clc
+            rtn
+
+mtf_b:
+            mov     rf, mr_io_mode
+            ldi     MR_IO_BITBANG
+            str     rf
+            clc
+            rtn
+
+mtf_v:
+            mov     rf, mr_verbose
+            ldi     1
+            str     rf
+            clc
+            rtn
+
+mtf_not_flag:
+            stc
             rtn
 
 mr_dest_arg:    dw      0
 mr_stat_buf:    ds      DIRENT_LEN
 mr_mode:        db      0
 mr_io_mode:     db      0
+mr_verbose:     db      0
 
 ;==================================================================
 ; mr_session: receive a batch of one or more files over the console/
@@ -468,6 +545,9 @@ mr_io_mode:     db      0
             ldi     0
             str     rf
             mov     rf, mr_single_used
+            ldi     0
+            str     rf
+            mov     rf, mr_extra_noted
             ldi     0
             str     rf
 
@@ -581,20 +661,25 @@ mrs_mode2_extra:
             adi     1
             str     rf
 
-            lbr     mrs_inner_start     ; already noted (mr_skip_count
-                                        ; bumped above) -- the specific
-                                        ; "ignoring extra file(s)"
-                                        ; detail is deliberately not
-                                        ; printed here (see this file's
-                                        ; own header comment: NOTHING
-                                        ; prints mid-session, since
-                                        ; console output and the
-                                        ; transfer's own wire are the
-                                        ; identical channel in console
-                                        ; mode -- the aggregate skip
-                                        ; count still shows up in
-                                        ; mrs_summarize, once the wire
-                                        ; is genuinely idle)
+            mov     rf, mr_verbose
+            ldn     rf
+            lbz     mrs_inner_start     ; not verbose (default) --
+                                        ; nothing prints mid-session,
+                                        ; see this file's own header
+                                        ; comment; mr_skip_count alone
+                                        ; still carries this to
+                                        ; mrs_summarize
+
+            mov     rf, mr_extra_noted
+            ldn     rf
+            lbnz    mrs_inner_start     ; already printed this notice
+                                        ; once this session
+            mov     rf, mr_extra_noted
+            ldi     1
+            str     rf
+            call    K_INMSG
+            db      "Ignoring additional file(s) sent by host (single-file mode).",13,10,0
+            lbr     mrs_inner_start
 
 mrs_have_dest:
             mov     rf, mr_discard_flag
@@ -606,10 +691,7 @@ mrs_have_dest:
             mov     ra, mr_iobuf
             ldi     1                   ; mode = write (create/truncate)
             call    K_FILE_OPEN         ; DF = 0/1
-            lbnf    mrs_inner_start     ; opened cleanly -- nothing to
-                                        ; print mid-session (see
-                                        ; mrs_mode2_extra's own comment
-                                        ; above), go straight to data
+            lbnf    mrs_open_ok
 
             mov     rf, mr_discard_flag
             ldi     1
@@ -618,9 +700,46 @@ mrs_have_dest:
             ldn     rf
             adi     1
             str     rf
-            ; deliberately no "Cannot create ..." print here -- see
-            ; mrs_mode2_extra's own comment above; mr_err_count alone
-            ; carries this forward to mrs_summarize
+
+            mov     rf, mr_verbose
+            ldn     rf
+            lbz     mrs_inner_start     ; not verbose -- mr_err_count
+                                        ; alone carries this forward
+
+            call    K_INMSG
+            db      "Cannot create ",0
+            mov     rf, mr_destpath
+            call    K_MSG
+            call    K_INMSG
+            db      ".",13,10,0
+            lbr     mrs_inner_start
+
+mrs_open_ok:
+            mov     rf, mr_verbose
+            ldn     rf
+            lbz     mrs_inner_start     ; not verbose -- nothing prints
+
+            call    K_INMSG
+            db      "Receiving ",0
+            mov     rf, mr_destpath
+            call    K_MSG
+            call    K_INMSG
+            db      " (",0
+            mov     rf, mr_hdrsize
+            lda     rf
+            phi     rd
+            lda     rf
+            plo     rd
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; RD:R8 = 32-bit size
+            mov     rf, mr_numbuf
+            call    fmt_size32
+            mov     rf, mr_numbuf
+            call    K_MSG
+            call    K_INMSG
+            db      " bytes)...",13,10,0
 
 mrs_inner_start:
             call    mr_send_ack         ; header's payload ack -- sent
@@ -686,12 +805,17 @@ mrs_inner_discard:
 mrs_write_err:
             mov     rd, mr_fcb
             call    K_FILE_CLOSE
-            ldi     MRERR_WRITE         ; deliberately no "Write error."
-                                        ; print here -- see this file's
-                                        ; own header comment; mrs_result
-                                        ; still carries this to start's
-                                        ; own D/DF return, so the exit
-                                        ; code reflects it either way
+
+            mov     rf, mr_verbose
+            ldn     rf
+            lbz     mrs_write_err_result   ; not verbose -- mrs_result
+                                        ; alone carries this forward
+
+            call    K_INMSG
+            db      "Write error.",13,10,0
+
+mrs_write_err_result:
+            ldi     MRERR_WRITE
             lbr     mrs_summarize       ; no ack sent -- fatal, the
                                         ; sender is left waiting (same
                                         ; policy this protocol has
@@ -1172,6 +1296,7 @@ mr_ok_count:        db      0
 mr_err_count:       db      0
 mr_skip_count:      db      0
 mr_single_used:     db      0
+mr_extra_noted:     db      0
 mr_discard_flag:    db      0
 mrb_result:         db      0
 mrs_result:         db      0
