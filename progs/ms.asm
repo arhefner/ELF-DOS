@@ -695,71 +695,6 @@ mpf_data_loop:
                                         ; DF = 0/1
             lbdf    mpf_read_err
 
-            ; TEMPORARY DIAGNOSTIC: print a running chunk counter plus
-            ; the byte count K_FILE_READ actually returned, to confirm
-            ; whether the file-read step itself completes normally
-            ; (and quickly) for the chunk that later fails on the
-            ; wire, or whether the read itself is the real problem.
-            ; RC is stashed to MEMORY (dbg_saved_rc), not a register --
-            ; fmt_size32 documents "Modifies: everything (R7-RD)",
-            ; which includes any register a first attempt at this
-            ; diagnostic trusted to survive across it (found the hard
-            ; way: an RB-based stash got clobbered by the first
-            ; fmt_size32 call below, and the resulting garbage was
-            ; then fed straight into ms_send_block's real length
-            ; field -- this is what actually produced the "Block too
-            ; large" wire corruption seen on the very first test of
-            ; this diagnostic, nothing to do with K_FILE_READ itself).
-            mov     rd, dbg_saved_rc
-            ghi     rc
-            str     rd
-            inc     rd
-            glo     rc
-            str     rd                  ; dbg_saved_rc = RC
-
-            mov     rd, dbg_chunk_num
-            ldn     rd
-            adi     1
-            str     rd
-            call    K_INMSG
-            db      "DBG rd#",0
-            mov     rf, dbg_chunk_num
-            ldn     rf
-            plo     r8
-            ldi     0
-            phi     r8
-            ldi     0
-            phi     rd
-            ldi     0
-            plo     rd
-            mov     rf, ms_numbuf
-            call    fmt_size32
-            mov     rf, ms_numbuf
-            call    K_MSG
-            call    K_INMSG
-            db      " cnt=",0
-            mov     rf, dbg_saved_rc    ; reload fresh from memory --
-            lda     rf                  ; never trust a register across
-            phi     r8                  ; the call above
-            ldn     rf
-            plo     r8
-            ldi     0
-            phi     rd
-            ldi     0
-            plo     rd
-            mov     rf, ms_numbuf
-            call    fmt_size32
-            mov     rf, ms_numbuf
-            call    K_MSG
-            call    K_INMSG
-            db      13,10,0
-            mov     rf, dbg_saved_rc    ; restore RC fresh from memory
-            lda     rf
-            phi     rc
-            ldn     rf
-            plo     rc
-            ; END TEMPORARY DIAGNOSTIC
-
             glo     rc
             lbnz    mpf_have_chunk
             ghi     rc
@@ -920,24 +855,6 @@ ms_send_block:
             call    ms_putbyte
 
             call    ms_getbyte              ; length ack
-            plo     r9                  ; TEMPORARY DIAGNOSTIC: stash
-                                        ; via PLO (doesn't touch D)
-                                        ; before the mov below clobbers
-                                        ; it (gotcha #4) -- then straight
-                                        ; to MEMORY, not left in a
-                                        ; register across the prints
-            mov     rd, dbg_saved_ack
-            glo     r9
-            str     rd
-            call    K_INMSG
-            db      "L=",0
-            mov     rf, dbg_saved_ack
-            ldn     rf
-            call    dbg_print_hex_byte
-            call    K_INMSG
-            db      " ",0
-            mov     rf, dbg_saved_ack   ; reload fresh from memory
-            ldn     rf                  ; END TEMPORARY DIAGNOSTIC
             xri     $aa
             lbnz    msb_err
 
@@ -961,21 +878,6 @@ ms_send_block:
             call    ms_sendbytes
 
             call    ms_getbyte              ; payload ack
-            plo     r9                  ; TEMPORARY DIAGNOSTIC: same
-                                        ; memory-based stash as the
-                                        ; length-ack check above
-            mov     rd, dbg_saved_ack
-            glo     r9
-            str     rd
-            call    K_INMSG
-            db      "P=",0
-            mov     rf, dbg_saved_ack
-            ldn     rf
-            call    dbg_print_hex_byte
-            call    K_INMSG
-            db      13,10,0
-            mov     rf, dbg_saved_ack   ; reload fresh from memory
-            ldn     rf                  ; END TEMPORARY DIAGNOSTIC
             xri     $aa
             lbnz    msb_err
 
@@ -985,60 +887,6 @@ ms_send_block:
 msb_err:
             stc
             rtn
-
-; TEMPORARY DIAGNOSTIC: print D as 2 uppercase hex digits, no CR/LF.
-; Called from ms_send_block's two ack checks above to show the actual
-; byte value received instead of $AA. Builds both digits into
-; dbg_hex_buf first, then a SINGLE K_MSG call at the end -- NOT two
-; separate K_TYPE calls with R9 trusted to survive the first one: this
-; project's own gotcha #8 only proves R9 survives f_msg/f_inmsg, never
-; K_TYPE specifically, and the sibling bug just found in this same
-; diagnostic (RB clobbered across fmt_size32) is a direct warning
-; against exactly this kind of unverified-survival assumption. R9 here
-; only has to survive across pure arithmetic (no calls) between the
-; two digit computations, which is always safe.
-; Modifies: everything.
-dbg_print_hex_byte:
-            plo     r9                  ; stash the byte
-            glo     r9
-            shr
-            shr
-            shr
-            shr                         ; D = high nibble
-            smi     10
-            lbnf    dphb_hi_digit
-            adi     'A'
-            lbr     dphb_hi_done
-dphb_hi_digit:
-            adi     10 + '0'
-dphb_hi_done:
-            plo     r8                  ; stash the ASCII digit via PLO
-                                        ; (doesn't touch D) before the
-                                        ; mov below clobbers it (gotcha
-                                        ; #4)
-            mov     rf, dbg_hex_buf
-            glo     r8
-            str     rf
-            inc     rf
-
-            glo     r9
-            ani     $0f                 ; D = low nibble
-            smi     10
-            lbnf    dphb_lo_digit
-            adi     'A'
-            lbr     dphb_lo_done
-dphb_lo_digit:
-            adi     10 + '0'
-dphb_lo_done:
-            str     rf
-            inc     rf
-            ldi     0
-            str     rf                  ; NUL-terminate
-
-            mov     rf, dbg_hex_buf
-            call    K_MSG
-            rtn
-; END TEMPORARY DIAGNOSTIC
 
 ;------------------------------------------------------------------
 ; ms_send_end_marker: send a zero-length chunk (2-byte length=0) and
@@ -1239,10 +1087,6 @@ mpb_bitbang:
             call    f_btype
             rtn
 
-dbg_chunk_num:       db      0           ; TEMPORARY DIAGNOSTIC
-dbg_saved_rc:        dw      0           ; TEMPORARY DIAGNOSTIC
-dbg_saved_ack:       db      0           ; TEMPORARY DIAGNOSTIC
-dbg_hex_buf:         ds      3           ; TEMPORARY DIAGNOSTIC
 ms_ok_count:         db      0
 ms_err_count:        db      0
 ms_handshake_done:   db      0
