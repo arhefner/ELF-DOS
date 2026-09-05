@@ -512,6 +512,22 @@ ygbt_have_budget:
             ldi     1
             str     rf
 
+            ; TEMPORARY DIAGNOSTIC BUG FIX: RD (the poll budget) was
+            ; never saved across the K_INMSG/K_TYPE calls below, which
+            ; this file's OWN header comment already says can never be
+            ; trusted to preserve a register -- found the hard way (a
+            ; second hardware round showed f_utest correctly returning
+            ; ready=0, yet ys_wait_for_c's own "DBG timeout" never
+            ; printing at all afterward, meaning this poll loop never
+            ; actually returned). Stash it to memory now, reload fresh
+            ; right before it's used again below.
+            mov     rf, ygbt_diag_rd_hi
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
             call    K_INMSG
             db      "DBG before f_utest",13,10,0
 
@@ -540,6 +556,12 @@ ygbt_have_budget:
             mov     rf, ygbt_diag_ready
             ldn     rf
             lbnz    ygbt_ready
+
+            mov     rf, ygbt_diag_rd_hi ; restore RD fresh from memory
+            lda     rf                  ; -- never trusted in a
+            phi     rd                  ; register across the prints
+            ldn     rf                  ; above
+            plo     rd
             dec     rd
             lbr     ygbt_poll
 
@@ -561,6 +583,8 @@ ygbt_bitbang:
 
 ygbt_diag_done:      db      0           ; TEMPORARY DIAGNOSTIC
 ygbt_diag_ready:     db      0           ; TEMPORARY DIAGNOSTIC
+ygbt_diag_rd_hi:     db      0           ; TEMPORARY DIAGNOSTIC
+ygbt_diag_rd_lo:     db      0           ; TEMPORARY DIAGNOSTIC
             endp
 
 ;------------------------------------------------------------------
