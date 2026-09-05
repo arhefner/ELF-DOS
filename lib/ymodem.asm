@@ -420,9 +420,23 @@ ypu_done:
             call    K_READ
             rtn
 ygb_uart:
+            ; REAL BUG FIX (found via a real hardware hang, 2026-09-07):
+            ; f_uread's own BIOS source checks RE's high byte (bit 0)
+            ; to decide whether to echo the just-read byte back out the
+            ; same UART afterward -- and if that echo path is taken, it
+            ; blocks forever waiting for transmit-ready with no timeout
+            ; at all. Never initialized here before, so this decision
+            ; was made from whatever garbage happened to be in RE.
+            ; Neither f_uread nor f_bread ever WRITE RE's high byte
+            ; (only RE.0, the byte itself), so clearing it once, right
+            ; before the call, is sufficient and correct.
+            ldi     0
+            phi     re
             call    f_uread
             rtn
 ygb_bitbang:
+            ldi     0
+            phi     re
             call    f_bread
             rtn
             endp
@@ -613,11 +627,19 @@ ygdh_lo_done:
             rtn
 
 ygbt_ready:
+            ; REAL BUG FIX -- see ym_getbyte's own identical comment
+            ; above for the full explanation (f_uread's echo-flag check
+            ; via RE's high byte, never initialized, could fall into an
+            ; unbounded wait-for-transmit-ready loop).
+            ldi     0
+            phi     re
             call    f_uread
             clc
             rtn
 
 ygbt_bitbang:
+            ldi     0
+            phi     re
             call    f_bread
             clc
             rtn
@@ -679,6 +701,17 @@ yrb_console:
             rtn
 
 yrb_uart:
+            ; REAL BUG FIX -- see ym_getbyte's own comment above for
+            ; the full explanation. Set ONCE, before the loop, not on
+            ; every iteration: neither f_uread nor f_bread ever write
+            ; RE's high byte, so it stays cleared for the whole block
+            ; regardless of how many bytes this loop reads -- zero
+            ; per-byte cost in this deliberately tight, hand-short-
+            ; branched loop.
+            ldi     0
+            phi     re
+
+yrb_uart_loop:
             call    f_uread
             str     rf
             inc     rf
@@ -686,11 +719,15 @@ yrb_uart:
             dec     rc
             ghi     rc
             xri     $ff
-            bnz     yrb_uart
+            bnz     yrb_uart_loop
 
             rtn
 
 yrb_bitbang:
+            ldi     0
+            phi     re
+
+yrb_bitbang_loop:
             call    f_bread
             str     rf
             inc     rf
@@ -698,7 +735,7 @@ yrb_bitbang:
             dec     rc
             ghi     rc
             xri     $ff
-            bnz     yrb_bitbang
+            bnz     yrb_bitbang_loop
 
             rtn
             endp
