@@ -634,6 +634,22 @@ ygbt_ready:
             ldi     0
             phi     re
             call    f_uread
+
+            ; TEMPORARY DIAGNOSTIC: confirm f_uread itself actually
+            ; returns at all (the RE fix didn't resolve the hang, so
+            ; this checks directly rather than continuing to reason
+            ; from BIOS source alone -- stash D immediately via PLO,
+            ; which doesn't touch D, before the K_INMSG call below
+            ; clobbers it).
+            plo     r8
+
+            call    K_INMSG
+            db      "DBG f_uread returned, byte=",0
+            glo     r8
+            call    ygbt_diag_hex       ; takes D, prints internally
+            call    K_INMSG
+            db      13,10,0
+
             clc
             rtn
 
