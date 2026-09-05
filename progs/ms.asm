@@ -1,7 +1,30 @@
 ;
 ; ms.asm - send one or more files via the MAX protocol
 ;
-; Usage: MS [-u|-b] <filename> [filename...]
+; Usage: MS [-u|-b] [-v] <filename> [filename...]
+;   -v   print per-file progress ("Sent <name>.") and error detail
+;        ("Not found...", "Cannot open...") live, during the transfer,
+;        in addition to the always-printed final summary.
+;
+; MID-SESSION CONSOLE OUTPUT IS OPT-IN, VIA -v (2026-09-06, found via a
+; real hardware bug: MS run over the hardware UART with the console
+; ALSO on that same port). By DEFAULT, ms_session prints NOTHING
+; between the handshake and the final summary, for the identical
+; reason mr.asm's own -v exists (see its own header comment for the
+; full account) -- K_INMSG/K_MSG route through the exact same physical
+; channel ms_getbyte/ms_putbyte use for the transfer itself whenever
+; that channel is the console (the default, no-flag case), and there
+; is no ELF-DOS equivalent of a separate stderr stream. Printing "Sent
+; Makefile." mid-batch means the far end's next blocking read --
+; expecting a real 2-byte length field -- instead reads the message's
+; own first two bytes ('S'=0x53, 'e'=0x65 -> 0x5365 = 21349) as if
+; that were the length, which max-xfr correctly rejects as absurdly
+; oversized ("Block too large (21349 bytes)") and aborts. This isn't
+; specific to any one mode: -u/-b hit the identical problem whenever
+; their target happens to be the same physical wire as the console,
+; which there is no reliable way for a userland program to detect. So
+; the default stays silent regardless of mode -- -v is a deliberate,
+; informed opt-in, matching MR's own.
 ;
 ; Companion to the host-side max-xfr tool (Elf-xfer/max-xfr), run as
 ; "max-xfr -r" to receive. mr and ms are two directions of the same
@@ -126,12 +149,12 @@ MS_IO_BITBANG:      equ     2       ; via f_bread/f_btype directly
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = argv pointer, RC = argc. argv[1], if present, may
-            ; be "-u"/"-b" (must come first, matching YR/YS's own
-            ; convention) selecting which physical port every byte of
-            ; this session's own protocol goes over -- see this file's
-            ; own header comment. Filenames start right after any
-            ; flag; at least one is always required.
+            ; RA = argv pointer, RC = argc. argv[1] and/or argv[2] may
+            ; each independently be "-u"/"-b" (device) or "-v"
+            ; (verbose), in EITHER order -- both optional and
+            ; combinable, matching MR's own established convention.
+            ; Whatever remains after however many leading flags were
+            ; recognized must be at least one filename.
             glo     rc
             smi     2
             lbnf    usage               ; argc < 2: nothing at all
@@ -139,68 +162,62 @@ start:
             mov     rf, ms_io_mode
             ldi     MS_IO_CONSOLE       ; default
             str     rf
+            mov     rf, ms_verbose
+            ldi     0                   ; default: quiet -- see this
+                                        ; file's own header comment for
+                                        ; why (console output and the
+                                        ; transfer's own wire are the
+                                        ; same channel by default)
+            str     rf
 
+            ; --- argv[1]: could be a flag or the first filename ---
             mov     rb, ra
             add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rd
             ldn     rb
-            plo     rd                  ; RD = argv[1] pointer
-
+            plo     rd                  ; RD = argv[1]
             mov     rf, rd
-            ldn     rf                  ; D = argv[1][0]
-            xri     '-'
-            lbnz    start_no_flag
+            call    ms_try_flag         ; DF = 0 (recognized, applied)
+                                        ; / 1 (not a flag)
+            lbnf    start_after_flag1
 
-            mov     rf, rd
-            inc     rf
-            ldn     rf                  ; D = argv[1][1]
-            plo     r8                  ; R8.0 = flag letter (temp)
-
-            mov     rf, rd
-            inc     rf
-            inc     rf
-            ldn     rf                  ; D = argv[1][2] -- must be
-                                        ; NUL for "-u"/"-b" to be
-                                        ; exactly this whole token
-            lbnz    start_no_flag       ; not exactly 2 chars after
-                                        ; '-': fall back to treating
-                                        ; argv[1] as a filename
-
-            glo     r8
-            xri     'u'
-            lbz     start_flag_uart
-            glo     r8
-            xri     'b'
-            lbz     start_flag_bitbang
-            lbr     start_no_flag       ; unrecognized letter: same
-                                        ; fallback
-
-start_flag_uart:
-            mov     rf, ms_io_mode
-            ldi     MS_IO_UART
+            ; not a flag: filenames start at argv[1]
+            mov     rf, ms_files_start
+            ldi     1
             str     rf
-            lbr     start_after_flag
+            lbr     start_have_files
 
-start_flag_bitbang:
-            mov     rf, ms_io_mode
-            ldi     MS_IO_BITBANG
-            str     rf
-
-start_after_flag:
-            ; a flag was consumed as argv[1] -- at least one filename
-            ; must remain (argc >= 3), starting at argv[2]
+start_after_flag1:
             glo     rc
             smi     3
-            lbnf    usage
+            lbnf    usage               ; only a flag, no filename
+
+            ; --- argv[2]: could be a SECOND flag or the first filename ---
+            mov     rb, ra
+            add16   rb, 4               ; RB = &argv[2]
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = argv[2]
+            mov     rf, rd
+            call    ms_try_flag
+            lbnf    start_after_flag2
+
+            ; not a flag: filenames start at argv[2]
             mov     rf, ms_files_start
             ldi     2
             str     rf
             lbr     start_have_files
 
-start_no_flag:
+start_after_flag2:
+            ; two flags already consumed -- at least one filename must
+            ; remain, starting at argv[3]
+            glo     rc
+            smi     4
+            lbnf    usage
             mov     rf, ms_files_start
-            ldi     1
+            ldi     3
             str     rf
 
 start_have_files:
@@ -234,14 +251,77 @@ start_success:
 
 usage:
             call    K_INMSG
-            db      "Usage: MS [-u|-b] <filename> [filename...]",13,10,0
+            db      "Usage: MS [-u|-b] [-v] <filename> [filename...]",13,10,0
             ldi     1
+            rtn
+
+; ms_try_flag: RF = a candidate argv token. If it's exactly "-u", "-b",
+; or "-v" (nothing more), applies it (sets ms_io_mode or ms_verbose)
+; and returns DF=0. Otherwise returns DF=1 with nothing changed -- the
+; caller then treats the token (and everything from here on) as
+; filenames instead. A repeated or contradictory flag (e.g. "-u -b")
+; is not specially rejected -- the last one applied simply wins,
+; matching MR's own established preference for falling back over
+; guessing/erroring on an unusual but harmless combination.
+; Modifies: RF, R8, R9.
+;------------------------------------------------------------------
+ms_try_flag:
+            ldn     rf
+            xri     '-'
+            lbnz    mtf_not_flag
+
+            mov     r8, rf
+            inc     r8
+            ldn     r8                  ; D = char[1]
+            plo     r9                  ; R9.0 = flag letter (temp)
+
+            inc     r8
+            ldn     r8                  ; D = char[2] -- must be NUL
+                                        ; for "-X" to be exactly this
+                                        ; whole token
+            lbnz    mtf_not_flag
+
+            glo     r9
+            xri     'u'
+            lbz     mtf_u
+            glo     r9
+            xri     'b'
+            lbz     mtf_b
+            glo     r9
+            xri     'v'
+            lbz     mtf_v
+            lbr     mtf_not_flag
+
+mtf_u:
+            mov     rf, ms_io_mode
+            ldi     MS_IO_UART
+            str     rf
+            clc
+            rtn
+
+mtf_b:
+            mov     rf, ms_io_mode
+            ldi     MS_IO_BITBANG
+            str     rf
+            clc
+            rtn
+
+mtf_v:
+            mov     rf, ms_verbose
+            ldi     1
+            str     rf
+            clc
+            rtn
+
+mtf_not_flag:
+            stc
             rtn
 
 ms_argv:        dw      0
 ms_argc:        db      0
 ms_files_start: db      0
 ms_io_mode:     db      0
+ms_verbose:     db      0
 
 ;==================================================================
 ; ms_session: send one or more files over the console/serial port,
@@ -447,6 +527,14 @@ mss_glob_done:
             lbr     mss_next
 
 mss_glob_bad_path:
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mgbp_skip_print     ; not verbose (default) --
+                                        ; nothing prints mid-session,
+                                        ; see this file's own header
+                                        ; comment; ms_err_count alone
+                                        ; still carries this forward
+
             call    K_INMSG
             db      "Source file not found: ",0
             mov     rf, ms_cur_arg
@@ -458,6 +546,7 @@ mss_glob_bad_path:
             call    K_MSG
             call    K_INMSG
             db      ".",13,10,0
+mgbp_skip_print:
             mov     rf, ms_err_count
             ldn     rf
             adi     1
@@ -503,8 +592,14 @@ mss_loop_done:
             lbz     mss_result_check
 
 mss_final_err:
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mfe_skip_print      ; not verbose -- nothing
+                                        ; prints mid-session
+
             call    K_INMSG
             db      "Protocol error: no final acknowledgment from host.",13,10,0
+mfe_skip_print:
             ldi     MSF_FATAL
             lbr     mss_summarize
 
@@ -621,8 +716,15 @@ ms_process_file:
 
             mov     rd, ms_fcb
             call    K_FILE_CLOSE
+
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mns_skip_print      ; not verbose -- nothing
+                                        ; prints mid-session
+
             call    K_INMSG
             db      "No response from host.",13,10,0
+mns_skip_print:
             ldi     MSF_FATAL
             rtn
 
@@ -724,18 +826,37 @@ mpf_data_eof:
 
             mov     rd, ms_fcb
             call    K_FILE_CLOSE
+
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mde_skip_print      ; not verbose (default) --
+                                        ; this is the one that actually
+                                        ; leaked onto a shared console/
+                                        ; wire (see this file's own
+                                        ; header comment): "Sent" ->
+                                        ; 'S','e' -> 0x5365 = 21349,
+                                        ; misread as the next chunk's
+                                        ; length field
+
             call    K_INMSG
             db      "Sent ",0
             mov     rf, ms_basename_buf
             call    K_MSG
             call    K_INMSG
             db      ".",13,10,0
+mde_skip_print:
             ldi     MSF_OK
             rtn
 
 mpf_read_err:
             mov     rd, ms_fcb
             call    K_FILE_CLOSE
+
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mre_skip_print      ; not verbose -- nothing
+                                        ; prints mid-session
+
             call    K_INMSG
             db      "Read error: ",0
             mov     rf, ms_cur_path
@@ -747,6 +868,7 @@ mpf_read_err:
             call    K_MSG
             call    K_INMSG
             db      ".",13,10,0
+mre_skip_print:
             ldi     MSF_FATAL           ; the receiver is already
                                         ; mid-file, expecting more
                                         ; data blocks we can no longer
@@ -762,12 +884,24 @@ mpf_read_err:
 mpf_fatal_close:
             mov     rd, ms_fcb
             call    K_FILE_CLOSE
+
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mfc_skip_print      ; not verbose -- nothing
+                                        ; prints mid-session
+
             call    K_INMSG
             db      "Protocol error talking to host.",13,10,0
+mfc_skip_print:
             ldi     MSF_FATAL
             rtn
 
 mpf_not_found:
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mnf_skip_print      ; not verbose -- nothing
+                                        ; prints mid-session
+
             call    K_INMSG
             db      "Not found: ",0
             mov     rf, ms_cur_path
@@ -779,10 +913,16 @@ mpf_not_found:
             call    K_MSG
             call    K_INMSG
             db      ".",13,10,0
+mnf_skip_print:
             ldi     MSF_LOCAL_ERR
             rtn
 
 mpf_is_dir:
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mid_skip_print      ; not verbose -- nothing
+                                        ; prints mid-session
+
             call    K_INMSG
             db      "Is a directory: ",0
             mov     rf, ms_cur_path
@@ -794,10 +934,16 @@ mpf_is_dir:
             call    K_MSG
             call    K_INMSG
             db      ".",13,10,0
+mid_skip_print:
             ldi     MSF_LOCAL_ERR
             rtn
 
 mpf_cannot_open:
+            mov     rf, ms_verbose
+            ldn     rf
+            lbz     mco_skip_print      ; not verbose -- nothing
+                                        ; prints mid-session
+
             call    K_INMSG
             db      "Cannot open ",0
             mov     rf, ms_cur_path
@@ -809,6 +955,7 @@ mpf_cannot_open:
             call    K_MSG
             call    K_INMSG
             db      ".",13,10,0
+mco_skip_print:
             ldi     MSF_LOCAL_ERR
             rtn
 

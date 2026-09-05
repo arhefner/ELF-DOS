@@ -204,7 +204,7 @@ computer running matching transfer software.
 | Command | Usage | What it does |
 |---|---|---|
 | `MR` | `MR [-u\|-b] [-v] [<destination>]` | Receives one or more files (the host decides how many). No destination given, or an existing directory, receives everything into that directory (or the current one) under each file's own name; any other name saves only the first file received, under that exact name. `-v` prints per-file progress messages; without it, `MR` stays silent until its final summary. |
-| `MS` | `MS [-u\|-b] <filename> [filename...]` | Sends one or more files, using the MAX protocol. Filenames may contain `*`/`?` wildcards. |
+| `MS` | `MS [-u\|-b] [-v] <filename> [filename...]` | Sends one or more files, using the MAX protocol. Filenames may contain `*`/`?` wildcards. `-v` prints per-file progress messages; without it, `MS` stays silent until its final summary. |
 | `YR` | `YR [-u\|-b] [-y]` | Receives one or more files in a batch, using the YMODEM protocol. |
 | `YS` | `YS [-u\|-b] [-y] <filename...>` | Sends one or more files in a batch, using the YMODEM protocol. |
 
@@ -219,12 +219,15 @@ commands on -- for example, watching debug output on the console while
 a transfer runs on the other port, or driving a transfer from a
 separate program instead of a terminal session.
 
-`MR` defaults to printing nothing until it's done, since its console and
-the transfer's own wire are frequently the same physical connection --
-progress text interleaved with protocol bytes on a shared line can be
-misread as part of the transfer itself. `-v` opts back into per-file
-progress messages when the console and transfer port are genuinely
-separate (or you're willing to accept the risk on a shared one).
+`MR` and `MS` both default to printing nothing until they're done, since
+their console and the transfer's own wire are frequently the same
+physical connection -- progress text interleaved with protocol bytes on
+a shared line can be misread as part of the transfer itself (a real
+failure mode: `MS`'s own "Sent `<name>`." message, if it leaked onto a
+shared wire, could be misread by the far end as the start of the next
+chunk's length field). `-v` opts back into per-file progress messages
+when the console and transfer port are genuinely separate (or you're
+willing to accept the risk on a shared one).
 
 `MR`/`MS`'s companion on the host side is `max-xfr` (`max-xfr -s
 <files...>` to send, `max-xfr -r [<destination>]` to receive) --
