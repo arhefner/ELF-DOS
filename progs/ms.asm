@@ -335,6 +335,27 @@ mss_loop:
             sm                          ; D = ms_argc - ms_i
             lbnf    mss_loop_done       ; ms_argc < ms_i: every
                                         ; argument handled
+            lbz     mss_loop_done       ; BUG-CLASS GUARD: ms_argc ==
+                                        ; ms_i is ALSO "every argument
+                                        ; handled" -- valid argv
+                                        ; indices only run 0..argc-1,
+                                        ; so ms_i == ms_argc is already
+                                        ; one PAST the last real
+                                        ; argument. Without this check
+                                        ; the loop ran exactly one
+                                        ; extra time, reading whatever
+                                        ; garbage followed the real
+                                        ; argv table and reporting it
+                                        ; as a phantom "Not found: ..."
+                                        ; file (found via real hardware
+                                        ; output, 2026-09-05: "ms -u
+                                        ; ihex.c" spuriously also
+                                        ; reported "Not found: .h.").
+                                        ; LBZ reads the SAME D value
+                                        ; LBNF just tested -- neither
+                                        ; instruction has any side
+                                        ; effect on D/DF, so this is
+                                        ; safe to check right after it.
 
             ; RD = argv[ms_i]
             mov     rf, ms_i
