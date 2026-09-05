@@ -1,7 +1,7 @@
 ;
 ; yr.asm - receive one or more files via YMODEM-CRC batch transfer
 ;
-; Usage: YR [-u|-b] [-y] [-q]
+; Usage: YR [-u|-b] [-y] [-q] [-v]
 ;
 ; Companion to a host-side YMODEM sender (e.g. "sz -b" from lrzsz), or
 ; to this project's own progs/ys.asm. Unlike MR (which receives a
@@ -20,9 +20,44 @@
 ;   -b          use the onboard bit-bang serial port directly
 ;               (f_bread/f_btype) instead, regardless of what the
 ;               console currently is.
-;   -y          overwrite existing files without asking.
-;   -q          quiet -- suppress the per-file progress line, print
-;               only the final summary.
+;   -y          overwrite existing files without asking. STRONGLY
+;               recommended whenever the console and transfer port
+;               might be the same physical wire (see MID-SESSION
+;               CONSOLE OUTPUT below) -- without it, a real overwrite
+;               prompts interactively, and both the prompt's own text
+;               and your typed answer travel over that same channel,
+;               right in the middle of an active YMODEM exchange.
+;   -q          quiet -- accepted for backward compatibility, but now
+;               a NO-OP: quiet is the default (see MID-SESSION CONSOLE
+;               OUTPUT below). Suppresses nothing that isn't already
+;               suppressed.
+;   -v          verbose -- opt IN to the per-file progress line;
+;               without it, YR prints nothing until its final summary.
+;
+; MID-SESSION CONSOLE OUTPUT IS OPT-IN, VIA -v (2026-09-06, found via a
+; real hardware bug in MS -- see progs/ms.asm's own header comment for
+; the full account, including the exact byte values involved). By
+; DEFAULT, YR prints NOTHING mid-batch: K_INMSG/K_MSG route through the
+; exact same physical channel ym_getbyte/ym_putbyte use for the
+; transfer itself whenever that channel is the console (the default,
+; no -u/-b case), and there is no ELF-DOS equivalent of a separate
+; stderr stream. A per-file message leaking onto a wire the sender is
+; actively reading from gets misread as protocol bytes -- this isn't
+; specific to YMODEM's own framing or to any one mode: -u/-b hit the
+; identical problem whenever their target happens to be the same
+; physical wire as the console, which there is no reliable way for a
+; userland program to detect. The two whole-batch summary lines
+; (yrb_done's "Transfer complete."/"...with errors.") are the one
+; exception, always printed regardless of -v: each is the FINAL thing
+; YR ever says, by which point the sender's own batch-close handshake
+; has already fully completed.
+;
+; THE OVERWRITE PROMPT ("File exists: <name>? (Y/N)") IS NOT, AND
+; CANNOT BE, COVERED BY -v/-q: it needs a real answer from a real
+; person, so there is no safe silent default to fall back to (always
+; overwrite risks real data loss; always skip is its own surprise).
+; -y is the actual answer for any run where the console and transfer
+; wire might be shared -- see its own entry above.
 ;
 ; DEVICE SELECTION (2026-09-01): matches progs/mr.asm/progs/ms.asm's
 ; own identical redesign (see either file's header comment for the
@@ -106,7 +141,11 @@ start:
             ldi     0
             str     rf
             mov     rf, yr_quiet
-            ldi     0
+            ldi     1                   ; default: quiet -- see this
+                                        ; file's own header comment for
+                                        ; why (console output and the
+                                        ; transfer's own wire are the
+                                        ; same channel by default)
             str     rf
 
             mov     rf, yr_i
@@ -157,7 +196,11 @@ parse_loop:
             lbz     pf_noask
             glo     r9
             xri     'q'
-            lbz     pf_quiet
+            lbz     pf_quiet            ; accepted, no-op -- quiet is
+                                        ; already the default
+            glo     r9
+            xri     'v'
+            lbz     pf_verbose
             lbr     usage               ; unrecognized flag letter
 
 pf_uart:
@@ -179,6 +222,12 @@ pf_quiet:
             mov     rf, yr_quiet
             ldi     1
             str     rf
+            lbr     pf_next
+
+pf_verbose:
+            mov     rf, yr_quiet
+            ldi     0
+            str     rf
 
 pf_next:
             mov     rf, yr_i
@@ -193,7 +242,7 @@ parse_done:
 
 usage:
             call    K_INMSG
-            db      "Usage: YR [-u|-b] [-y] [-q]",13,10,0
+            db      "Usage: YR [-u|-b] [-y] [-q] [-v]",13,10,0
             ldi     1
             rtn
 
@@ -277,14 +326,16 @@ yrb_done:
             ldn     rf
             lbnz    yrb_report_err
 
-            mov     rf, yr_quiet
-            ldn     rf
-            lbnz    yrb_ok_silent
-
-            call    K_INMSG
+            call    K_INMSG             ; always printed, regardless of
+                                        ; -v -- this is the final
+                                        ; summary, matching "Transfer
+                                        ; completed with errors." right
+                                        ; below (this used to be gated
+                                        ; behind -q, inconsistently --
+                                        ; fixed, see this file's own
+                                        ; header comment)
             db      "Transfer complete.",13,10,0
 
-yrb_ok_silent:
             ldi     0
             rtn
 

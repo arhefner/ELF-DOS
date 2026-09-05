@@ -11,8 +11,8 @@
 ; for the matching receive-side account of the whole protocol.
 ;
 ; Flags (must precede the filename list -- the first argv token that
-; isn't an exact "-u"/"-b"/"-k"/"-y"/"-q" match ends flag parsing and
-; starts the filename list; at least one filename is required):
+; isn't an exact "-u"/"-b"/"-k"/"-y"/"-q"/"-v" match ends flag parsing
+; and starts the filename list; at least one filename is required):
 ;   -u          use the disk-board UART directly (f_uread/f_utype)
 ;               instead of the console (see below).
 ;   -b          use the onboard bit-bang serial port directly
@@ -22,8 +22,13 @@
 ;               always 128 bytes regardless of this flag -- matches
 ;               standard YMODEM convention.
 ;   -y          accepted, but a NO-OP for YS -- see below.
-;   -q          quiet -- suppress the per-file progress line, print
-;               only the final summary.
+;   -q          quiet -- accepted for backward compatibility, but now
+;               a NO-OP: quiet is the default (see MID-SESSION CONSOLE
+;               OUTPUT below). Suppresses nothing that isn't already
+;               suppressed.
+;   -v          verbose -- opt IN to the per-file progress line and
+;               per-file error detail; without it, YS prints nothing
+;               until its final summary.
 ;
 ; -y is accepted for symmetry with YR (and with real DOS/Unix tools'
 ; own "-y"/"-f" force-overwrite conventions) but does nothing here:
@@ -31,6 +36,27 @@
 ; local file and so has something real to confirm, YS only ever READS
 ; local files to send -- there is nothing local for -y to protect.
 ; Confirmed with the user before implementation.
+;
+; MID-SESSION CONSOLE OUTPUT IS OPT-IN, VIA -v (2026-09-06, found via a
+; real hardware bug in MS -- see progs/ms.asm's own header comment for
+; the full account, including the exact byte values involved). By
+; DEFAULT, YS prints NOTHING mid-batch: K_INMSG/K_MSG route through the
+; exact same physical channel ym_getbyte/ym_putbyte use for the
+; transfer itself whenever that channel is the console (the default,
+; no -u/-b case), and there is no ELF-DOS equivalent of a separate
+; stderr stream. A per-file message leaking onto a wire the receiver
+; is actively reading from gets misread as protocol bytes -- this
+; isn't specific to YMODEM's own framing or to any one mode: -u/-b hit
+; the identical problem whenever their target happens to be the same
+; physical wire as the console, which there is no reliable way for a
+; userland program to detect. The three whole-batch summary lines
+; (ysrb_files_done's "Transfer complete."/"...with errors." and
+; ysrb_aborted's "Transfer aborted (protocol error).") are the one
+; exception, always printed regardless of -v: each is the FINAL thing
+; YS ever says, and every fatal exit already sends the receiver a
+; double-CAN abort signal first (unlike MS's own protocol, which has
+; no such signal) -- by the time any of these three lines runs, the
+; receiver has already been told, explicitly, to stop listening.
 ;
 ; DEVICE SELECTION (2026-09-01): matches progs/yr.asm's own identical
 ; redesign (see its header comment, or progs/mr.asm's, for the full
@@ -142,7 +168,11 @@ start:
             ldi     0
             str     rf
             mov     rf, ys_quiet
-            ldi     0
+            ldi     1                   ; default: quiet -- see this
+                                        ; file's own header comment for
+                                        ; why (console output and the
+                                        ; transfer's own wire are the
+                                        ; same channel by default)
             str     rf
 
             mov     rf, ys_i
@@ -203,7 +233,11 @@ flag_loop:
             lbz     pf_next             ; -y: accepted, no-op
             glo     r9
             xri     'q'
-            lbz     pf_quiet
+            lbz     pf_quiet            ; accepted, no-op -- quiet is
+                                        ; already the default
+            glo     r9
+            xri     'v'
+            lbz     pf_verbose
             lbr     files_start         ; unrecognized flag letter:
                                         ; treat as the first filename
 
@@ -225,6 +259,12 @@ pf_1024:
 pf_quiet:
             mov     rf, ys_quiet
             ldi     1
+            str     rf
+            lbr     pf_next
+
+pf_verbose:
+            mov     rf, ys_quiet
+            ldi     0
             str     rf
 
 pf_next:
@@ -264,7 +304,7 @@ files_start:
 
 usage:
             call    K_INMSG
-            db      "Usage: YS [-u|-b] [-k] [-y] [-q] <filename> [filename...]",13,10,0
+            db      "Usage: YS [-u|-b] [-k] [-y] [-q] [-v] <filename> [filename...]",13,10,0
             ldi     1
             rtn
 
@@ -395,6 +435,12 @@ ysrb_glob_done:
             lbr     ysrb_next
 
 ysrb_bad_path:
+            mov     rf, ys_quiet
+            ldn     rf
+            lbnz    ysrbp_skip_print    ; quiet (default) -- nothing
+                                        ; prints mid-session, see this
+                                        ; file's own header comment
+
             call    K_INMSG
             db      "Not found: ",0
             mov     rf, ys_cur_argtext
@@ -406,6 +452,7 @@ ysrb_bad_path:
             call    K_MSG
             call    K_INMSG
             db      13,10,0
+ysrbp_skip_print:
             mov     rf, ys_any_error
             ldi     $FF
             str     rf
@@ -626,16 +673,30 @@ ysof_close_fatal:
             rtn
 
 ysof_not_found:
+            mov     rf, ys_quiet
+            ldn     rf
+            lbnz    ysof_local_err_done ; quiet (default) -- nothing
+                                        ; prints mid-session, see this
+                                        ; file's own header comment
+
             call    K_INMSG
             db      "Not found: ",0
             lbr     ysof_local_err
 
 ysof_is_dir:
+            mov     rf, ys_quiet
+            ldn     rf
+            lbnz    ysof_local_err_done
+
             call    K_INMSG
             db      "Not a file: ",0
             lbr     ysof_local_err
 
 ysof_open_failed:
+            mov     rf, ys_quiet
+            ldn     rf
+            lbnz    ysof_local_err_done
+
             call    K_INMSG
             db      "Cannot open: ",0
 
@@ -649,6 +710,7 @@ ysof_local_err:
             call    K_MSG
             call    K_INMSG
             db      13,10,0
+ysof_local_err_done:
             mov     rf, ys_any_error
             ldi     $FF
             str     rf
