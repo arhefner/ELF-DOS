@@ -636,6 +636,9 @@ ysof_bn_force:
             ldi     0
             str     rb
 ysof_bn_copied:
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG: entering ys_wait_for_c (1st)",13,10,0
+
             call    ys_wait_for_c
             lbdf    ysof_close_fatal
 
@@ -726,6 +729,57 @@ ys_fcb:               ds      FCB_LEN
 ys_iobuf:             ds      FCB_IOBUF_LEN
 ys_statbuf:           ds      DIRENT_LEN
 
+; TEMPORARY DIAGNOSTIC: print D as 2 uppercase hex digits, no CR/LF.
+; Builds both digits into dbg_hex_buf first, then a SINGLE K_MSG call
+; -- not two separate K_TYPE calls with a register trusted to survive
+; the first one (this project's own gotcha #8 only proves R9 survives
+; f_msg/f_inmsg, never K_TYPE specifically -- see progs/ms.asm's own
+; git history for the real bug this exact shortcut caused there).
+; Modifies: everything.
+dbg_print_hex_byte:
+            plo     r9                  ; stash the byte
+            glo     r9
+            shr
+            shr
+            shr
+            shr                         ; D = high nibble
+            smi     10
+            lbnf    dphb_hi_digit
+            adi     'A'
+            lbr     dphb_hi_done
+dphb_hi_digit:
+            adi     10 + '0'
+dphb_hi_done:
+            plo     r8                  ; stash the ASCII digit via PLO
+                                        ; (doesn't touch D) before the
+                                        ; mov below clobbers it
+            mov     rf, dbg_hex_buf
+            glo     r8
+            str     rf
+            inc     rf
+
+            glo     r9
+            ani     $0f                 ; D = low nibble
+            smi     10
+            lbnf    dphb_lo_digit
+            adi     'A'
+            lbr     dphb_lo_done
+dphb_lo_digit:
+            adi     10 + '0'
+dphb_lo_done:
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf                  ; NUL-terminate
+
+            mov     rf, dbg_hex_buf
+            call    K_MSG
+            rtn
+
+dbg_saved_byte:      db      0
+dbg_hex_buf:         ds      3
+; END TEMPORARY DIAGNOSTIC
+
 ;==================================================================
 ; ys_wait_for_c: wait for the receiver's 'C' (CRC-mode probe),
 ; retrying (via ym_getbyte_timeout's own per-attempt poll budget) up
@@ -746,7 +800,7 @@ ywfc_wait:
             ldi     low YM_POLL_BUDGET
             plo     rd
             call    ym_getbyte_timeout
-            lbdf    ywfc_next_try       ; timeout
+            lbdf    ywfc_diag_timeout   ; TEMPORARY DIAGNOSTIC: timeout
 
             plo     r8
             glo     r8
@@ -758,13 +812,48 @@ ywfc_wait:
             xri     YM_C
             lbz     ywfc_got_c
 
-            lbr     ywfc_next_try       ; unrecognized byte: ignore
+            lbr     ywfc_diag_other     ; TEMPORARY DIAGNOSTIC:
+                                        ; unrecognized byte (was: lbr
+                                        ; ywfc_next_try directly)
+
+ywfc_diag_timeout:                     ; TEMPORARY DIAGNOSTIC
+            call    K_INMSG
+            db      "DBG timeout ",0
+            lbr     ywfc_next_try
+
+ywfc_diag_other:                       ; TEMPORARY DIAGNOSTIC
+            mov     rf, dbg_saved_byte
+            glo     r8
+            str     rf
+            call    K_INMSG
+            db      "DBG got=",0
+            mov     rf, dbg_saved_byte
+            ldn     rf
+            call    dbg_print_hex_byte
+            call    K_INMSG
+            db      " ",0
+            lbr     ywfc_next_try
 
 ywfc_next_try:
             mov     rf, ys_retry
             ldn     rf
             smi     1
-            str     rf
+            str     rf                  ; ys_retry updated in memory
+
+            ; TEMPORARY DIAGNOSTIC: print the retry counter after each
+            ; decrement (reloaded fresh from memory, not trusted in a
+            ; register across the prints below), to see whether this
+            ; loop actually terminates
+            call    K_INMSG
+            db      "DBG retry=",0
+            mov     rf, ys_retry
+            ldn     rf
+            call    dbg_print_hex_byte
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, ys_retry
+            ldn     rf
             lbz     ywfc_fatal
             lbr     ywfc_wait
 
