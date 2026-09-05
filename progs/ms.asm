@@ -695,6 +695,51 @@ mpf_data_loop:
                                         ; DF = 0/1
             lbdf    mpf_read_err
 
+            ; TEMPORARY DIAGNOSTIC: print a running chunk counter plus
+            ; the byte count K_FILE_READ actually returned, to confirm
+            ; whether the file-read step itself completes normally
+            ; (and quickly) for the chunk that later fails on the
+            ; wire, or whether the read itself is the real problem.
+            mov     rb, rc              ; stash RC -- fmt_size32
+                                        ; clobbers everything
+            mov     rd, dbg_chunk_num
+            ldn     rd
+            adi     1
+            str     rd
+            call    K_INMSG
+            db      "DBG rd#",0
+            mov     rf, dbg_chunk_num
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            ldi     0
+            phi     rd
+            ldi     0
+            plo     rd
+            mov     rf, ms_numbuf
+            call    fmt_size32
+            mov     rf, ms_numbuf
+            call    K_MSG
+            call    K_INMSG
+            db      " cnt=",0
+            ghi     rb
+            phi     r8
+            glo     rb
+            plo     r8
+            ldi     0
+            phi     rd
+            ldi     0
+            plo     rd
+            mov     rf, ms_numbuf
+            call    fmt_size32
+            mov     rf, ms_numbuf
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+            mov     rc, rb              ; restore RC
+            ; END TEMPORARY DIAGNOSTIC
+
             glo     rc
             lbnz    mpf_have_chunk
             ghi     rc
@@ -855,6 +900,15 @@ ms_send_block:
             call    ms_putbyte
 
             call    ms_getbyte              ; length ack
+            plo     r7                  ; TEMPORARY DIAGNOSTIC: stash
+                                        ; for print, restored below
+            call    K_INMSG
+            db      "L=",0
+            glo     r7
+            call    dbg_print_hex_byte
+            call    K_INMSG
+            db      " ",0
+            glo     r7                  ; END TEMPORARY DIAGNOSTIC
             xri     $aa
             lbnz    msb_err
 
@@ -878,6 +932,15 @@ ms_send_block:
             call    ms_sendbytes
 
             call    ms_getbyte              ; payload ack
+            plo     r7                  ; TEMPORARY DIAGNOSTIC: stash
+                                        ; for print, restored below
+            call    K_INMSG
+            db      "P=",0
+            glo     r7
+            call    dbg_print_hex_byte
+            call    K_INMSG
+            db      13,10,0
+            glo     r7                  ; END TEMPORARY DIAGNOSTIC
             xri     $aa
             lbnz    msb_err
 
@@ -887,6 +950,40 @@ ms_send_block:
 msb_err:
             stc
             rtn
+
+; TEMPORARY DIAGNOSTIC: print D as 2 uppercase hex digits via K_TYPE,
+; no CR/LF. Called from ms_send_block's two ack checks above to show
+; the actual byte value received instead of $AA. R9 used as scratch --
+; free at both call sites (nothing else is live there).
+; Modifies: everything.
+dbg_print_hex_byte:
+            plo     r9
+            glo     r9
+            shr
+            shr
+            shr
+            shr                         ; D = high nibble
+            smi     10
+            lbnf    dphb_hi_digit
+            adi     'A'
+            lbr     dphb_hi_done
+dphb_hi_digit:
+            adi     10 + '0'
+dphb_hi_done:
+            call    K_TYPE
+
+            glo     r9
+            ani     $0f                 ; D = low nibble
+            smi     10
+            lbnf    dphb_lo_digit
+            adi     'A'
+            lbr     dphb_lo_done
+dphb_lo_digit:
+            adi     10 + '0'
+dphb_lo_done:
+            call    K_TYPE
+            rtn
+; END TEMPORARY DIAGNOSTIC
 
 ;------------------------------------------------------------------
 ; ms_send_end_marker: send a zero-length chunk (2-byte length=0) and
@@ -1087,6 +1184,7 @@ mpb_bitbang:
             call    f_btype
             rtn
 
+dbg_chunk_num:       db      0           ; TEMPORARY DIAGNOSTIC
 ms_ok_count:         db      0
 ms_err_count:        db      0
 ms_handshake_done:   db      0
