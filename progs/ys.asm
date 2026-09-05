@@ -795,9 +795,14 @@ ys_wait_for_c:
             str     rf
 
 ywfc_wait:
-            ldi     high YM_POLL_BUDGET
+            ; TEMPORARY DIAGNOSTIC: 30 instead of the real
+            ; YM_POLL_BUDGET (20000), so lib/ymodem.asm's own new
+            ; every-iteration trace stays observable instead of
+            ; flooding the console/taking a long time -- restore the
+            ; real constant once this round is done.
+            ldi     0
             phi     rd
-            ldi     low YM_POLL_BUDGET
+            ldi     30
             plo     rd
             call    ym_getbyte_timeout
             lbdf    ywfc_diag_timeout   ; TEMPORARY DIAGNOSTIC: timeout

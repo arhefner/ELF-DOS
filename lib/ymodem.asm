@@ -498,29 +498,20 @@ ygbt_poll:
             rtn
 
 ygbt_have_budget:
-            ; TEMPORARY DIAGNOSTIC: trace the very first f_utest call
-            ; only (guarded by ygbt_diag_done), to see whether it ever
-            ; returns at all -- found via a real hardware hang
-            ; (progs/ys.asm's "ys -u" against a real rb receiver never
-            ; completing its handshake, stuck before ever reaching any
-            ; of ys_wait_for_c's own diagnostics, i.e. stuck inside
-            ; THIS call on its very first invocation).
-            mov     rf, ygbt_diag_done
-            ldn     rf
-            lbnz    ygbt_diag_normal    ; already traced once
-
-            ldi     1
-            str     rf
-
-            ; TEMPORARY DIAGNOSTIC BUG FIX: RD (the poll budget) was
-            ; never saved across the K_INMSG/K_TYPE calls below, which
-            ; this file's OWN header comment already says can never be
-            ; trusted to preserve a register -- found the hard way (a
-            ; second hardware round showed f_utest correctly returning
-            ; ready=0, yet ys_wait_for_c's own "DBG timeout" never
-            ; printing at all afterward, meaning this poll loop never
-            ; actually returned). Stash it to memory now, reload fresh
-            ; right before it's used again below.
+            ; TEMPORARY DIAGNOSTIC (round 2): the one-shot trace (fixed
+            ; in the previous commit) proved f_utest itself returns
+            ; correctly on the very first call (ready=0), yet the hang
+            ; persisted identically afterward -- meaning either a
+            ; LATER iteration is where it actually gets stuck, or
+            ; something about repeated polling itself is the problem.
+            ; Trace EVERY iteration this time (not just the first),
+            ; printing the current RD (poll budget) BEFORE stashing it
+            ; to memory (never trusted in a register across the
+            ; K_INMSG/K_TYPE calls below -- see the previous round's
+            ; own bug for why). The caller (ys.asm's ys_wait_for_c) has
+            ; been temporarily given a MUCH smaller poll budget for
+            ; this round specifically so this doesn't flood the
+            ; console or take a long time to observe.
             mov     rf, ygbt_diag_rd_hi
             ghi     rd
             str     rf
@@ -529,7 +520,15 @@ ygbt_have_budget:
             str     rf
 
             call    K_INMSG
-            db      "DBG before f_utest",13,10,0
+            db      "DBG rd=",0
+            mov     rf, ygbt_diag_rd_hi
+            ldn     rf
+            call    ygbt_diag_hex
+            mov     rf, ygbt_diag_rd_lo
+            ldn     rf
+            call    ygbt_diag_hex
+            call    K_INMSG
+            db      " before f_utest",13,10,0
 
             call    f_utest             ; DF = 1: a byte is waiting
 
@@ -565,11 +564,53 @@ ygbt_have_budget:
             dec     rd
             lbr     ygbt_poll
 
-ygbt_diag_normal:
-            call    f_utest             ; DF = 1: a byte is waiting
-            lbdf    ygbt_ready
-            dec     rd
-            lbr     ygbt_poll
+; TEMPORARY DIAGNOSTIC: print D as 2 uppercase hex digits, no CR/LF.
+; Builds both digits into ygbt_diag_hexbuf first, then a SINGLE K_MSG
+; call -- NOT two separate K_TYPE calls trusting R9 to survive the
+; first one (this project's own gotcha #8 only proves R9 survives
+; f_msg/f_inmsg, never K_TYPE -- caught this exact mistake, self-
+; repeated here, via progs/ms.asm's own earlier bug this same
+; session before it ever reached hardware this time).
+; Modifies: everything.
+ygbt_diag_hex:
+            plo     r9                  ; stash the byte
+            glo     r9
+            shr
+            shr
+            shr
+            shr                         ; D = high nibble
+            smi     10
+            lbnf    ygdh_hi_digit
+            adi     'A'
+            lbr     ygdh_hi_done
+ygdh_hi_digit:
+            adi     10 + '0'
+ygdh_hi_done:
+            plo     r8                  ; stash the ASCII digit via PLO
+                                        ; (doesn't touch D) before the
+                                        ; mov below clobbers it
+            mov     rf, ygbt_diag_hexbuf
+            glo     r8
+            str     rf
+            inc     rf
+
+            glo     r9
+            ani     $0f                 ; D = low nibble
+            smi     10
+            lbnf    ygdh_lo_digit
+            adi     'A'
+            lbr     ygdh_lo_done
+ygdh_lo_digit:
+            adi     10 + '0'
+ygdh_lo_done:
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf                  ; NUL-terminate
+
+            mov     rf, ygbt_diag_hexbuf
+            call    K_MSG
+            rtn
 
 ygbt_ready:
             call    f_uread
@@ -581,10 +622,10 @@ ygbt_bitbang:
             clc
             rtn
 
-ygbt_diag_done:      db      0           ; TEMPORARY DIAGNOSTIC
 ygbt_diag_ready:     db      0           ; TEMPORARY DIAGNOSTIC
 ygbt_diag_rd_hi:     db      0           ; TEMPORARY DIAGNOSTIC
 ygbt_diag_rd_lo:     db      0           ; TEMPORARY DIAGNOSTIC
+ygbt_diag_hexbuf:    ds      3           ; TEMPORARY DIAGNOSTIC
             endp
 
 ;------------------------------------------------------------------
