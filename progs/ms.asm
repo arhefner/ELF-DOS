@@ -960,12 +960,6 @@ ms_send_block:
                                         ; COUNT-1
             call    ms_sendbytes
 
-            call    dbg_delay           ; TEMPORARY DIAGNOSTIC: see if
-                                        ; the wire needs to settle
-                                        ; after a long transmit burst
-                                        ; before it's safe to start
-                                        ; polling for the payload ack
-
             call    ms_getbyte              ; payload ack
             plo     r9                  ; TEMPORARY DIAGNOSTIC: same
                                         ; memory-based stash as the
@@ -1004,30 +998,6 @@ msb_err:
 ; only has to survive across pure arithmetic (no calls) between the
 ; two digit computations, which is always safe.
 ; Modifies: everything.
-; TEMPORARY DIAGNOSTIC: burn roughly 255*255 = 65025 inner-loop
-; iterations (a very rough guess at ~tens-to-hundreds of ms, depending
-; on the real CPU clock -- not calibrated to any known value). Only
-; R8/R9's LOW bytes are ever compared for zero, so their unspecified
-; HIGH bytes (never initialized here) can't affect the iteration count
-; -- each loop counts its own low byte down from $FF to $00 and stops,
-; regardless of what garbage happens to be in the high byte.
-; Modifies: everything.
-dbg_delay:
-            ldi     $ff
-            plo     r8
-dbg_delay_outer:
-            ldi     $ff
-            plo     r9
-dbg_delay_inner:
-            dec     r9
-            glo     r9
-            lbnz    dbg_delay_inner
-            dec     r8
-            glo     r8
-            lbnz    dbg_delay_outer
-            rtn
-; END TEMPORARY DIAGNOSTIC
-
 dbg_print_hex_byte:
             plo     r9                  ; stash the byte
             glo     r9
