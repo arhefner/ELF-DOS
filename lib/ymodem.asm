@@ -498,6 +498,52 @@ ygbt_poll:
             rtn
 
 ygbt_have_budget:
+            ; TEMPORARY DIAGNOSTIC: trace the very first f_utest call
+            ; only (guarded by ygbt_diag_done), to see whether it ever
+            ; returns at all -- found via a real hardware hang
+            ; (progs/ys.asm's "ys -u" against a real rb receiver never
+            ; completing its handshake, stuck before ever reaching any
+            ; of ys_wait_for_c's own diagnostics, i.e. stuck inside
+            ; THIS call on its very first invocation).
+            mov     rf, ygbt_diag_done
+            ldn     rf
+            lbnz    ygbt_diag_normal    ; already traced once
+
+            ldi     1
+            str     rf
+
+            call    K_INMSG
+            db      "DBG before f_utest",13,10,0
+
+            call    f_utest             ; DF = 1: a byte is waiting
+
+            ldi     0                   ; materialize DF into D (via
+            shlc                        ; the standard idiom) BEFORE
+                                        ; the prints below can clobber
+                                        ; it
+            plo     r8                  ; stash via PLO (doesn't touch
+                                        ; D) before the mov below
+                                        ; clobbers it (gotcha #4)
+            mov     rf, ygbt_diag_ready
+            glo     r8
+            str     rf
+
+            call    K_INMSG
+            db      "DBG after f_utest, ready=",0
+            mov     rf, ygbt_diag_ready
+            ldn     rf
+            adi     '0'
+            call    K_TYPE
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, ygbt_diag_ready
+            ldn     rf
+            lbnz    ygbt_ready
+            dec     rd
+            lbr     ygbt_poll
+
+ygbt_diag_normal:
             call    f_utest             ; DF = 1: a byte is waiting
             lbdf    ygbt_ready
             dec     rd
@@ -512,6 +558,9 @@ ygbt_bitbang:
             call    f_bread
             clc
             rtn
+
+ygbt_diag_done:      db      0           ; TEMPORARY DIAGNOSTIC
+ygbt_diag_ready:     db      0           ; TEMPORARY DIAGNOSTIC
             endp
 
 ;------------------------------------------------------------------
