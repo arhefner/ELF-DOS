@@ -90,6 +90,32 @@ crc16_loop:
             lbz     crc16_done
 crc16_have_byte:
             lda     rf                  ; D = next byte, RF++
+            dec     rc                  ; REAL BUG FIX: RC was never
+                                        ; decremented anywhere in this
+                                        ; loop -- crc16_loop's own exit
+                                        ; check (ghi rc/lbnz .. glo rc/
+                                        ; lbz crc16_done) tested the
+                                        ; SAME, never-changing RC value
+                                        ; forever, an unconditional
+                                        ; infinite loop for any nonzero
+                                        ; starting count. Present since
+                                        ; this routine's very first
+                                        ; commit (fdccc3c) -- this is
+                                        ; the actual root cause of the
+                                        ; multi-round "ys hangs" hunt
+                                        ; (yr1.txt-yr8.txt): every
+                                        ; earlier hang report was really
+                                        ; this loop spinning forever the
+                                        ; first time ys_send_header
+                                        ; reached its own call to
+                                        ; ym_crc16, right after "DBG:blk"
+                                        ; printed and before "DBG:crc"
+                                        ; ever could. DEC is a native
+                                        ; 1802 16-bit register-pair
+                                        ; decrement (doesn't touch D/DF),
+                                        ; matching the same idiom
+                                        ; already used elsewhere in this
+                                        ; file's own byte-counted loops.
             plo     r8                  ; R8.0 = byte (stash -- the
                                         ; ghi/str below need D free)
             ghi     rd
