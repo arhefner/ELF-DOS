@@ -34,10 +34,38 @@ YM_BLKLEN_1024: equ     1024
 ; bang (-b) mode has no non-blocking "byte waiting" primitive at all,
 ; so ym_getbyte_timeout just blocks there regardless of these budgets.
 ; YM_POLL_BUDGET is an iteration count, not a calibrated wall-clock
-; time -- deliberately generous (a real hardware round may want to
-; retune it once its actual real-world duration is known).
+; time.
+;
+; YM_HANDSHAKE_TRIES raised 15->255 (2026-09-06), the real fix for a
+; hardware-found bug: with a real human driving a terminal program's
+; own upload menu (e.g. minicom's Ctrl-A/S -> ymodem -> select file),
+; there's a genuine 5-15+ second gap between starting YR and the
+; sender actually beginning to transmit -- confirmed by the user's own
+; timing report. The OLD 15-try handshake window (no longer padded out
+; by per-iteration diagnostic printing, once that was all stripped
+; out this same session) apparently completes in well under that real-
+; world delay, so YR gave up, printed "Transfer completed with
+; errors." and returned to the shell -- and since the console and the
+; transfer share the same physical wire by default, both that message
+; and the shell's own next prompt leaked onto the wire right as
+; minicom's sender was finally starting, confusing it (matches the
+; user's own report exactly: minicom's "Got 54 for sector ACK" is
+; 0x54='T', the first byte of "Transfer..."; "Got 3a for sector ACK"
+; is 0x3A=':', the second byte of the shell's own "C:/> " prompt).
+; 255 is the maximum representable in the single-byte "ldi
+; YM_HANDSHAKE_TRIES" load every use site does -- raising it further
+; would need code changes (a 16-bit counter), not just this constant.
+; This is a real ~17x increase in the total handshake window with
+; ZERO change to how often a 'C' probe is actually sent (YM_POLL_BUDGET
+; is unchanged), so a sender that's already listening sees probes at
+; exactly the same cadence as before -- only genuinely patient waiting
+; for a slow-to-start human is extended. Strictly safe for YS's own
+; already-hardware-confirmed behavior too: a real early success still
+; exits this loop immediately regardless of how high the ceiling is.
 YM_POLL_BUDGET:     equ     20000       ; per-attempt poll budget
-YM_HANDSHAKE_TRIES: equ     15          ; times to (re)send 'C' before
-                                        ; giving up on a file/batch
+YM_HANDSHAKE_TRIES: equ     255         ; times to (re)send 'C' before
+                                        ; giving up on a file/batch --
+                                        ; max representable via a
+                                        ; single-byte ldi (see above)
 YM_BLOCK_TRIES:     equ     10          ; times to NAK-and-retry one
                                         ; bad data block before giving up
