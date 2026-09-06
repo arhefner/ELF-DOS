@@ -955,12 +955,23 @@ ysh_have_block:
             str     rf
 
 ysh_send_attempt:
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG:attempt",13,10,0
+
             ldi     YM_SOH
             call    ym_putbyte
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG:soh",13,10,0
+
             ldi     0
             call    ym_putbyte          ; blockno = 0
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG:bn",13,10,0
+
             ldi     255
             call    ym_putbyte          ; ~blockno = $FF
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG:bnc",13,10,0
 
             mov     rf, ys_block_buf
             ldi     127
@@ -968,6 +979,8 @@ ysh_send_attempt:
             ldi     0
             phi     rc
             call    ym_send_block
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG:blk",13,10,0
 
             mov     rf, ys_block_buf
             ldi     0
@@ -991,12 +1004,20 @@ ysh_send_attempt:
             glo     rd
             str     rf
 
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG:crc",13,10,0
+
             mov     rf, ys_crc_hi
             ldn     rf
             call    ym_putbyte
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG:crchi",13,10,0
+
             mov     rf, ys_crc_lo
             ldn     rf
             call    ym_putbyte
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG:crclo",13,10,0
 
             ; TEMPORARY DIAGNOSTIC: shrunk to 30 (matching ys_wait_for_c's
             ; own temporary shrink) instead of the real YM_POLL_BUDGET
