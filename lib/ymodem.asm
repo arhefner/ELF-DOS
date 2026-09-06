@@ -641,25 +641,44 @@ ygbt_ready:
             ; from BIOS source alone -- stash D immediately via PLO,
             ; which doesn't touch D, before the K_INMSG call below
             ; clobbers it).
-            plo     r8
+            ;
+            ; SECOND BUG FIX (a register collision, not the D-not-
+            ; restored bug this comment used to describe): R8 is NOT
+            ; safe to stash the byte in here -- ygbt_diag_hex uses R8
+            ; internally (PLO R8 for the high-nibble ASCII digit), so a
+            ; register stash in R8 gets silently overwritten by
+            ; ygbt_diag_hex's own return value. Found via a real
+            ; hardware mismatch: byte=0x43 printed correctly here, but
+            ; the caller's own diagnostic saw "got=34" (0x34 = ASCII
+            ; '4' = exactly the high-nibble digit ygbt_diag_hex computes
+            ; for 0x43) -- and separately byte=0x08 -> "got=30" (0x30 =
+            ; ASCII '0' = the high-nibble digit for 0x08), both
+            ; confirming R8 held ygbt_diag_hex's own leftover digit
+            ; character, not the original byte.
+            ;
+            ; Fixed by using R9 instead: ygbt_diag_hex's OWN first
+            ; instruction is "plo r9" (re-stashing the identical
+            ; incoming byte), and nothing in that routine ever writes R9
+            ; again afterward (only GLO R9 reads, never PLO/PHI R9) --
+            ; so R9 comes back out of ygbt_diag_hex still holding the
+            ; original byte, surviving even its own final K_MSG call
+            ; (R9 is already proven safe across f_msg/f_inmsg/K_MSG).
+            ; R9 is unused anywhere else in ym_getbyte_timeout up to
+            ; this point, confirmed by reading the whole proc above.
+            plo     r9
 
             call    K_INMSG
             db      "DBG f_uread returned, byte=",0
-            glo     r8
-            call    ygbt_diag_hex       ; takes D, prints internally
+            glo     r9
+            call    ygbt_diag_hex       ; takes D, prints internally;
+                                        ; R9 survives (see comment above)
             call    K_INMSG
             db      13,10,0
 
-            ; TEMPORARY DIAGNOSTIC BUG FIX: this proc's own documented
-            ; contract is "D = byte read", but D was never restored
-            ; from R8 after the prints above -- the caller was
-            ; receiving whatever K_INMSG's own last call happened to
-            ; leave in D instead of the real byte (found via a real
-            ; hardware mismatch: "byte=43" printed here, correctly,
-            ; but ys_wait_for_c's own very next diagnostic saw "got=52"
-            ; for the SAME byte -- confirms f_uread itself is correct,
-            ; the bug is purely in this diagnostic's own return value).
-            glo     r8
+            ; This proc's own documented contract is "D = byte read" --
+            ; restore it fresh from R9 (see above), not from whatever
+            ; K_INMSG's own last call happened to leave in D.
+            glo     r9
 
             clc
             rtn
