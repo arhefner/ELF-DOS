@@ -705,6 +705,51 @@ ysb_bitbang:
             endp
 
 ;------------------------------------------------------------------
+; ym_settle_delay: a plain CPU busy-wait, no I/O of any kind -- lets a
+; host-side external-protocol launcher (e.g. minicom's own sb/rb
+; subprocess) finish exiting and the terminal program resume normal
+; display BEFORE any further console text is sent. Found via a real
+; hardware bug (2026-09-06): yr's own final summary message ("Transfer
+; complete.") had its first several characters silently lost when
+; driven through minicom's own ymodem-upload feature over the hardware
+; UART -- minicom hadn't yet noticed its own sb subprocess had exited
+; and switched back to displaying incoming bytes normally by the time
+; yr started printing, so those early bytes landed in a dead zone
+; (this is purely a host-side display race -- the file transfer itself
+; is already fully complete and correct by this point; only the
+; cosmetic summary text was at risk).
+;
+; Deliberately a PURE CPU delay, not an I/O-based one, since it needs
+; to behave identically regardless of console/UART/bitbang mode -- none
+; of the three share a common I/O-based timing primitive (only UART
+; mode has f_utest at all), but a plain register countdown works
+; identically in all three.
+;
+; YM_SETTLE_COUNT is an iteration count, not a calibrated wall-clock
+; time -- picked as a reasonable guess (matching this file's own
+; existing YM_POLL_BUDGET precedent, same order of magnitude) since no
+; timing reference is available to calibrate it against; may need
+; retuning once its actual real-world duration on real hardware is
+; known.
+; Modifies: RD (and D, DF)
+;------------------------------------------------------------------
+YM_SETTLE_COUNT:    equ     20000
+
+            proc    ym_settle_delay
+            ldi     high YM_SETTLE_COUNT
+            phi     rd
+            ldi     low YM_SETTLE_COUNT
+            plo     rd
+ysd_loop:
+            dec     rd
+            ghi     rd
+            lbnz    ysd_loop
+            glo     rd
+            lbnz    ysd_loop
+            rtn
+            endp
+
+;------------------------------------------------------------------
 ; Shared data
 ;------------------------------------------------------------------
             proc    _ymodem_data

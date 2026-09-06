@@ -113,6 +113,7 @@
             extrn   ym_putbyte
             extrn   ym_recv_block
             extrn   ym_io_mode
+            extrn   ym_settle_delay
 
 ; yr_get_header's own result codes
 YR_HDR_OK:      equ     0           ; got a real file header
@@ -322,6 +323,16 @@ yrb_fatal:
             str     rf
 
 yrb_done:
+            ; REAL HARDWARE FIX (2026-09-06): let the host's own
+            ; external-protocol launcher (e.g. minicom's sb subprocess)
+            ; finish exiting and resume normal terminal display before
+            ; sending either summary message below -- see
+            ; ym_settle_delay's own header comment in lib/ymodem.asm for
+            ; the full story (the transfer itself is already complete
+            ; and correct by this point; only this cosmetic text was at
+            ; risk of landing in the host's own display dead zone).
+            call    ym_settle_delay
+
             mov     rf, yr_any_error
             ldn     rf
             lbnz    yrb_report_err

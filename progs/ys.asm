@@ -131,6 +131,7 @@
             extrn   ym_putbyte
             extrn   ym_send_block
             extrn   ym_io_mode
+            extrn   ym_settle_delay
 
             extrn   is_glob
             extrn   glob_init
@@ -500,6 +501,13 @@ ysrb_files_done:
             ldn     rf
             lbnz    ysrb_ok_silent
 
+            ; REAL HARDWARE FIX (2026-09-06, matching yr.asm's own
+            ; identical fix -- see ym_settle_delay's own header comment
+            ; in lib/ymodem.asm for the full story): let the host's own
+            ; external-protocol launcher (e.g. minicom's rb subprocess)
+            ; finish exiting and resume normal terminal display before
+            ; sending this cosmetic summary text.
+            call    ym_settle_delay
             call    K_INMSG
             db      "Transfer complete.",13,10,0
 
@@ -508,12 +516,16 @@ ysrb_ok_silent:
             rtn
 
 ysrb_report_err:
+            call    ym_settle_delay    ; see ysrb_ok_silent's own
+                                        ; comment above
             call    K_INMSG
             db      "Transfer completed with errors.",13,10,0
             ldi     1
             rtn
 
 ysrb_aborted:
+            call    ym_settle_delay    ; see ysrb_ok_silent's own
+                                        ; comment above
             call    K_INMSG
             db      "Transfer aborted (protocol error).",13,10,0
             ldi     1
