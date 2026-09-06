@@ -998,12 +998,27 @@ ysh_send_attempt:
             ldn     rf
             call    ym_putbyte
 
-            ldi     high YM_POLL_BUDGET
+            ; TEMPORARY DIAGNOSTIC: shrunk to 30 (matching ys_wait_for_c's
+            ; own temporary shrink) instead of the real YM_POLL_BUDGET
+            ; (20000) -- ym_getbyte_timeout's own every-iteration trace
+            ; would otherwise flood the console for a long time before
+            ; ever timing out, which is indistinguishable from a real
+            ; hang. Restore the real constant once this round is done.
+            ldi     0
             phi     rd
-            ldi     low YM_POLL_BUDGET
+            ldi     30
             plo     rd
             call    ym_getbyte_timeout
-            lbdf    ysh_retry           ; timeout
+            lbdf    ysh_diag_timeout    ; TEMPORARY DIAGNOSTIC: timeout
+
+            plo     r9
+            call    K_INMSG             ; TEMPORARY DIAGNOSTIC
+            db      "DBG header-ack byte=",0
+            glo     r9
+            call    dbg_print_hex_byte
+            call    K_INMSG
+            db      13,10,0
+            glo     r9
 
             plo     r8
             glo     r8
@@ -1013,6 +1028,14 @@ ysh_send_attempt:
             glo     r8
             xri     YM_CAN
             lbz     ysh_fatal_no_can
+
+            lbr     ysh_retry           ; TEMPORARY DIAGNOSTIC: was a
+                                        ; fallthrough into ysh_retry,
+                                        ; now an explicit branch since
+                                        ; ysh_diag_timeout sits between
+ysh_diag_timeout:                      ; TEMPORARY DIAGNOSTIC
+            call    K_INMSG
+            db      "DBG header-ack timeout",13,10,0
 
             ; NAK or anything else: retry (resend the same header)
 ysh_retry:
