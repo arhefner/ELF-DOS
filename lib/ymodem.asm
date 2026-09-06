@@ -538,174 +538,27 @@ ygbt_poll:
             rtn
 
 ygbt_have_budget:
-            ; TEMPORARY DIAGNOSTIC (round 2): the one-shot trace (fixed
-            ; in the previous commit) proved f_utest itself returns
-            ; correctly on the very first call (ready=0), yet the hang
-            ; persisted identically afterward -- meaning either a
-            ; LATER iteration is where it actually gets stuck, or
-            ; something about repeated polling itself is the problem.
-            ; Trace EVERY iteration this time (not just the first),
-            ; printing the current RD (poll budget) BEFORE stashing it
-            ; to memory (never trusted in a register across the
-            ; K_INMSG/K_TYPE calls below -- see the previous round's
-            ; own bug for why). The caller (ys.asm's ys_wait_for_c) has
-            ; been temporarily given a MUCH smaller poll budget for
-            ; this round specifically so this doesn't flood the
-            ; console or take a long time to observe.
-            mov     rf, ygbt_diag_rd_hi
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
-
-            call    K_INMSG
-            db      "DBG rd=",0
-            mov     rf, ygbt_diag_rd_hi
-            ldn     rf
-            call    ygbt_diag_hex
-            mov     rf, ygbt_diag_rd_lo
-            ldn     rf
-            call    ygbt_diag_hex
-            call    K_INMSG
-            db      " before f_utest",13,10,0
-
             call    f_utest             ; DF = 1: a byte is waiting
-
-            ldi     0                   ; materialize DF into D (via
-            shlc                        ; the standard idiom) BEFORE
-                                        ; the prints below can clobber
-                                        ; it
-            plo     r8                  ; stash via PLO (doesn't touch
-                                        ; D) before the mov below
-                                        ; clobbers it (gotcha #4)
-            mov     rf, ygbt_diag_ready
-            glo     r8
-            str     rf
-
-            call    K_INMSG
-            db      "DBG after f_utest, ready=",0
-            mov     rf, ygbt_diag_ready
-            ldn     rf
-            adi     '0'
-            call    K_TYPE
-            call    K_INMSG
-            db      13,10,0
-
-            mov     rf, ygbt_diag_ready
-            ldn     rf
-            lbnz    ygbt_ready
-
-            mov     rf, ygbt_diag_rd_hi ; restore RD fresh from memory
-            lda     rf                  ; -- never trusted in a
-            phi     rd                  ; register across the prints
-            ldn     rf                  ; above
-            plo     rd
+            lbdf    ygbt_ready
             dec     rd
             lbr     ygbt_poll
 
-; TEMPORARY DIAGNOSTIC: print D as 2 uppercase hex digits, no CR/LF.
-; Builds both digits into ygbt_diag_hexbuf first, then a SINGLE K_MSG
-; call -- NOT two separate K_TYPE calls trusting R9 to survive the
-; first one (this project's own gotcha #8 only proves R9 survives
-; f_msg/f_inmsg, never K_TYPE -- caught this exact mistake, self-
-; repeated here, via progs/ms.asm's own earlier bug this same
-; session before it ever reached hardware this time).
-; Modifies: everything.
-ygbt_diag_hex:
-            plo     r9                  ; stash the byte
-            glo     r9
-            shr
-            shr
-            shr
-            shr                         ; D = high nibble
-            smi     10
-            lbnf    ygdh_hi_digit
-            adi     'A'
-            lbr     ygdh_hi_done
-ygdh_hi_digit:
-            adi     10 + '0'
-ygdh_hi_done:
-            plo     r8                  ; stash the ASCII digit via PLO
-                                        ; (doesn't touch D) before the
-                                        ; mov below clobbers it
-            mov     rf, ygbt_diag_hexbuf
-            glo     r8
-            str     rf
-            inc     rf
-
-            glo     r9
-            ani     $0f                 ; D = low nibble
-            smi     10
-            lbnf    ygdh_lo_digit
-            adi     'A'
-            lbr     ygdh_lo_done
-ygdh_lo_digit:
-            adi     10 + '0'
-ygdh_lo_done:
-            str     rf
-            inc     rf
-            ldi     0
-            str     rf                  ; NUL-terminate
-
-            mov     rf, ygbt_diag_hexbuf
-            call    K_MSG
-            rtn
-
 ygbt_ready:
-            ; REAL BUG FIX -- see ym_getbyte's own identical comment
-            ; above for the full explanation (f_uread's echo-flag check
-            ; via RE's high byte, never initialized, could fall into an
-            ; unbounded wait-for-transmit-ready loop).
+            ; REAL BUG FIX: f_uread's own echo-flag check (via RE's high
+            ; byte) was never initialized by any caller in this file --
+            ; if that byte happened to already have bit 0 set from
+            ; whatever last used RE, f_uread would take its internal
+            ; echo path, which falls into utype/uecho's own "wait for
+            ; transmit-ready" loop with NO timeout at all, an
+            ; unconditional block. Neither f_uread nor f_bread ever
+            ; WRITE RE's high byte (only RE.0, the received byte) -- so
+            ; it's a pure caller-input flag that must be cleared before
+            ; use. Found and confirmed via mbios.asm/fast_uart4000.asm's
+            ; own real BIOS source, and confirmed fixed on hardware
+            ; (f_uread reliably returns the real byte read, every time).
             ldi     0
             phi     re
             call    f_uread
-
-            ; TEMPORARY DIAGNOSTIC: confirm f_uread itself actually
-            ; returns at all (the RE fix didn't resolve the hang, so
-            ; this checks directly rather than continuing to reason
-            ; from BIOS source alone -- stash D immediately via PLO,
-            ; which doesn't touch D, before the K_INMSG call below
-            ; clobbers it).
-            ;
-            ; SECOND BUG FIX (a register collision, not the D-not-
-            ; restored bug this comment used to describe): R8 is NOT
-            ; safe to stash the byte in here -- ygbt_diag_hex uses R8
-            ; internally (PLO R8 for the high-nibble ASCII digit), so a
-            ; register stash in R8 gets silently overwritten by
-            ; ygbt_diag_hex's own return value. Found via a real
-            ; hardware mismatch: byte=0x43 printed correctly here, but
-            ; the caller's own diagnostic saw "got=34" (0x34 = ASCII
-            ; '4' = exactly the high-nibble digit ygbt_diag_hex computes
-            ; for 0x43) -- and separately byte=0x08 -> "got=30" (0x30 =
-            ; ASCII '0' = the high-nibble digit for 0x08), both
-            ; confirming R8 held ygbt_diag_hex's own leftover digit
-            ; character, not the original byte.
-            ;
-            ; Fixed by using R9 instead: ygbt_diag_hex's OWN first
-            ; instruction is "plo r9" (re-stashing the identical
-            ; incoming byte), and nothing in that routine ever writes R9
-            ; again afterward (only GLO R9 reads, never PLO/PHI R9) --
-            ; so R9 comes back out of ygbt_diag_hex still holding the
-            ; original byte, surviving even its own final K_MSG call
-            ; (R9 is already proven safe across f_msg/f_inmsg/K_MSG).
-            ; R9 is unused anywhere else in ym_getbyte_timeout up to
-            ; this point, confirmed by reading the whole proc above.
-            plo     r9
-
-            call    K_INMSG
-            db      "DBG f_uread returned, byte=",0
-            glo     r9
-            call    ygbt_diag_hex       ; takes D, prints internally;
-                                        ; R9 survives (see comment above)
-            call    K_INMSG
-            db      13,10,0
-
-            ; This proc's own documented contract is "D = byte read" --
-            ; restore it fresh from R9 (see above), not from whatever
-            ; K_INMSG's own last call happened to leave in D.
-            glo     r9
-
             clc
             rtn
 
@@ -715,11 +568,6 @@ ygbt_bitbang:
             call    f_bread
             clc
             rtn
-
-ygbt_diag_ready:     db      0           ; TEMPORARY DIAGNOSTIC
-ygbt_diag_rd_hi:     db      0           ; TEMPORARY DIAGNOSTIC
-ygbt_diag_rd_lo:     db      0           ; TEMPORARY DIAGNOSTIC
-ygbt_diag_hexbuf:    ds      3           ; TEMPORARY DIAGNOSTIC
             endp
 
 ;------------------------------------------------------------------
