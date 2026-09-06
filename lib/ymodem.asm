@@ -650,6 +650,17 @@ ygbt_ready:
             call    K_INMSG
             db      13,10,0
 
+            ; TEMPORARY DIAGNOSTIC BUG FIX: this proc's own documented
+            ; contract is "D = byte read", but D was never restored
+            ; from R8 after the prints above -- the caller was
+            ; receiving whatever K_INMSG's own last call happened to
+            ; leave in D instead of the real byte (found via a real
+            ; hardware mismatch: "byte=43" printed here, correctly,
+            ; but ys_wait_for_c's own very next diagnostic saw "got=52"
+            ; for the SAME byte -- confirms f_uread itself is correct,
+            ; the bug is purely in this diagnostic's own return value).
+            glo     r8
+
             clc
             rtn
 
