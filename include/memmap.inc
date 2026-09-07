@@ -77,14 +77,23 @@
 ;   actually overran by 5. Always trust the built figure, never the
 ;   computed one.
 ;
-; $BC00 ends at $EE6E, 401 bytes below NVK_TOP. $BD00 also fits now
-; (ending $EF6E, 145 bytes clear) and would hand programs another 256
-; bytes; $BC00 trades 0.6% of program RAM for room to grow the kernel by
-; a small feature before this has to be re-tuned. Overshooting is now a
-; loud build failure rather than a silent hang, so the choice is about
-; convenience, not safety.
+; $BD00 ends at $EF6E, 145 bytes below NVK_TOP -- deliberately close.
+; Program RAM is the whole point of this layout, and overshooting is now
+; a loud build failure rather than a silent hang, so thin headroom costs
+; a rebuild rather than a hardware round. Expect to re-tune this after
+; any real kernel addition; drop to $BC00 (401 bytes clear) if the
+; re-tuning gets tiresome.
 ;
-NVK_BASE:       equ     $BC00       ; start of the non-volatile kernel
+; NOTE, so nobody re-derives it the hard way: on THIS machine the split
+; is roughly RAM-neutral for programs. The old layout put the kernel
+; below PROG_BASE=$4000 and ran programs up to f_freemem-128; the new
+; one puts programs at $0D00 and the kernel above them. The kernel is
+; the same size either way, so relocating it does not create space --
+; it just moves the hole. The real win is on a machine with usable ROM
+; (32K RAM + 32K ROM, NVK_BASE $8000 / NVK_TOP $FFFF), where the kernel
+; leaves RAM entirely and programs gain its whole ~12.9K.
+;
+NVK_BASE:       equ     $BD00       ; start of the non-volatile kernel
 NVK_TOP:        equ     $EFFF       ; ceiling; build fails if exceeded
 
 ; Signature krnboot checks to decide "is the non-volatile kernel
