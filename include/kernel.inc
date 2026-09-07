@@ -156,7 +156,30 @@
 ; the last 256 bytes just because they're available). The user's own
 ; call, a nice round number besides. Needs its own isolated hardware
 ; round before being trusted -- not yet tested.
-PROG_BASE:      equ     $4000       ; user programs load here -- moved
+;
+; SPLIT MEMORY MODEL (2026-09-07, split-kernel-memory-model branch):
+; moved $4000 -> $0D00. The kernel no longer sits below PROG_BASE at
+; all -- its ~12.9K of executable code now lives in the non-volatile
+; region at NVK_BASE (include/memmap.inc), leaving only the K_* jump
+; table and every module's _*_data proc in RAM ($0100-$0B09). So
+; PROG_BASE only has to clear the VOLATILE top plus the PROG_BASE-
+; relative relay block (IO_TYPE_TARGET at PROG_BASE-114 is the lowest
+; of those), not the whole kernel.
+;
+; $0D00 leaves 389 bytes between the volatile top and the relay floor
+; ($0C8E) -- comfortably past this project's own "real headroom, not
+; just a few dozen bytes" standard -- while handing programs roughly
+; 13K more RAM than $4000 did on a 32K machine.
+;
+; The invariant that matters is UNCHANGED in kind, and is still the one
+; the 2026-08-23 $4300 bug established: kernel content must stay below
+; PROG_BASE-114, not merely below PROG_BASE. What changed is WHICH
+; watermark to measure -- tools/check_kernel_margin.py now checks it
+; against kvol_end (the volatile region's end marker), because the
+; linker's global "Highest address" now describes the ROM region and
+; would silently pass no matter how far the volatile region overran.
+;
+PROG_BASE:      equ     $0D00       ; user programs load here -- moved
                                     ; down from $4100 once the K_INPUTL/
                                     ; K_SETBD/K_GLOB_RESERVE jump-table
                                     ; cleanup freed real kernel margin,
@@ -564,6 +587,11 @@ FCB_F_IOVALID:  equ     $10         ; this FCB's own IOBUF currently holds
 ; ----------------------------------------------------------------
 PATH_SEP:       equ     '/'         ; directory separator character
 DRIVE_FIRST:    equ     'C'         ; first hard-disk drive letter
+
+; path_resolve's own scratch buffer size. Lives here (not in path.asm)
+; because the buffer's storage is in path_data.asm while its bounds
+; check is in path.asm -- one definition, two consumers.
+PATH_BUF_LEN:   equ     128
 
 ; ----------------------------------------------------------------
 ; Directory entry result buffer (caller-provided, DIRENT_LEN bytes)

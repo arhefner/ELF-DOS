@@ -51,7 +51,7 @@
 #include <errno.h>
 
 #define SECTOR_SIZE         512
-#define KRNBOOT_SECTORS     3       /* krnboot's own on-disk footprint,
+#define KRNBOOT_SECTORS     5       /* krnboot's own on-disk footprint,
                                      * sectors 1..KRNBOOT_SECTORS -- must
                                      * match boot/krnboot.asm's own sector
                                      * count and boot/mbr.asm's/
@@ -63,7 +63,8 @@
 #define MBR_PT_OFFSET       446     /* partition table starts here */
 #define MBR_SIG_OFFSET      510     /* $55/$AA boot signature */
 #define KERN_MAGIC_OFFSET   0       /* 'KRN' signature in bootstrap */
-#define KERN_CNT_OFFSET     4       /* sector count (big-endian word) */
+#define KVOL_CNT_OFFSET     4       /* volatile sector count (BE word) */
+#define KNV_CNT_OFFSET      9       /* non-volatile sector count (BE) */
 
 /* ================================================================
  * Platform-specific raw disk I/O
@@ -293,35 +294,50 @@ static int install_kernel(disk_t disk, const char *kern_path) {
     }
 
     /*
-     * Compute number of additional sectors (kernel proper) after the
-     * KRNBOOT_SECTORS-sector bootstrap.  Uses ceiling division:
-     *
-     *   extra = ceil((kern_size - KRNBOOT_SECTORS*512) / 512)
-     *
-     * Equivalent to: (kern_size - 1) / 512 - (KRNBOOT_SECTORS - 1)
-     * for kern_size >= KRNBOOT_SECTORS*512. (Both give 0 when
-     * kern_size == KRNBOOT_SECTORS*512, i.e. bootstrap only.)
+     * Total sectors the image occupies on disk. The split into
+     * bootstrap / volatile / non-volatile is read back from the header
+     * below rather than derived here -- see the note further down for
+     * why this installer can no longer compute it.
      */
     uint32_t total_sectors = (uint32_t)((kern_size + SECTOR_SIZE - 1) / SECTOR_SIZE);
-    uint32_t extra_sectors = total_sectors - KRNBOOT_SECTORS;
 
-    if (extra_sectors > 0xFFFF) {
+    /*
+     * The sector counts are NOT patched here any more.
+     *
+     * Under the split memory model kernel-full.bin carries TWO images
+     * after the bootstrap -- volatile and non-volatile (see
+     * include/memmap.inc) -- and their boundary cannot be recovered
+     * from the file size, which is all this installer ever sees. Only
+     * the build knows it, so tools/split_kernel.py writes both counts
+     * into krnboot's header ($4404 volatile, $4409 non-volatile) when
+     * it assembles the image. Patching either one here would overwrite
+     * a correct value with a guess.
+     */
+    unsigned vol_sectors = (unsigned)((kern_bin[KVOL_CNT_OFFSET] << 8)
+                                      | kern_bin[KVOL_CNT_OFFSET + 1]);
+    unsigned nv_sectors  = (unsigned)((kern_bin[KNV_CNT_OFFSET] << 8)
+                                      | kern_bin[KNV_CNT_OFFSET + 1]);
+
+    if (vol_sectors == 0 || nv_sectors == 0
+        || (uint32_t)KRNBOOT_SECTORS + vol_sectors + nv_sectors
+               != total_sectors) {
         fprintf(stderr,
-            "'%s': kernel requires %u sectors, maximum is 65535.\n",
-            kern_path, extra_sectors);
+            "'%s': header sector counts (volatile %u, non-volatile %u) do "
+            "not add up with\n"
+            "       the %u-sector bootstrap to the file's %u sectors. Was "
+            "this image built by\n"
+            "       tools/split_kernel.py?\n",
+            kern_path, vol_sectors, nv_sectors,
+            (unsigned)KRNBOOT_SECTORS, total_sectors);
         free(kern_bin);
         return -1;
     }
 
-    /* patch the bootstrap header with the sector count (big-endian) */
-    kern_bin[KERN_CNT_OFFSET]     = (uint8_t)(extra_sectors >> 8);
-    kern_bin[KERN_CNT_OFFSET + 1] = (uint8_t)(extra_sectors & 0xFF);
-
     printf("  File size   : %zu bytes\n",    kern_size);
-    printf("  Total sectors: %u (bootstrap %u + kernel proper %u)\n",
-           total_sectors, (unsigned)KRNBOOT_SECTORS, extra_sectors);
-    printf("  Sector count patched into header: %u ($%04X)\n",
-           extra_sectors, extra_sectors);
+    printf("  Total sectors: %u (bootstrap %u + volatile %u + "
+           "non-volatile %u)\n",
+           total_sectors, (unsigned)KRNBOOT_SECTORS, vol_sectors,
+           nv_sectors);
 
     /* write sectors to LBA 1, 2, 3 ... */
     uint8_t sector[SECTOR_SIZE];

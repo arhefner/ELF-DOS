@@ -53,8 +53,43 @@ KRNBOOT_BIN = krnboot.bin
 KERNEL_BIN  = kernel.bin
 FULL_BIN    = kernel-full.bin
 
-# ---- Kernel object files (in kernel/ subdir, link order matters) ----
-KOBJ =  kernel/kernel.prg  \
+# ---- Kernel object files -- link order is LOAD-BEARING ----
+#
+# The kernel is ONE link producing TWO address regions (see
+# include/memmap.inc). Order controls placement, because Link/02 has
+# no ".org": an absolute content line outside any proc sets its
+# placement cursor, and procs then lay out sequentially from there.
+#
+#   KVOL  volatile, RAM at $0100. kernel.prg leads with absolute
+#         content at $0100 (EDF header + K_* jump table), then every
+#         module's _*_data proc follows. kvolend.prg MUST stay last --
+#         it marks the region's end for tools/split_kernel.py.
+#
+#   KNV   non-volatile, ROM-able at NVK_BASE. nvhdr.prg MUST stay
+#         first -- its absolute "org NVK_BASE" is what moves the
+#         linker into the second region. Everything after it is code.
+#
+# Cross-references between the regions resolve normally: it is a
+# single link, so the jump table's "lbr file_open" reaches ROM and
+# ROM code's "mov rf, bpb_spc" reaches RAM.
+#
+# Within KNV the original link order is preserved (kinit replaces
+# kernel.asm's old code half).
+KVOL =  kernel/kernel.prg       \
+        kernel/kernel_data.prg  \
+        kernel/fat_data.prg     \
+        kernel/dir_data.prg     \
+        kernel/path_data.prg    \
+        kernel/rtc_data.prg     \
+        kernel/file_data.prg    \
+        kernel/loader_data.prg  \
+        kernel/batch_data.prg   \
+        kernel/redir_data.prg   \
+        lib/modload_data.prg    \
+        kernel/kvolend.prg
+
+KNV  =  kernel/nvhdr.prg   \
+        kernel/kinit.prg   \
         kernel/fat.prg     \
         kernel/dir.prg     \
         kernel/path.prg    \
@@ -66,10 +101,13 @@ KOBJ =  kernel/kernel.prg  \
         lib/modload.prg    \
         lib/icall.prg
 
+KOBJ =  $(KVOL) $(KNV)
+
 # ---- Common include dependencies ----
 INCS =  include/bios.inc    \
         include/opcodes.def \
-        include/kernel.inc
+        include/kernel.inc  \
+        include/memmap.inc
 
 # ---- User programs (progs/ subdir) ----
 # template.asm is a starting point, not a program -- excluded here.
@@ -108,6 +146,45 @@ boot/krnboot.prg: boot/krnboot.asm $(INCS)
 
 kernel/kernel.prg: kernel/kernel.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) kernel.asm
+
+kernel/kernel_data.prg: kernel/kernel_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) kernel_data.asm
+
+kernel/fat_data.prg: kernel/fat_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) fat_data.asm
+
+kernel/dir_data.prg: kernel/dir_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) dir_data.asm
+
+kernel/path_data.prg: kernel/path_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) path_data.asm
+
+kernel/rtc_data.prg: kernel/rtc_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) rtc_data.asm
+
+kernel/file_data.prg: kernel/file_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) file_data.asm
+
+kernel/loader_data.prg: kernel/loader_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) loader_data.asm
+
+kernel/batch_data.prg: kernel/batch_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) batch_data.asm
+
+kernel/redir_data.prg: kernel/redir_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) redir_data.asm
+
+kernel/kinit.prg: kernel/kinit.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) kinit.asm
+
+kernel/nvhdr.prg: kernel/nvhdr.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) nvhdr.asm
+
+kernel/kvolend.prg: kernel/kvolend.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) kvolend.asm
+
+lib/modload_data.prg: lib/modload_data.asm $(INCS) include/modformat.inc
+	cd lib && $(ASM) $(ASMFLAGS) modload_data.asm
 
 kernel/fat.prg: kernel/fat.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) fat.asm
@@ -353,7 +430,13 @@ $(KERNEL_BIN): $(KOBJ)
 	python3 tools/check_kernel_margin.py
 
 #------------------------------------------------------------------
-# Concatenate bootstrap + kernel proper into final install image.
+# Build the final install image from the bootstrap and the two kernel
+# regions. The kernel links as ONE file spanning both regions with a
+# ~30K zero gap between them (see include/memmap.inc), so it cannot be
+# written to disk as-is -- tools/split_kernel.py slices it at the
+# kvol_end marker, pads the volatile half to a sector boundary, and
+# concatenates krnboot + volatile + non-volatile, patching BOTH sector
+# counts into krnboot's header as it goes.
 #
 # Layout of kernel-full.bin:
 #   Bytes     0-1535:  krnboot.bin  (loads to $4600, entry at $4606;
@@ -365,8 +448,12 @@ $(KERNEL_BIN): $(KOBJ)
 # writing, so the bootstrap knows how many sectors follow it.
 #------------------------------------------------------------------
 
+KVOL_BIN    = kvol.bin
+KNV_BIN     = knv.bin
+
 $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
-	cat $(KRNBOOT_BIN) $(KERNEL_BIN) > $(FULL_BIN)
+	python3 tools/split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(KNV_BIN) \
+		$(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
 
 #------------------------------------------------------------------
 # Convenience targets
@@ -479,6 +566,7 @@ clean:
 	      progs/*.prg progs/*.lst progs/*.build progs/*.lkb \
 	      test/*.prg test/*.lst test/*.build test/*.lkb \
 	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN) \
+	      $(KVOL_BIN) $(KNV_BIN) ksym.sym \
 	      $(SDK_OUT)
 	rm -rf test/bin
 	rm -rf bin

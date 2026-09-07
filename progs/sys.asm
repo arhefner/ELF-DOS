@@ -358,12 +358,15 @@ sys_stat_loop:
 ;------------------------------------------------------------------
             mov     rf, sys_size_hi
             ldn     rf
-            smi     6                   ; DF=1 iff size.hi >= 6, i.e.
-                                        ; size >= 1536 ($0600) -- 1536
+            smi     10                  ; DF=1 iff size.hi >= 10, i.e.
+                                        ; size >= 2560 ($0A00) -- 2560
                                         ; is an exact multiple of 256,
                                         ; same "compare just the high
                                         ; byte" trick as the original
-                                        ; 512-byte check
+                                        ; 512-byte check. Was 1536 (3
+                                        ; sectors) until krnboot grew to
+                                        ; KRNBOOT_SECTORS=5 for the
+                                        ; split memory model.
             lbnf    sys_toosmall_err
 
 ;------------------------------------------------------------------
@@ -599,18 +602,22 @@ w_have_bytes:
             ldi     0
             str     rf
 
-            ; patch sys_buf[4] = extra_sectors_hi, sys_buf[5] =
-            ; extra_sectors_lo (big-endian, matching host-side
-            ; elfdos-sys's own KERN_CNT_OFFSET convention)
-            mov     rf, sys_buf
-            add16   rf, 4               ; RF = &sys_buf[4]
-            mov     rd, sys_extra_hi
-            ldn     rd
-            str     rf                  ; sys_buf[4] = extra_sectors_hi
-            inc     rf
-            mov     rd, sys_extra_lo
-            ldn     rd
-            str     rf                  ; sys_buf[5] = extra_sectors_lo
+            ; The header is NOT patched here any more.
+            ;
+            ; Under the split memory model kernel-full.bin carries TWO
+            ; images after the bootstrap -- volatile and non-volatile
+            ; (see include/memmap.inc) -- with a separate sector count
+            ; for each ($4404 and $4409). Their boundary cannot be
+            ; recovered from the file size, which is all this installer
+            ; sees, so tools/split_kernel.py writes both counts when it
+            ; builds the image. Writing extra_sectors over $4404 here
+            ; would replace a correct volatile count with the whole
+            ; post-bootstrap sector total and produce an unbootable
+            ; card. Host-side sys/sys.c dropped its own patch for the
+            ; same reason; it now validates the counts instead.
+            ;
+            ; sys_extra_hi/lo are still computed above and shown in the
+            ; confirmation prompt -- informational only now.
 
 w_not_first:
             ; --- write ---

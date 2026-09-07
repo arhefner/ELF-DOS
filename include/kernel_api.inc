@@ -74,7 +74,7 @@
 ; keep them in sync with kernel.inc if they ever change.
 ;
 
-PROG_BASE:      equ     $4000       ; user programs load here (see kernel.inc;
+PROG_BASE:      equ     $0D00       ; user programs load here (see kernel.inc;
                                     ; moved $4400->$4200->$4100->$4000
                                     ; (2026-08-25, 2026-08-26 x2) as
                                     ; successive kernel size-reduction

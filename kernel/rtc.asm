@@ -37,20 +37,6 @@
             extrn   cur_time
 
 ;==================================================================
-; Shared current-time buffer
-;==================================================================
-
-            proc    _rtc_data
-
-; month, day, year(0=1972), hour, minute, second -- see header comment.
-; Default: midnight, January 1 2000 (year 28 = 2000 - 1972).
-cur_time:       db      1, 1, 28, 0, 0, 0
-
-                public  cur_time
-
-            endp
-
-;==================================================================
 ; rtc_refresh: refresh cur_time from the RTC, if one is present
 ;
 ; Args:    none

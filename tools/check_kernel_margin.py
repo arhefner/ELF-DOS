@@ -75,7 +75,22 @@ DEFAULT_THRESHOLD = 16
 # own syntax (line continuations, $(...) substitutions) isn't worth a
 # real parser for a list this short and this rarely changed.
 DEFAULT_KOBJ_ASM = [
+    # ---- volatile (RAM, $0100) ---- order matters, see the Makefile
     "kernel/kernel.asm",
+    "kernel/kernel_data.asm",
+    "kernel/fat_data.asm",
+    "kernel/dir_data.asm",
+    "kernel/path_data.asm",
+    "kernel/rtc_data.asm",
+    "kernel/file_data.asm",
+    "kernel/loader_data.asm",
+    "kernel/batch_data.asm",
+    "kernel/redir_data.asm",
+    "lib/modload_data.asm",
+    "kernel/kvolend.asm",
+    # ---- non-volatile (ROM-able, NVK_BASE) ----
+    "kernel/nvhdr.asm",
+    "kernel/kinit.asm",
     "kernel/fat.asm",
     "kernel/dir.asm",
     "kernel/path.asm",
@@ -293,7 +308,34 @@ def main():
         prg_paths, ["-b", "-be", "-r"]
     )
 
-    print(f"check_kernel_margin: Lowest={lowest:04x} Highest={highest:04x} "
+    # The kernel now links as TWO regions (see include/memmap.inc):
+    # volatile RAM from $0100 up to kvol_end, and non-volatile ROM-able
+    # code from NVK_BASE up to the linker's "Highest address". Every
+    # margin below has to be measured against the end of the region the
+    # thing actually lives in -- comparing a RAM buffer against the ROM
+    # region's top would silently pass no matter how far the volatile
+    # region had overrun.
+    if "NVK_BASE" not in equs or "NVK_TOP" not in equs:
+        print("error: NVK_BASE/NVK_TOP not found in include/memmap.inc",
+              file=sys.stderr)
+        sys.exit(2)
+    # collect_equs stores raw text; evaluate to real addresses
+    nvk_base = eval_expr(equs["NVK_BASE"], equs)
+    nvk_top = eval_expr(equs["NVK_TOP"], equs)
+    if "kvol_end" not in symbols:
+        print("error: kvol_end marker missing from the linked symbol table "
+              "-- is kernel/kvolend.asm still last in KVOL?", file=sys.stderr)
+        sys.exit(2)
+    vol_top = symbols["kvol_end"]
+    nv_top = highest
+
+    def region_top(addr):
+        """End of whichever region `addr` lives in."""
+        return nv_top if addr >= nvk_base else vol_top
+
+    print(f"check_kernel_margin: volatile {lowest:04x}-{vol_top:04x} "
+          f"({vol_top - lowest + 1} bytes), non-volatile "
+          f"{nvk_base:04x}-{nv_top:04x} ({nv_top - nvk_base + 1} bytes), "
           f"({len(buffers)} 'ds' buffers checked, threshold={threshold})")
 
     failed = False
@@ -314,7 +356,32 @@ def main():
 
         start = symbols[name]
         end = start + size - 1
-        margin = highest - end
+        top = region_top(start)
+        margin = top - end
+
+        # The original heuristic here -- "require N bytes of real content
+        # after this buffer" -- was a proxy for the real question: a "ds"
+        # reservation emits no bytes, so a buffer at the very end of an
+        # image could fall outside the linker's own watermark and be
+        # silently dropped. In the volatile region that is now impossible
+        # by construction: kernel/kvolend.asm contributes a real emitted
+        # byte (kvol_end) as the LAST volatile object, so every "ds" byte
+        # before it is necessarily spanned. For those buffers the exact
+        # invariant is simply "ends at or before the marker", which is a
+        # stronger guarantee than any slack threshold, so the threshold
+        # is not applied. The non-volatile region has no such marker (it
+        # ends in code, and its top IS the linker's watermark), so the
+        # original slack heuristic still applies there.
+        if start < nvk_base:
+            if end > top:
+                failed = True
+                print(f"  FAIL: {name} ({source}) spans {start:04x}-"
+                      f"{end:04x} (size {size}) -- past the volatile "
+                      f"region marker kvol_end ({top:04x}). Is "
+                      f"kernel/kvolend.asm still LAST in KVOL?")
+            if worst_margin is None or margin < worst_margin:
+                worst_margin, worst_name = margin, name
+            continue
 
         if worst_margin is None or margin < worst_margin:
             worst_margin, worst_name = margin, name
@@ -322,15 +389,17 @@ def main():
         if margin < threshold:
             failed = True
             print(f"  FAIL: {name} ({source}) spans {start:04x}-{end:04x} "
-                  f"(size {size}) -- only {margin} bytes before Highest "
-                  f"address {highest:04x}. This buffer may be silently "
+                  f"(size {size}) -- only {margin} bytes before the end "
+                  f"of its region ({region_top(start):04x}). This buffer "
+                  f"may be silently "
                   f"excluded from the linked output.")
 
     if worst_name is not None:
         status = "OK" if not failed else "FAILED"
         print(f"check_kernel_margin: {status} -- tightest buffer is "
-              f"{worst_name}, {worst_margin} bytes of real content after "
-              f"it before Highest address.")
+              f"{worst_name}, {worst_margin} bytes before the end of its "
+              f"region (volatile buffers are bounded by the kvol_end "
+              f"marker, so any non-negative margin is safe).")
 
     # Check (2): Highest address vs. the real floor -- the lowest
     # PROG_BASE-relative fixed relay address (RUN_ERRORLEVEL as of this
@@ -343,11 +412,11 @@ def main():
               "invariant. This check's own assumptions may be stale.")
         failed = True
     else:
-        region_margin = floor_addr - highest
+        region_margin = floor_addr - vol_top
         region_status = "OK" if region_margin >= threshold else "FAILED"
         if region_margin < threshold:
             failed = True
-            print(f"  FAIL: Highest address {highest:04x} is only "
+            print(f"  FAIL: volatile top {vol_top:04x} is only "
                   f"{region_margin} bytes before {floor_name} "
                   f"({floor_addr:04x}), the lowest PROG_BASE-relative "
                   f"relay address. The kernel's own code/data may be "
@@ -356,8 +425,20 @@ def main():
                   f"memory-corruption risk, not just a growth-margin "
                   f"warning.")
         print(f"check_kernel_margin: {region_status} -- {region_margin} "
-              f"bytes between Highest address ({highest:04x}) and "
+              f"bytes between the volatile top ({vol_top:04x}) and "
               f"{floor_name} ({floor_addr:04x}), the relay-region floor.")
+
+    # Check (3): the non-volatile region must fit under its ceiling.
+    # On a ROM machine this is the physical end of the part; on a
+    # RAM-only machine it is the highest address krnboot may load to.
+    nv_margin = nvk_top - nv_top
+    if nv_margin < 0:
+        failed = True
+        print(f"  FAIL: non-volatile kernel ends at {nv_top:04x}, past "
+              f"NVK_TOP ({nvk_top:04x}) by {-nv_margin} bytes.")
+    print(f"check_kernel_margin: {'OK' if nv_margin >= 0 else 'FAILED'} -- "
+          f"{nv_margin} bytes between the non-volatile top ({nv_top:04x}) "
+          f"and NVK_TOP ({nvk_top:04x}).")
 
     sys.exit(1 if failed else 0)
 

@@ -71,7 +71,11 @@
 
 #define     KERN_LOAD   $4400           ; kernel bootstrap loads here
 #define     KERN_ENTRY  $4406           ; kernel bootstrap entry point
-#define     KRNBOOT_SECTORS 3           ; sectors 1..3 hold the bootstrap
+#define     KRNBOOT_SECTORS 5           ; sectors 1..5 hold the bootstrap
+                                        ; (grown from 3 for the split
+                                        ; memory model -- krnboot now
+                                        ; loads two images and probes
+                                        ; for the top of usable RAM)
                                         ; (must match krnboot.asm's own
                                         ; sector count and sys/sys.c's
                                         ; /progs/sys.asm's sector math)

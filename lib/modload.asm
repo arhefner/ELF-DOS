@@ -468,34 +468,3 @@ ml_reserve_size:
             rtn
 
             endp
-
-;------------------------------------------------------------------
-; Shared data
-;------------------------------------------------------------------
-            proc    _modload_data
-
-ml_fcb_ptr:         dw      0           ; caller-supplied FCB pointer,
-                                        ; reloaded fresh at every
-                                        ; K_FILE_* call site (nothing
-                                        ; survives the intervening
-                                        ; calls) -- NOT an owned FCB;
-                                        ; see this file's own header
-                                        ; comment for why
-ml_header:          ds      MOD_HEADER_LEN
-ml_code_size:       dw      0
-ml_body_size:       dw      0
-ml_base:            dw      0
-ml_fixup_count:     dw      0
-ml_fixup_entry:     dw      0
-ml_scratch:         db      0
-
-                public  ml_fcb_ptr
-                public  ml_header
-                public  ml_code_size
-                public  ml_body_size
-                public  ml_base
-                public  ml_fixup_count
-                public  ml_fixup_entry
-                public  ml_scratch
-
-            endp

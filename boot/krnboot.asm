@@ -76,25 +76,41 @@
 #include    include/bios.inc
 #include    include/opcodes.def
 #include    include/kernel_api.inc
+#include    include/memmap.inc
 
 #define     KERN_BASE   $0100           ; kernel proper loads here
 #define     KERN_ENTRY  $0106           ; kernel proper entry point
 #define     SECTOR_SIZE $0200           ; 512 bytes per sector
-#define     CNT_ADDR    $4404           ; address of sector count in header
+#define     CNT_ADDR    $4404           ; volatile sector count in header
+#define     NV_CNT_ADDR $4409           ; non-volatile sector count in header
 
             org         $4400
 
 ;--------------------------------------------------------------
-; 6-byte header ($4400-$4405)
-; MBR enters at $4406, so these bytes are never executed.
+; Header ($4400-$440A)
+;
+; MBR enters at $4406 unconditionally, so the entry point CANNOT move.
+; The split memory model needs a second sector count (the non-volatile
+; image), which is therefore placed AFTER a 3-byte "lbr boot_main" at
+; the entry rather than before it -- that keeps $4406 valid and leaves
+; boot/mbr.asm completely untouched (no MBR reinstall needed for this
+; change).
+;
+;   $4400-$4402  'KRN'  magic
+;   $4403        $01    kernel major version
+;   $4404-$4405  word   VOLATILE sector count   -- patched by sys
+;   $4406-$4408  lbr boot_main  <- KERN_ENTRY, must stay here
+;   $4409-$440A  word   NON-VOLATILE sector count -- patched by sys
 ;--------------------------------------------------------------
             db          'K','R','N'     ; 3-byte magic signature
             db          1               ; kernel major version
-            dw          0               ; sector count -- patched by sys
+            dw          0               ; volatile sectors -- patched by sys
+            lbr         boot_main       ; $4406 -- MBR's entry point
+            dw          0               ; non-volatile sectors -- ditto
 
 ;--------------------------------------------------------------
-; Bootstrap entry point - $4406
-; On entry: SCRT initialized, stack at top of RAM
+; Bootstrap entry point (reached via the lbr at $4406)
+; On entry: SCRT initialized, stack at top of RAM (set by the MBR)
 ;--------------------------------------------------------------
 boot_main:
             ; read kernel sector count from our own header
@@ -113,50 +129,164 @@ boot_main:
             glo         rc
             lbz         load_err        ; RC=0 means no kernel installed
 
-            ; set up LBA to start at sector 4
-            ; (sector 0 = MBR, sectors 1-3 = this bootstrap,
-            ; 3 sectors as of the multi-sector krnboot expansion)
-boot_go:    ldi         4
-            plo         r7              ; R7.0 = 4
+            ; ---- load the VOLATILE image to $0100 ----
+            ; LBA 6 (sector 0 = MBR, sectors 1-5 = this bootstrap)
+boot_go:    ldi         6
+            plo         r7              ; R7.0 = 6
             ldi         0
             phi         r7              ; R7.1 = 0
             plo         r8              ; R8.0 = 0
             phi         r8              ; R8.1 = 0
-
-            ; RA = current load address, starts at KERN_BASE
             mov         ra,KERN_BASE
+            call        load_sectors    ; RC sectors -> [RA]; R7 advances
+                                        ; past them, ready for the
+                                        ; non-volatile image below
 
 ;--------------------------------------------------------------
-; Sector load loop
-; Registers:  RC = remaining sector count
-;             R7 = current LBA (low 16 bits)
-;             R8 = 0 (drive/head and upper LBA bits)
-;             RA = current RAM destination address
-;             RF = set from RA before each f_ideread call
+; Find the top of usable RAM and move the stack there.
+;
+; Done BEFORE loading the non-volatile image, deliberately. The MBR
+; leaves the stack at f_freemem's top of RAM, which on a RAM-only
+; machine can sit INSIDE the region we are about to load the
+; non-volatile kernel into -- loading it would then overwrite the very
+; stack the load loop's own call/return is using. Searching first and
+; moving the stack below NVK_BASE removes that overlap entirely.
+;
+; The highest RAM byte a program may use is the first RAM byte BELOW
+; NVK_BASE (the non-volatile kernel is ROM on a 32K/32K machine, or
+; loaded RAM on a RAM-only one -- either way it is off limits), so walk
+; down from there testing each address until one reads back what we
+; wrote. Two complementary patterns, because a single pattern can be
+; matched by chance by a ROM byte that happens to equal it. Every byte
+; tested is restored, so this is non-destructive.
 ;--------------------------------------------------------------
-load_loop:  ghi         rc              ; check high byte of count
-            lbnz        do_load         ; non-zero means at least 256 left
-            glo         rc              ; check low byte of count
-            lbz         load_done       ; both zero -- finished
+            mov         rf,NVK_BASE
+            dec         rf              ; first candidate, just below it
 
-do_load:    mov         rf,ra           ; RF = current load address
+boot_ram_try:
+            ldn         rf
+            plo         r9              ; save the original byte
+            ldi         $A5
+            str         rf
+            ldn         rf
+            xri         $A5
+            lbnz        boot_ram_next
+            ldi         $5A
+            str         rf
+            ldn         rf
+            xri         $5A
+            lbnz        boot_ram_next
+            glo         r9
+            str         rf              ; RAM: put the original byte back
+            lbr         boot_ram_found
+
+boot_ram_next:
+            glo         r9
+            str         rf              ; restore whatever was there
+            dec         rf
+            ; Refuse to search down into the kernel itself. Reaching
+            ; here means there is no usable RAM below NVK_BASE at all --
+            ; hang loudly rather than boot with a nonsense memory map.
+            ghi         rf
+            smi         high PROG_BASE
+            lbnf        ram_err
+            lbr         boot_ram_try
+
+boot_ram_found:
+            ; RF = highest usable RAM byte. Setting the stack here is
+            ; ALSO how that value reaches the kernel: kernel_init reads
+            ; R2 and derives mem_top from it (R2 - STACK_RESERVE_LEN),
+            ; so no fixed handoff address is needed. Switching stacks is
+            ; safe at this exact point -- boot_main was reached by a
+            ; branch, not a call, so no return address is pending on the
+            ; old stack, and SCRT balances every call made after this.
+            mov         r2,rf
+
+;--------------------------------------------------------------
+; Non-volatile kernel: already resident, or load it?
+;
+; On a ROM machine the signature is burned in at NVK_BASE and there is
+; nothing to do. On a RAM-only machine it is absent, and we load the
+; same image to the same address from disk -- so one disk image boots
+; both. R7 already points at the first non-volatile sector.
+;--------------------------------------------------------------
+            call        check_nvk_sig
+            lbz         boot_init0      ; present and current -- done
+
+boot_load_nv:
+            mov         rf,NV_CNT_ADDR
+            lda         rf
+            phi         rc
+            ldn         rf
+            plo         rc              ; RC = non-volatile sector count
+            ghi         rc
+            lbnz        boot_nv_go
+            glo         rc
+            lbz         load_err        ; none in ROM and none on disk
+boot_nv_go: mov         ra,NVK_BASE
+            call        load_sectors
+
+            ; It must really be there now. A silent miss here would hand
+            ; control to whatever happens to occupy NVK_BASE -- exactly
+            ; the kind of zero-output failure this project has hit
+            ; before with boot code.
+            call        check_nvk_sig
+            lbnz        nv_err
+boot_init0: lbr         boot_init2
+
+;--------------------------------------------------------------
+; check_nvk_sig: is the non-volatile kernel present at NVK_BASE?
+; Returns D=0 (and the Z flag set) when the 'NVK' magic and version
+; both match, non-zero otherwise. Clobbers D and RF.
+;--------------------------------------------------------------
+check_nvk_sig:
+            mov         rf,NVK_BASE
+            lda         rf
+            xri         'N'
+            lbnz        cns_no
+            lda         rf
+            xri         'V'
+            lbnz        cns_no
+            lda         rf
+            xri         'K'
+            lbnz        cns_no
+            ldn         rf
+            xri         NVK_SIG_VER     ; D=0 here means "present"
+            rtn
+cns_no:     ldi         1               ; any non-zero = "not present"
+            rtn
+
+;--------------------------------------------------------------
+; load_sectors: read RC sectors from LBA R7:R8 into memory at RA.
+; Advances RA and R7, leaves RC = 0. Branches to load_err on a read
+; error rather than returning failure -- there is nothing useful a
+; caller could do about it this early in the boot.
+;--------------------------------------------------------------
+load_sectors:
+            ghi         rc              ; any sectors left?
+            lbnz        ls_read
+            glo         rc
+            lbz         ls_done
+ls_read:    mov         rf,ra           ; RF = current load address
             call        f_ideread       ; read sector into [RF]
             lbdf        load_err        ; DF=1 means read error
-
             add16       ra,SECTOR_SIZE  ; advance load address by 512
             inc         r7              ; advance to next LBA sector
             dec         rc              ; one fewer sector remaining
-            lbr         load_loop
-
-;--------------------------------------------------------------
-; All sectors loaded -- run the relocated one-time init code below,
-; which falls through to the real kernel entry point once it's done.
-;--------------------------------------------------------------
-load_done:  lbr         boot_init2
+            lbr         load_sectors
+ls_done:    rtn
 
 ;--------------------------------------------------------------
 ; Load error handler
 ;--------------------------------------------------------------
+ram_err:    call        f_inmsg
+            db          "No RAM below the non-volatile kernel",13,10,0
+            lbr         load_halt
+
+nv_err:     call        f_inmsg
+            db          "Non-volatile kernel load failed",13,10,0
+            lbr         load_halt
+
 load_err:   call        f_inmsg
             db          "Kernel load error",13,10,0
 load_halt:  lbr         load_halt       ; hang -- nothing to return to
@@ -1094,10 +1224,16 @@ boot_re_shifted:    db      0
 boot_scratch:       ds      512
 
 ;--------------------------------------------------------------
-; Pad to exactly 1536 bytes = 3 sectors (KRNBOOT_SECTORS). Generated
-; code measured at 997 bytes (2026-07-12) -- 3 sectors chosen over 2
-; (1024 bytes, only 27 bytes of margin) for real headroom, matching
-; this project's own standing margin bar.
+; Pad to exactly 2560 bytes = 5 sectors (KRNBOOT_SECTORS). Grown from
+; 3 sectors (1536 bytes) for the split memory model: this bootstrap now
+; loads TWO images instead of one, checks the non-volatile signature,
+; and searches for the top of usable RAM. Content measured at 2214
+; bytes, so 4 sectors (2048) would not fit at all and 5 leaves 346
+; bytes of real headroom, matching this project's own margin bar.
+;
+; Growing this MOVES THE KERNEL'S FIRST SECTOR (LBA 4 -> 6) and must
+; stay in lockstep with boot/mbr.asm's KRNBOOT_SECTORS, sys/sys.c's
+; KRNBOOT_SECTORS, and progs/sys.asm's own copy of the same math.
 ;
 ; NOTE (gotcha, hit once already on a different branch, 2026-07-20):
 ; this pad target is a HARDCODED ABSOLUTE ADDRESS, computed as
@@ -1106,7 +1242,7 @@ boot_scratch:       ds      512
 ; KERN_LOAD moves, or krnboot.bin comes out the wrong size (silently,
 ; with no assembler error).
 ;--------------------------------------------------------------
-            org         $49FF
+            org         $4DFF
             db          0
 
             end         boot_main

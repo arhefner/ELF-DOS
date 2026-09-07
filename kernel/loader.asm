@@ -538,33 +538,3 @@ prsh_fallback:
 kshell_path:    db      "C:/bin/shell",0
 
             endp
-
-;------------------------------------------------------------------
-; Loader scratch data
-;
-; prog_fcb/prog_iobuf: this kernel's own dedicated, permanently
-; resident FCB + 512-byte I/O buffer, used only for loading program
-; binaries (see prog_run's own comment on why it can't use a
-; program-supplied FCB the way ordinary file I/O does) -- referenced
-; directly (RD = prog_fcb) by every file_* call involved in loading,
-; no separate handle needed. prun_argv/prun_argc are prog_run's own
-; stash for the caller's argv pointer/argc across the load sequence
-; (see its own comment).
-;------------------------------------------------------------------
-            proc    _loader_data
-
-prog_fcb:       ds      FCB_LEN
-prog_iobuf:     ds      SECTOR_SIZE
-prog_size:      dw      0           ; bytes actually loaded (for mem_base calc)
-prun_argv:      dw      0           ; prog_run's own argv-pointer stash
-prun_argc:      dw      0           ; prog_run's own argc stash
-saved_sp:       dw      0           ; kernel's R2 across _prog_exec_now's call
-
-                public  prog_fcb
-                public  prog_iobuf
-                public  prog_size
-                public  prun_argv
-                public  prun_argc
-                public  saved_sp
-
-            endp
