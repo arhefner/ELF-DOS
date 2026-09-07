@@ -12,6 +12,9 @@
 #   nmake /F Makefile.win update DEV=\\.\PhysicalDriveN
 #                                     build and write kernel only (MBR
 #                                     already installed)
+#   nmake /F Makefile.win sdk        package the external-developer SDK
+#                                     into elfdos-sdk.zip (see tools\
+#                                     build_sdk.ps1)
 #   nmake /F Makefile.win clean      remove all generated files
 #
 # Mirrors the project's Linux Makefile as closely as nmake allows -- see
@@ -527,6 +530,24 @@ update: $(FULL_BIN) sys\elfdos-sys.exe
 	check_dev.bat "$(DEV)" update
 	$(SYS) -k $(FULL_BIN) $(DEV)
 
+# SDK package -- a single self-contained elfdos-sdk.zip a developer
+# downloads and expands directly into their own project. Windows
+# counterpart to the Linux Makefile's own "sdk" target (elfdos-
+# sdk.tar.gz) -- see that target's own header comment in Makefile for
+# the full rationale. All the real work (staging, MANIFEST.txt, the
+# zip itself) lives in tools\build_sdk.ps1 -- see its own header
+# comment for why this is a standalone script rather than inlined
+# nmake recipe lines. Override the output path with SDK_OUT, e.g.:
+#   nmake /F Makefile.win sdk SDK_OUT=dist\x.zip
+# (nmake has no GNU-Make-style $(if ...) to make this argument
+# optional, so SDK_OUT just carries the same default the .ps1 script's
+# own -OutFile parameter would fall back to anyway, and is always
+# passed explicitly.)
+SDK_OUT = elfdos-sdk.zip
+
+sdk:
+	powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_sdk.ps1 -OutFile "$(SDK_OUT)"
+
 clean:
 	-del /F /Q boot\*.prg boot\*.lst
 	-del /F /Q kernel\*.prg kernel\*.lst
@@ -535,5 +556,7 @@ clean:
 	-del /F /Q lib\*.prg lib\*.lst
 	-del /F /Q sys\elfdos-sys.exe sys\sys.obj
 	-del /F /Q $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
+	-del /F /Q $(SDK_OUT)
 	-if exist bin rmdir /S /Q bin
 	-if exist test\bin rmdir /S /Q test\bin
+	-if exist build rmdir /S /Q build

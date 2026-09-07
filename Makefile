@@ -11,6 +11,9 @@
 #   test       build every test/*.asm into test/bin/<name> -- diagnostic/
 #              subsystem-exercising programs, kept out of bin/ entirely
 #              so a normal install's /bin never includes them
+#   sdk        package the external-developer SDK (headers, lib/
+#              modules, Developer's Guide) into elfdos-sdk.tar.gz --
+#              a self-contained download, no repo clone needed
 #   clean      remove all generated files
 #
 # Override DEV on the command line to target a specific device:
@@ -393,32 +396,38 @@ progs: $(PROG_EXES) bin/batch.mod
 test: $(TEST_EXES)
 
 #------------------------------------------------------------------
-# SDK export -- for external projects building against ELF-DOS's own
-# kernel API (see docs/DEVELOPER_GUIDE.md). Copies the program-facing
-# headers plus every lib/ module (and its own companion .inc, where it
-# has one) into DEST, preserving the include/+lib/ layout so consuming
-# source can use the exact same "#include include/kernel_api.inc"
-# convention this project's own progs/*.asm already do -- no path
-# translation needed on the consumer's side. Ships SOURCE, never a
-# prebuilt .prg/.bin: this toolchain's own .prg fixup-marker format has
-# changed across Asm/02 versions before (see CLAUDE.md's own toolchain
-# gotchas), so a prebuilt artifact would be exactly the kind of
-# cross-toolchain-version fragility this project has already been
-# bitten by more than once. Deliberately does NOT include kernel.inc
-# (kernel-internal only -- the whole reason kernel_api.inc exists as a
-# separate, decoupled file) or the toolchain itself (asm02/link02 are
-# already a shared, separately-installed system tool at /opt/elfc,
-# independent of any one project).
+# SDK package -- a single self-contained elfdos-sdk.tar.gz a developer
+# downloads and expands directly into their own project, with no git
+# clone of ELF-DOS and no local "make sdk" step of their own required.
+# Bundles the program-facing headers, every lib/ module (and its own
+# companion .inc, where it has one), and the Developer's Guide, laid
+# out under one top-level elfdos-sdk/ directory so extracting the
+# archive can't dump loose include/lib/ dirs on top of whatever the
+# consuming project already has at its own root. Preserves the
+# include/+lib/ layout so consuming source can use the exact same
+# "#include include/kernel_api.inc" convention this project's own
+# progs/*.asm already do -- no path translation needed on the
+# consumer's side. Ships SOURCE, never a prebuilt .prg/.bin: this
+# toolchain's own .prg fixup-marker format has changed across Asm/02
+# versions before (see CLAUDE.md's own toolchain gotchas), so a
+# prebuilt artifact would be exactly the kind of cross-toolchain-
+# version fragility this project has already been bitten by more than
+# once. Deliberately does NOT include kernel.inc (kernel-internal only
+# -- the whole reason kernel_api.inc exists as a separate, decoupled
+# file) or the toolchain itself (asm02/link02 are already a shared,
+# separately-installed system tool at /opt/elfc, independent of any
+# one project).
 #
 # Pins to a COMMIT, not a version number -- there is no binary ABI
 # stability guarantee yet (PROG_BASE alone has moved roughly 8 times
 # in this project's history), so an external project rebuilds from
 # source whenever it wants to move to a newer ELF-DOS revision;
-# re-running this target and re-vendoring the result IS that "move to
-# a newer revision" action, deliberate and visible in the consuming
-# project's own git history, never automatic.
+# downloading a freshly re-packaged archive and re-vendoring its
+# contents IS that "move to a newer revision" action, deliberate and
+# visible in the consuming project's own git history, never automatic.
 #
-# Usage: make sdk DEST=../my-external-project/vendor/elfdos-sdk
+# Usage: make sdk                     -> elfdos-sdk.tar.gz
+#        make sdk SDK_OUT=dist/x.tar.gz
 #------------------------------------------------------------------
 SDK_HEADERS = include/kernel_api.inc include/opcodes.def include/bios.inc
 
@@ -434,36 +443,43 @@ SDK_LIB_INCS = include/file_glob.inc include/lineedit.inc \
                include/modformat.inc include/vollabel.inc \
                include/ymodem.inc
 
+SDK_NAME  = elfdos-sdk
+SDK_OUT   = $(SDK_NAME).tar.gz
+SDK_STAGE = build/sdk-stage
+SDK_ROOT  = $(SDK_STAGE)/$(SDK_NAME)
+
 sdk:
-	@if [ -z "$(DEST)" ]; then \
-		echo "Usage: make sdk DEST=path/to/export"; \
-		exit 1; \
-	fi
-	mkdir -p $(DEST)/include $(DEST)/lib
-	cp $(SDK_HEADERS) $(DEST)/include/
-	cp $(SDK_LIB_INCS) $(DEST)/include/
-	cp $(SDK_LIB_ASM) $(DEST)/lib/
-	@echo "ELF-DOS SDK snapshot"                                     >  $(DEST)/MANIFEST.txt
-	@echo "Exported:       $$(date -u +%Y-%m-%dT%H:%M:%SZ)"          >> $(DEST)/MANIFEST.txt
-	@echo "ELF-DOS commit: $$(git rev-parse HEAD)"                   >> $(DEST)/MANIFEST.txt
-	@echo "Kernel version: $$(grep -m1 'KERNEL_VER_MAJOR:' kernel/kernel.asm | sed 's/.*equ *//').$$(grep -m1 'KERNEL_VER_MINOR:' kernel/kernel.asm | sed 's/.*equ *//')" >> $(DEST)/MANIFEST.txt
-	@echo "PROG_BASE:      $$(grep -m1 '^PROG_BASE:' include/kernel_api.inc | sed 's/.*equ *//' | awk '{print $$1}')" >> $(DEST)/MANIFEST.txt
-	@echo ""                                                         >> $(DEST)/MANIFEST.txt
-	@echo "Headers:"                                                 >> $(DEST)/MANIFEST.txt
-	@for f in $(SDK_HEADERS) $(SDK_LIB_INCS); do echo "  $$f" >> $(DEST)/MANIFEST.txt; done
-	@echo "Library modules (lib/):"                                  >> $(DEST)/MANIFEST.txt
-	@for m in $(SDK_LIB_MODULES); do echo "  $$m.asm" >> $(DEST)/MANIFEST.txt; done
-	@echo ""                                                         >> $(DEST)/MANIFEST.txt
-	@echo "See docs/DEVELOPER_GUIDE.md in the ELF-DOS repo for the full API reference." >> $(DEST)/MANIFEST.txt
-	@echo "Toolchain (asm02/link02) is NOT included -- see the ELF-DOS repo's own CLAUDE.md Build section for the install location." >> $(DEST)/MANIFEST.txt
-	@echo "SDK exported to $(DEST)"
-	@cat $(DEST)/MANIFEST.txt
+	rm -rf $(SDK_STAGE)
+	mkdir -p $(SDK_ROOT)/include $(SDK_ROOT)/lib
+	cp $(SDK_HEADERS) $(SDK_ROOT)/include/
+	cp $(SDK_LIB_INCS) $(SDK_ROOT)/include/
+	cp $(SDK_LIB_ASM) $(SDK_ROOT)/lib/
+	cp docs/DEVELOPER_GUIDE.md $(SDK_ROOT)/
+	@echo "ELF-DOS SDK snapshot"                                     >  $(SDK_ROOT)/MANIFEST.txt
+	@echo "Packaged:       $$(date -u +%Y-%m-%dT%H:%M:%SZ)"          >> $(SDK_ROOT)/MANIFEST.txt
+	@echo "ELF-DOS commit: $$(git rev-parse HEAD)"                   >> $(SDK_ROOT)/MANIFEST.txt
+	@echo "Kernel version: $$(grep -m1 'KERNEL_VER_MAJOR:' kernel/kernel.asm | sed 's/.*equ *//').$$(grep -m1 'KERNEL_VER_MINOR:' kernel/kernel.asm | sed 's/.*equ *//')" >> $(SDK_ROOT)/MANIFEST.txt
+	@echo "PROG_BASE:      $$(grep -m1 '^PROG_BASE:' include/kernel_api.inc | sed 's/.*equ *//' | awk '{print $$1}')" >> $(SDK_ROOT)/MANIFEST.txt
+	@echo ""                                                         >> $(SDK_ROOT)/MANIFEST.txt
+	@echo "Headers:"                                                 >> $(SDK_ROOT)/MANIFEST.txt
+	@for f in $(SDK_HEADERS) $(SDK_LIB_INCS); do echo "  $$f" >> $(SDK_ROOT)/MANIFEST.txt; done
+	@echo "Library modules (lib/):"                                  >> $(SDK_ROOT)/MANIFEST.txt
+	@for m in $(SDK_LIB_MODULES); do echo "  $$m.asm" >> $(SDK_ROOT)/MANIFEST.txt; done
+	@echo ""                                                         >> $(SDK_ROOT)/MANIFEST.txt
+	@echo "DEVELOPER_GUIDE.md included -- see it for the full API reference." >> $(SDK_ROOT)/MANIFEST.txt
+	@echo "Toolchain (asm02/link02) is NOT included -- see DEVELOPER_GUIDE.md's own Build section for install instructions." >> $(SDK_ROOT)/MANIFEST.txt
+	tar -czf $(SDK_OUT) -C $(SDK_STAGE) $(SDK_NAME)
+	rm -rf $(SDK_STAGE)
+	@rmdir build 2>/dev/null || true
+	@echo "SDK packaged to $(SDK_OUT)"
 
 clean:
 	rm -f boot/*.prg boot/*.lst \
 	      kernel/*.prg kernel/*.lst \
 	      progs/*.prg progs/*.lst progs/*.build progs/*.lkb \
 	      test/*.prg test/*.lst test/*.build test/*.lkb \
-	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
+	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN) \
+	      $(SDK_OUT)
 	rm -rf test/bin
 	rm -rf bin
+	rm -rf build

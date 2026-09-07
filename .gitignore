@@ -6,6 +6,11 @@
 # separate from /bin/ above
 /test/bin/
 
+# SDK package build output (see "make sdk" / "nmake /F Makefile.win sdk")
+/elfdos-sdk.tar.gz
+/elfdos-sdk.zip
+/build/
+
 # Prerequisites
 *.d
 
