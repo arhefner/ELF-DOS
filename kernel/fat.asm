@@ -181,7 +181,20 @@ fls_load:
             mov     rf, fat_dirty
             ldn     rf
             lbz     fls_no_flush
+            push    rb                  ; fat_flush clobbers RB (it uses
+                                        ; RB.0 as scratch for the cached
+                                        ; sector index and the FAT-copy
+                                        ; countdown) -- the SAME
+                                        ; undocumented-clobber trap fixed
+                                        ; below at this proc's own
+                                        ; fat_csec update, and with the
+                                        ; same consequence for
+                                        ; _fcb_sector_lba_and_iobuf's live
+                                        ; FCB pointer. This proc's header
+                                        ; promises "R7, R8, RF" only, so
+                                        ; RB has to survive here too.
             call    fat_flush
+            pop     rb
             lbdf    fls_err
 fls_no_flush:
 
@@ -240,8 +253,26 @@ fls_no_flush:
             inc     rf                  ; rf = fat_csec+1 (destination
                                         ; for the low byte, kept live
                                         ; across the reload below)
-            mov     rb, fls_cluster     ; rb -> fls_cluster's HIGH byte
-            ldn     rb                  ; D = sector index
+            ; BUG FIX (2026-09-07): this used RB as the scratch
+            ; pointer here, clobbering it on the cache-MISS path only
+            ; -- while this proc's own header (and fat_get's, which
+            ; forwards it) documents just "R7, R8, RF". RB is exactly
+            ; the register kernel/file.asm's _fcb_sector_lba_and_iobuf
+            ; keeps the live FCB pointer in across its own fat_get
+            ; call, so a FAT-cache miss during a cluster advance left
+            ; that routine reading FCB_CSECT/FCB_IOBUF (and writing
+            ; FCB_CCLUST/FCB_CSECT) out of this file's own data area
+            ; instead of the real FCB: one sector of the file silently
+            ; duplicated in the caller's buffer, AND a wild 512-byte
+            ; f_ideread straight into whatever address the garbage
+            ; "iobuf" pointer happened to name. Reproduced end to end
+            ; under Run/02 (a 32MB spc=4 FAT16 image: /bin/shell's own
+            ; first cluster crossing landed a sector at $BFF8 and left
+            ; file offset $800-$9FF holding a copy of $600-$7FF).
+            ; R7 is free here (its LBA duty ended at the f_ideread
+            ; above) and already in the documented clobber list.
+            mov     r7, fls_cluster     ; r7 -> fls_cluster's HIGH byte
+            ldn     r7                  ; D = sector index
             str     rf                  ; fat_csec low byte = index
 
             ; freshly-loaded sector is clean
