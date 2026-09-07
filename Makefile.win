@@ -508,6 +508,13 @@ progs: bin $(SPECIAL_BINS) bin\batch.mod
 test: test\bin $(TEST_SPECIAL_BINS)
 	build_test.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
 
+# everything: all + progs + test. Use this after "clean", which removes
+# bin\ and test\bin\ while the default "all" rebuilds only the kernel --
+# a bare "clean" then "all" leaves a tree with no programs at all.
+# Deliberately excludes "sdk", which packages a release archive rather
+# than building the system.
+everything: all progs test
+
 # sys\elfdos-sys.exe: the host-side installer, compiled from sys\sys.c
 # with MSVC (see this file's own header comment). cd's into sys\ to
 # match cl's own default output-naming convention (plain "cl sys.c"

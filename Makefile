@@ -11,6 +11,10 @@
 #   test       build every test/*.asm into test/bin/<name> -- diagnostic/
 #              subsystem-exercising programs, kept out of bin/ entirely
 #              so a normal install's /bin never includes them
+#   everything all + progs + test. Use this after "make clean" -- a bare
+#              "make" rebuilds only the kernel and leaves bin/ missing.
+#              Does not build "sdk" (a release package, not a build
+#              output)
 #   sdk        package the external-developer SDK (headers, lib/
 #              modules, Developer's Guide) into elfdos-sdk.tar.gz --
 #              a self-contained download, no repo clone needed
@@ -127,7 +131,7 @@ PROG_EXES = $(patsubst progs/%.asm,bin/%,$(PROG_SRCS))
 TEST_SRCS = $(wildcard test/*.asm)
 TEST_EXES = $(patsubst test/%.asm,test/bin/%,$(TEST_SRCS))
 
-.PHONY: all mbr install update progs test sdk clean
+.PHONY: all everything mbr install update progs test sdk clean
 
 all: $(FULL_BIN)
 
@@ -481,6 +485,23 @@ progs: $(PROG_EXES) bin/batch.mod
 # convention as progs/, deliberately never mixed into bin/ itself (see
 # TEST_SRCS/TEST_EXES above).
 test: $(TEST_EXES)
+
+# Everything a running system needs: the kernel image, /bin, and the
+# test programs.
+#
+# Exists because "clean" removes bin/ and test/bin/, while the default
+# "all" target rebuilds only the kernel -- so a bare "make clean; make"
+# leaves a tree with NO programs at all, and the next card you build
+# has an empty /bin. That has now caught two separate sessions, in both
+# cases with nothing obviously wrong to see; use this instead of "all"
+# after any clean.
+#
+# Deliberately does NOT build "sdk": that packages a release tarball
+# (elfdos-sdk.tar.gz) for external developers, which is a publishing
+# step rather than part of building the system, and dropping a stale
+# archive in the tree on every rebuild would be noise. Run "make sdk"
+# when you actually want to cut one.
+everything: all progs test
 
 #------------------------------------------------------------------
 # SDK package -- a single self-contained elfdos-sdk.tar.gz a developer
