@@ -68,11 +68,7 @@ start:
             phi     rd
             ldn     rf
             plo     rd
-            mov     rf, mem_buf
-            call    f_uintout           ; writes decimal ASCII into
-                                        ; *rf, advances rf
-            ldi     0
-            str     rf                  ; null-terminate
+            call    hex4                ; RD -> "$xxxx",0 in mem_buf
             mov     rf, mem_buf
             call    K_MSG
 
@@ -86,10 +82,7 @@ start:
             phi     rd
             ldi     low PROG_BASE
             plo     rd
-            mov     rf, mem_buf
-            call    f_uintout
-            ldi     0
-            str     rf
+            call    hex4                ; RD -> "$xxxx",0 in mem_buf
             mov     rf, mem_buf
             call    K_MSG
 
@@ -125,8 +118,109 @@ start:
             ldi     0                   ; exit code 0 = success
             rtn
 
+;------------------------------------------------------------------
+; hex4: format RD as "$xxxx",0 into mem_buf.
+;
+; Hand-rolled rather than calling the BIOS's own f_hexout4: that
+; routine has never been exercised anywhere in this codebase, so its
+; register contract is unconfirmed -- the same reason progs/hexdump.asm
+; hand-rolls its own hex output instead. hex_byte/hex_nibble below are
+; that file's routines, copied rather than shared (small-helper
+; duplication is this project's established DIR/STAT precedent).
+;
+; Lowercase digits, matching hexdump.asm, so the project has one hex
+; convention rather than two. The "$" prefix is added here because
+; these are single values in a labelled report, where hexdump omits it
+; to keep a dense byte column readable.
+;
+; Args:     RD = value to format
+; Returns:  mem_buf holds "$xxxx",0
+; Modifies: D, DF, RB, RC, RF (RD is preserved via hex_val, since
+;           hex_byte's own scratch use of RC/RF makes trusting any
+;           register across it a gotcha #10 waiting to happen)
+;------------------------------------------------------------------
+hex4:
+            mov     rb, hex_val         ; set the destination pointer
+                                        ; BEFORE loading the value --
+                                        ; "mov" clobbers D (gotcha #4)
+            ghi     rd
+            str     rb                  ; hex_val.hi = RD.hi
+            inc     rb
+            glo     rd
+            str     rb                  ; hex_val.lo = RD.lo
+
+            mov     rf, mem_buf
+            ldi     '$'
+            str     rf
+            inc     rf
+
+            mov     rb, hex_val
+            ldn     rb
+            call    hex_byte            ; high byte -> 2 digits at RF
+
+            ; Re-derive the low-byte pointer from memory rather than
+            ; keeping it in RB across the call. hex_byte does not in
+            ; fact touch RB today, but its documented footprint is
+            ; D/DF/RC.0/RF and relying on anything beyond that is
+            ; exactly the assumption gotcha #10 keeps punishing. RF is
+            ; deliberately NOT reloaded: hex_byte advancing it past the
+            ; digits it wrote is its contract, and that is what puts
+            ; the next two digits in the right place.
+            mov     rb, hex_val
+            inc     rb
+            ldn     rb
+            call    hex_byte            ; low byte -> 2 digits at RF
+
+            ldi     0
+            str     rf                  ; null-terminate
+            rtn
+
+;------------------------------------------------------------------
+; hex_byte: write D as two lowercase hex digits at *RF, advancing RF.
+; Modifies: D, DF, RC.0, RF
+;------------------------------------------------------------------
+hex_byte:
+            plo     rc                  ; RC.0 = byte (stash across the
+                                        ; two hex_nibble calls)
+            glo     rc
+            shr
+            shr
+            shr
+            shr                         ; D = high nibble (SHR always
+                                        ; zero-fills, so four give a
+                                        ; clean >>4 with no DF
+                                        ; dependency)
+            call    hex_nibble
+            str     rf
+            inc     rf
+
+            glo     rc
+            ani     $0F                 ; D = low nibble
+            call    hex_nibble
+            str     rf
+            inc     rf
+            rtn
+
+;------------------------------------------------------------------
+; hex_nibble: D (0-15) -> its lowercase ASCII hex digit.
+;------------------------------------------------------------------
+hex_nibble:
+            smi     10
+            lbnf    hn_digit            ; DF=0 (borrow): nibble < 10
+            adi     'a'                 ; nibble >= 10: D = 'a' +
+                                        ; (nibble-10)
+            rtn
+hn_digit:
+            adi     10 + '0'            ; D = (nibble-10) + 10 + '0'
+                                        ; = nibble + '0'
+            rtn
+
 mem_top_val:    dw      0
-mem_buf:        ds      6               ; decimal scratch (max
-                                        ; "65535"+null)
+hex_val:        dw      0               ; hex4's own copy of RD, held in
+                                        ; memory across its hex_byte
+                                        ; calls
+mem_buf:        ds      8               ; scratch: "$xxxx"+null (6) for
+                                        ; hex4, "65535"+null (6) for
+                                        ; f_uintout -- 8 for headroom
 
             end     start
