@@ -113,6 +113,8 @@
             extrn   fo_iobuf
             extrn   fo_drive
             extrn   fr_request
+            extrn   _fcb_calc_transferred
+            extrn   _fcb_advance_after_chunk
             extrn   fcrw_slot
             extrn   fcrw_iobuf
             extrn   _fclose_rewrite_size
@@ -5066,6 +5068,123 @@ ftc_err:
 ; ----------------------------------------------------------------
             endp
 
+;------------------------------------------------------------------
+; _fcb_calc_transferred: turn "bytes still outstanding" into "bytes
+; actually transferred", for the return value of file_read/file_write.
+;
+; Was two byte-for-byte identical copies, fread_calc_read and
+; fwrite_calc_written -- identical down to both already reading the
+; same fr_request variable. They could not simply call one another:
+; each lived inside its own proc, and a proc-local label is not
+; reachable from another proc (see the extrn/public convention).
+;
+; Args:    RC = bytes still outstanding
+;          fr_request = the count originally asked for
+; Returns: RC = fr_request - RC, the number actually transferred
+; Modifies: RF, RD, R9, RC
+;------------------------------------------------------------------
+;------------------------------------------------------------------
+; _fcb_advance_after_chunk: after a chunk of bytes has been moved,
+; charge it against the outstanding count and step the FCB's position
+; on if that filled the current sector.
+;
+; Was duplicated byte-for-byte between file_read and file_write --
+; identical apart from the name of the label each branched to when no
+; wrap was needed, and in both cases that label was merely the join
+; point where the routine loops round again. So the whole block
+; collapses to one call, each caller keeping its own "lbr <its>_loop".
+;
+; Args:    RB = FCB base, R7 = chunk just transferred,
+;          RC = bytes still outstanding
+; Returns: RC reduced by the chunk. If that filled the sector,
+;          FCB_BOFF is reset, FCB_CSECT stepped on, and the FCB's
+;          FCB_F_IOVALID bit cleared so the next access reloads.
+; Modifies: RF, R8, RC, D, DF
+;------------------------------------------------------------------
+            proc    _fcb_advance_after_chunk
+            glo     r7
+            str     r2
+            glo     rc
+            sm
+            plo     rc
+            ghi     r7
+            str     r2
+            ghi     rc
+            smb
+            phi     rc                  ; RC -= chunk
+
+            ; ---- did we cross a sector boundary? (FCB_BOFF == 512) ----
+            call    _fcb_load_boff
+
+            ghi     r8
+            xri     $02
+            lbnz    fac_done
+            glo     r8
+            lbnz    fac_done
+
+            ; FCB_BOFF == 512 exactly: wrap to the next sector
+            mov     rf, rb
+            add16   rf, FCB_BOFF
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf                  ; FCB_BOFF = 0
+
+            mov     rf, rb
+            add16   rf, FCB_CSECT
+            ldn     rf
+            adi     1
+            str     rf                  ; FCB_CSECT++ (2026-09-02: no
+                                        ; longer resolved speculatively
+                                        ; here, even if this reaches
+                                        ; bpb_spc -- resolving which
+                                        ; cluster comes next is now
+                                        ; done lazily, only once a
+                                        ; sector actually needs to be
+                                        ; loaded -- see
+                                        ; _fcb_sector_lba_and_iobuf's
+                                        ; own header comment for why)
+
+            ; clear this FCB's own IOVALID flag so the next iteration
+            ; reloads the sector (position just advanced into new
+            ; territory) -- $EF clears just bit $10 (FCB_F_IOVALID),
+            ; preserving FCB_F_OPEN/FCB_F_WRITE/FCB_F_DIRTY/
+            ; FCB_F_SIZECHG
+            mov     rf, rb              ; RF -> FCB_FLAGS
+            ldn     rf
+            ani     $EF
+            str     rf
+
+fac_done:
+            rtn
+            endp
+
+            proc    _fcb_calc_transferred
+            ; RC = fr_request - RC(remaining)  -->  bytes transferred
+            mov     rf, fr_request
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = original requested count
+
+            glo     rc
+            str     r2
+            glo     rd
+            sm
+            plo     r9
+            ghi     rc
+            str     r2
+            ghi     rd
+            smb
+            phi     r9                  ; R9 = bytes transferred
+
+            ghi     r9
+            phi     rc
+            glo     r9
+            plo     rc                  ; RC = bytes transferred (return)
+            rtn
+            endp
+
             proc    file_read
             ; File sizes/positions up to the full 32 bits FCB_FSIZE/
             ; FCB_FPOS actually hold are supported (2026-07-26) -- the
@@ -5336,64 +5455,12 @@ fread_copy_done:
             call    _fcb_store_fpos32
 
             ; RC -= chunk
-            glo     r7
-            str     r2
-            glo     rc
-            sm
-            plo     rc
-            ghi     r7
-            str     r2
-            ghi     rc
-            smb
-            phi     rc                  ; RC -= chunk
-
-            ; ---- did we cross a sector boundary? (FCB_BOFF == 512) ----
-            call    _fcb_load_boff
-
-            ghi     r8
-            xri     $02
-            lbnz    fread_no_sector_wrap
-            glo     r8
-            lbnz    fread_no_sector_wrap
-
-            ; FCB_BOFF == 512 exactly: wrap to the next sector
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf                  ; FCB_BOFF = 0
-
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldn     rf
-            adi     1
-            str     rf                  ; FCB_CSECT++ (2026-09-02: no
-                                        ; longer resolved speculatively
-                                        ; here, even if this reaches
-                                        ; bpb_spc -- resolving which
-                                        ; cluster comes next is now
-                                        ; done lazily, only once a
-                                        ; sector actually needs to be
-                                        ; loaded -- see
-                                        ; _fcb_sector_lba_and_iobuf's
-                                        ; own header comment for why)
-
-            ; clear this FCB's own IOVALID flag so the next iteration
-            ; reloads the sector (position just advanced into new
-            ; territory) -- $EF clears just bit $10 (FCB_F_IOVALID),
-            ; preserving FCB_F_OPEN/FCB_F_WRITE/FCB_F_DIRTY/
-            ; FCB_F_SIZECHG
-            mov     rf, rb              ; RF -> FCB_FLAGS
-            ldn     rf
-            ani     $EF
-            str     rf
-
+            call    _fcb_advance_after_chunk
 fread_no_sector_wrap:
             lbr     fread_loop
 
 fread_done:
-            call    fread_calc_read
+            call    _fcb_calc_transferred
             clc                         ; DF = 0, success
             rtn
 
@@ -5403,34 +5470,10 @@ fread_ioerr_cleanup:
             pop     ra
             pop     rd
 fread_ioerr:
-            call    fread_calc_read
+            call    _fcb_calc_transferred
             stc                         ; DF = 1, error
             rtn
 
-fread_calc_read:
-            ; RC = fr_request - RC(remaining)  -->  bytes actually read
-            mov     rf, fr_request
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = original requested count
-
-            glo     rc
-            str     r2
-            glo     rd
-            sm
-            plo     r9
-            ghi     rc
-            str     r2
-            ghi     rd
-            smb
-            phi     r9                  ; R9 = bytes_read
-
-            ghi     r9
-            phi     rc
-            glo     r9
-            plo     rc                  ; RC = bytes_read (return value)
-            rtn
 
 ; ----------------------------------------------------------------
 ; file_write: write bytes from a buffer into an open file
@@ -5838,96 +5881,20 @@ fwrite_copy_done:
 
 fwrite_no_grow:
             ; RC -= chunk
-            glo     r7
-            str     r2
-            glo     rc
-            sm
-            plo     rc
-            ghi     r7
-            str     r2
-            ghi     rc
-            smb
-            phi     rc                  ; RC -= chunk
-
-            ; ---- did we cross a sector boundary? (FCB_BOFF == 512) ----
-            call    _fcb_load_boff        ; R8 = FCB_BOFF (post-update)
-
-            ghi     r8
-            xri     $02
-            lbnz    fwrite_no_sector_wrap
-            glo     r8
-            lbnz    fwrite_no_sector_wrap
-
-            ; FCB_BOFF == 512 exactly: wrap to the next sector
-            mov     rf, rb
-            add16   rf, FCB_BOFF
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf                  ; FCB_BOFF = 0
-
-            mov     rf, rb
-            add16   rf, FCB_CSECT
-            ldn     rf
-            adi     1
-            str     rf                  ; FCB_CSECT++ (2026-09-03: no
-                                        ; longer resolved OR allocated
-                                        ; here, even if this reaches
-                                        ; bpb_spc -- both are now
-                                        ; deferred entirely to
-                                        ; fwrite_resolve_cluster,
-                                        ; called lazily from the
-                                        ; "ensure IOBUF holds sector"
-                                        ; pre-check, the NEXT time a
-                                        ; chunk genuinely needs
-                                        ; writing -- see that block's
-                                        ; own header comment for why)
-
-            ; clear this FCB's own IOVALID flag so the next iteration
-            ; reloads the sector (position just advanced into new
-            ; territory) -- $EF clears just bit $10 (FCB_F_IOVALID)
-            mov     rf, rb              ; RF -> FCB_FLAGS
-            ldn     rf
-            ani     $EF
-            str     rf
-
+            call    _fcb_advance_after_chunk
 fwrite_no_sector_wrap:
             lbr     fwrite_loop
 
 fwrite_done:
-            call    fwrite_calc_written
+            call    _fcb_calc_transferred
             clc                         ; DF = 0, success
             rtn
 
 fwrite_ioerr:
-            call    fwrite_calc_written
+            call    _fcb_calc_transferred
             stc                         ; DF = 1, error
             rtn
 
-fwrite_calc_written:
-            ; RC = fr_request - RC(remaining)  -->  bytes actually written
-            mov     rf, fr_request
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = original requested count
-
-            glo     rc
-            str     r2
-            glo     rd
-            sm
-            plo     r9
-            ghi     rc
-            str     r2
-            ghi     rd
-            smb
-            phi     r9                  ; R9 = bytes_written
-
-            ghi     r9
-            phi     rc
-            glo     r9
-            plo     rc                  ; RC = bytes_written (return value)
-            rtn
 
 fwrite_resolve_err:
             ; fwrite_resolve_cluster failed -- unwind the ra/rb/rc
