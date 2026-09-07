@@ -43,6 +43,39 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
+            ; The BIOS's own view of the last usable RAM byte, captured
+            ; FIRST so nothing else has run yet. This is the hardware
+            ; ceiling; mem_top below is the kernel's, which is lower --
+            ; the gap holds the stack and, under the split memory model,
+            ; the non-volatile kernel (see include/memmap.inc).
+            ;
+            ; Stashed immediately: f_freemem's register footprint beyond
+            ; "RF = result" is not documented anywhere in this codebase,
+            ; so nothing is trusted to survive it.
+            call    f_freemem           ; RF = address of last RAM byte
+            mov     rb, ram_top_val     ; dest pointer FIRST -- "mov"
+                                        ; clobbers D (gotcha #4)
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; ram_top_val = f_freemem result
+
+            call    K_INMSG
+            db      "Top of RAM (f_freemem):      ",0
+
+            mov     rf, ram_top_val
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    hex4
+            mov     rf, mem_buf
+            call    K_MSG
+
+            call    K_INMSG
+            db      13,10,0
+
             ; mem_top = LOADER_ARGS word 1 (word 0 is mem_base, not
             ; needed here) -- read fresh every run, never cached,
             ; since it's only meaningful for THIS specific invocation
@@ -215,6 +248,7 @@ hn_digit:
                                         ; = nibble + '0'
             rtn
 
+ram_top_val:    dw      0               ; f_freemem's answer
 mem_top_val:    dw      0
 hex_val:        dw      0               ; hex4's own copy of RD, held in
                                         ; memory across its hex_byte
