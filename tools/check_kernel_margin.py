@@ -429,16 +429,32 @@ def main():
               f"{floor_name} ({floor_addr:04x}), the relay-region floor.")
 
     # Check (3): the non-volatile region must fit under its ceiling.
-    # On a ROM machine this is the physical end of the part; on a
+    # On a ROM machine that is the physical end of the part; on a
     # RAM-only machine it is the highest address krnboot may load to.
-    nv_margin = nvk_top - nv_top
+    #
+    # Measure what krnboot actually WRITES, not the image's byte length.
+    # It loads whole 512-byte sectors, so the final sector is written in
+    # full even when the image only partly fills it -- up to 511 bytes
+    # past the image's own end. Checking the byte end let NVK_BASE=$BD00
+    # pass while the load ran 256 bytes into ROM at $F000, which hung the
+    # machine at boot with no output at all. The overrun is invisible at
+    # a base where those bytes happen to land in free RAM, which is
+    # exactly why it has to be checked rather than eyeballed.
+    SECTOR = 512
+    nv_bytes = nv_top - nvk_base + 1
+    nv_sectors = (nv_bytes + SECTOR - 1) // SECTOR
+    load_end = nvk_base + nv_sectors * SECTOR - 1
+    nv_margin = nvk_top - load_end
     if nv_margin < 0:
         failed = True
-        print(f"  FAIL: non-volatile kernel ends at {nv_top:04x}, past "
-              f"NVK_TOP ({nvk_top:04x}) by {-nv_margin} bytes.")
+        print(f"  FAIL: non-volatile image is {nv_bytes} bytes "
+              f"({nv_sectors} sectors), so krnboot writes "
+              f"{nvk_base:04x}-{load_end:04x} -- {-nv_margin} bytes past "
+              f"NVK_TOP ({nvk_top:04x}). Lower NVK_BASE.")
     print(f"check_kernel_margin: {'OK' if nv_margin >= 0 else 'FAILED'} -- "
-          f"{nv_margin} bytes between the non-volatile top ({nv_top:04x}) "
-          f"and NVK_TOP ({nvk_top:04x}).")
+          f"non-volatile image ends {nv_top:04x}, krnboot writes through "
+          f"{load_end:04x} ({nv_sectors} whole sectors), {nv_margin} bytes "
+          f"below NVK_TOP ({nvk_top:04x}).")
 
     sys.exit(1 if failed else 0)
 

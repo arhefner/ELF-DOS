@@ -131,9 +131,17 @@ def main():
     if vol_end >= nvk_base:
         sys.exit(f"error: volatile region ends at {vol_end:04x}, at or past "
                  f"NVK_BASE ({nvk_base:04x})")
-    if nv_end > nvk_top:
-        sys.exit(f"error: non-volatile region ends at {nv_end:04x}, past "
-                 f"NVK_TOP ({nvk_top:04x})")
+    # krnboot loads WHOLE sectors, so the final one is written in full
+    # even when the image only partly fills it. Check the address the
+    # load actually reaches, not the image's own end -- the difference
+    # is up to 511 bytes, and at NVK_BASE=$BD00 it silently ran into ROM
+    # and hung the machine at boot with no output.
+    nv_load_end = nvk_base + sectors(len(data) - (nvk_base - base)) * SECTOR_SIZE - 1
+    if nv_load_end > nvk_top:
+        sys.exit(f"error: non-volatile image ends at {nv_end:04x}, but "
+                 f"krnboot loads whole sectors and would write through "
+                 f"{nv_load_end:04x}, past NVK_TOP ({nvk_top:04x}). "
+                 f"Lower NVK_BASE.")
 
     vol = data[0:vol_end - base + 1]
     nv = data[nvk_base - base:]

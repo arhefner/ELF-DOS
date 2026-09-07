@@ -40,7 +40,8 @@
 ; notes for the planned NVK_TOP -> NVK_BASE auto-derivation).
 ;
 ; Currently set for a 60K RAM + 4K ROM machine: RAM $0000-$EFFF, ROM
-; from $F000. The non-volatile kernel is loaded into high RAM every
+; from $F000. NVK_TOP is the last RAM byte, NOT the last address --
+; krnboot must never write above it (see trap 1 below). The non-volatile kernel is loaded into high RAM every
 ; boot (there is no room for it in a 4K ROM), so NVK_BASE is placed as
 ; HIGH as it can go -- every byte it moves up is a byte of program RAM
 ; handed back below it.
@@ -53,25 +54,40 @@
 ;   2. If it FAILS (region past NVK_TOP), lower NVK_BASE and rebuild.
 ;      If headroom is large, raise it.
 ;
-; Do NOT expect base + size to be constant while doing this. -r
-; relaxation shortens a long branch only when source and target share a
-; 256-byte page, so moving NVK_BASE shifts every proc and flips a few
-; branches either way: measured sizes ranged 12905-12919 bytes across
-; bases only 144 apart, and $BD90 -- which arithmetic said would end
-; exactly at $EFFE -- actually overran $EFFF by 5. Always trust the
-; built figure, never the computed one.
+; TWO TRAPS, both of which have already cost a hardware round:
 ;
-; $BD00 was chosen over the highest base that fits ($BD8D, 9 bytes of
-; headroom): it gives up 141 bytes of program RAM out of ~45,000
-; (0.3%) for 145 bytes of headroom instead of 9, so an ordinary kernel
-; change does not immediately force another hand-tuning round. It is
-; also page-aligned, which keeps the arithmetic easy to redo.
+; 1. krnboot loads WHOLE SECTORS. The last one is written in full even
+;    when the image only partly fills it, so the load reaches up to 511
+;    bytes past the image's own end. NVK_BASE=$BD00 put the image at
+;    $BD00-$EF6E, comfortably under $EFFF -- but the load wrote through
+;    $F0FF, 256 bytes into ROM, and the machine hung at boot with no
+;    output whatsoever. The constraint is on the SECTOR-ROUNDED span:
+;
+;      NVK_BASE + ceil(size/512)*512 - 1  <=  NVK_TOP
+;
+;    tools/check_kernel_margin.py now enforces exactly this, and reports
+;    the address krnboot really writes through. Trust that line.
+;
+; 2. base + size is NOT constant. -r relaxation shortens a long branch
+;    only when source and target share a 256-byte page, so moving
+;    NVK_BASE shifts every proc and flips branches either way: measured
+;    sizes ranged 12905-12919 bytes across bases only 144 apart, and
+;    $BD90 -- which arithmetic said would end exactly at $EFFE --
+;    actually overran by 5. Always trust the built figure.
+;
+; $BA00 leaves a full 512-byte sector of headroom on the load span
+; (26 sectors reach $EDFF, against a $EFFF ceiling). $BC00 would be the
+; highest base that fits today, but with ZERO margin: one more byte of
+; kernel would tip it to 27 sectors and silently reproduce trap 1. A
+; whole spare sector costs 512 bytes of program RAM out of ~44,000
+; (1.2%) and buys immunity to exactly the failure that has already
+; happened once.
 ;
 ; For a 32K RAM + 32K ROM machine, use NVK_BASE $8000 / NVK_TOP $FFFF:
 ; the kernel then sits in ROM, krnboot finds the signature already
 ; present and skips loading it entirely.
 ;
-NVK_BASE:       equ     $BD00       ; start of the non-volatile kernel
+NVK_BASE:       equ     $BA00       ; start of the non-volatile kernel
 NVK_TOP:        equ     $EFFF       ; ceiling; build fails if exceeded
 
 ; Signature krnboot checks to decide "is the non-volatile kernel
