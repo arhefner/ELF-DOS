@@ -65,6 +65,21 @@
 # to carry a running note about exactly this gap -- removed now that
 # it's closed; if it opens again, that's the place to look.
 #
+# CAUGHT UP AGAIN (2026-09-06): this file had drifted a second time --
+# KOBJ still referenced kernel\glob.prg, a source file that no longer
+# exists in this repo (kernel/glob.asm was removed when file globbing
+# moved to lib/file_glob.asm; the Linux Makefile's own KOBJ never
+# carried it), which would have made every Windows kernel build fail
+# outright with a missing-file error from asm02. test\rwboundtest.asm
+# (needs lib\fmt32.prg) was also missing from TEST_SPECIAL_BINS and
+# build_test.bat's skip list, so it would have either failed to link
+# (auto-built without its lib dependency) if reached at all. Both fixed
+# below. Lesson for next time: whenever a kernel/*.asm or test/*.asm
+# file is added, removed, or gains/loses a lib\ dependency on Linux,
+# check this file and its two build_*.bat companions in the same
+# change -- they don't auto-discover the way the Linux Makefile's own
+# $(wildcard ...)-based KOBJ/TEST_SRCS do.
+#
 
 ASM         = asm02
 ASMFLAGS    = -L -C -I .. -r
@@ -92,6 +107,12 @@ FULL_BIN    = kernel-full.bin
 # kernel\batch.asm's own dispatcher) MUST be part of this list -- the
 # kernel link fails with unresolved symbols (mod_load, mod_release,
 # icall) without them, same as on Linux.
+#
+# kernel\glob.prg was removed here 2026-09-06 -- kernel/glob.asm doesn't
+# exist in this repo any more (superseded by lib/file_glob.asm, see the
+# Linux Makefile's own KOBJ, which never included it either). Keeping a
+# build rule for a nonexistent source file made every Windows kernel
+# build fail outright.
 KOBJ =  kernel\kernel.prg  \
         kernel\fat.prg     \
         kernel\dir.prg     \
@@ -101,7 +122,6 @@ KOBJ =  kernel\kernel.prg  \
         kernel\loader.prg  \
         kernel\batch.prg   \
         kernel\redir.prg   \
-        kernel\glob.prg    \
         lib\modload.prg    \
         lib\icall.prg
 
@@ -121,7 +141,7 @@ SPECIAL_BINS = bin\printenv bin\export bin\unset \
 # ---- The test\*.asm that link against lib\ -- see build_test.bat's
 # own exclusion list, which must be kept in sync with this set ----
 TEST_SPECIAL_BINS = test\bin\envtest test\bin\bumptest test\bin\malloctest \
-        test\bin\big64test test\bin\corrupt
+        test\bin\big64test test\bin\rwboundtest test\bin\corrupt
 
 all: $(FULL_BIN)
 
@@ -163,9 +183,6 @@ kernel\batch.prg: kernel\batch.asm $(INCS) include\batchmod.inc
 
 kernel\redir.prg: kernel\redir.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) redir.asm
-
-kernel\glob.prg: kernel\glob.asm $(INCS)
-	cd kernel && $(ASM) $(ASMFLAGS) glob.asm
 
 # kernel\batch_mod.asm: the loadable batch-script module -- NOT part of
 # KOBJ/kernel.bin. A standalone build (own "-m" module link, see the
@@ -289,6 +306,13 @@ test\big64test.prg: test\big64test.asm include\kernel_api.inc include\bios.inc i
 test\bin\big64test: test\big64test.prg lib\fmt32.prg test\bin
 	$(LINK) $(LFLAGS) -o test\bin\big64test test\big64test.prg lib\fmt32.prg
 	-del /F /Q test\bin\big64test.lkb
+
+test\rwboundtest.prg: test\rwboundtest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd test && $(ASM) $(ASMFLAGS) rwboundtest.asm
+
+test\bin\rwboundtest: test\rwboundtest.prg lib\fmt32.prg test\bin
+	$(LINK) $(LFLAGS) -o test\bin\rwboundtest test\rwboundtest.prg lib\fmt32.prg
+	-del /F /Q test\bin\rwboundtest.lkb
 
 test\corrupt.prg: test\corrupt.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd test && $(ASM) $(ASMFLAGS) corrupt.asm

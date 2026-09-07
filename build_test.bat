@@ -1,9 +1,11 @@
 @echo off
 rem build_test.bat - auto-discover and build every "ordinary"
-rem (single-file) test\*.asm into test\bin\<name>, skipping the 3
-rem programs that link against lib\ (envtest, bumptest, malloctest --
-rem those get real nmake rules in Makefile.win instead, with proper
-rem incremental rebuilds -- see its own header comment). Invoked by
+rem (single-file) test\*.asm into test\bin\<name>, skipping the
+rem programs that link against lib\ (envtest, bumptest, malloctest,
+rem big64test, rwboundtest, corrupt -- see Makefile.win's own
+rem TEST_SPECIAL_BINS, kept in sync with this skip list) -- those get
+rem real nmake rules in Makefile.win instead, with proper incremental
+rem rebuilds (see its own header comment). Invoked by
 rem "nmake /F Makefile.win test" so that adding a new test\*.asm file
 rem needs no Makefile.win edit, matching build_progs.bat's own
 rem auto-discovery property (and the Linux Makefile's own
@@ -38,6 +40,7 @@ for %%f in (test\*.asm) do (
     if /I "!name!"=="bumptest"   set "skip=1"
     if /I "!name!"=="malloctest" set "skip=1"
     if /I "!name!"=="big64test"  set "skip=1"
+    if /I "!name!"=="rwboundtest" set "skip=1"
     if /I "!name!"=="corrupt"    set "skip=1"
 
     if not defined skip (
