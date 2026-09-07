@@ -385,6 +385,81 @@ the ordinary choice.
 - **Args:** `D` = the character.
 - **Returns:** nothing meaningful.
 
+### Replacing the console with your own
+
+The `K_*` table is not read-only. Every entry is a three-byte long
+branch living in RAM, so a program can point one at its own routine and
+take over that call for the whole system. This is how a custom console -
+a graphics display, a parallel keyboard - can be installed without
+changing the kernel.
+
+The interesting entries for a console are `K_MSG` and `K_INMSG`. Both
+render a whole string, so a display that can paint a string faster than
+one character at a time has something real to gain by taking them over;
+by default they simply loop over the string calling `K_TYPE` for each
+byte.
+
+Each entry is laid out as an opcode byte followed by a two-byte
+big-endian address:
+
+| Entry | Slot | Address bytes to overwrite |
+|---|---|---|
+| `K_TYPE` | `$011E` | `$011F`-`$0120` |
+| `K_MSG` | `$0121` | `$0122`-`$0123` |
+| `K_INMSG` | `$0124` | `$0125`-`$0126` |
+| `K_READ` | `$0151` | `$0152`-`$0153` |
+
+Writing the two address bytes is the whole mechanism - leave the opcode
+byte alone:
+
+```asm
+            mov     rf, K_MSG+1         ; the address field, not the slot
+            ldi     high my_fast_msg
+            str     rf
+            inc     rf
+            ldi     low my_fast_msg
+            str     rf
+```
+
+Save the previous contents first and put them back before exiting,
+unless the takeover is meant to outlive the program.
+
+**`K_MSG` and `K_INMSG` are safe to hook; `K_TYPE` and `K_READ` are
+not.** The kernel rewrites the `K_TYPE` and `K_READ` entries itself
+whenever a command redirects its input or output, and restores them
+afterwards, so a hook installed there is silently discarded. Nothing in
+the kernel ever writes the `K_MSG` or `K_INMSG` entries, so a hook there
+stays put.
+
+**A hook must preserve the registers the stock routine preserves.**
+`K_INMSG` saves and restores `RF`, `RC`, `R9`, `RA` and `RD`, and
+callers do rely on it - `MEM`, for instance, computes a value in `RD`,
+prints a label with `K_INMSG`, then formats `RD`. `K_MSG` preserves
+`RA`, and leaves `RF` pointing at the string's terminating null.
+
+**`K_INMSG` finds its text through `R6`,** which the call itself sets up
+to point just past the call instruction. Reaching a hook through the
+table's own long branch preserves that; reaching it through a further
+nested call would not, because the nested call resets `R6`. Branch to
+your routine, never call it, if you chain onward from a hook.
+
+**Handling redirection.** Output redirection works by pointing `K_TYPE`
+at a routine that writes to a file. `K_MSG` and `K_INMSG` inherit that
+for free precisely because they loop through `K_TYPE`; a hook that
+paints the screen directly would bypass it, and `SOMECOMMAND > FILE`
+would draw on the display instead of writing the file.
+
+To avoid that, a hook can ask whether the console is currently live by
+comparing `K_TYPE`'s address field against the word at `IO_TYPE_TARGET`,
+which always holds the real console output routine detected at boot:
+
+- **equal** - output is not redirected; use the fast path.
+- **different** - output is going somewhere else; fall back to looping
+  over the string calling `K_TYPE`, exactly as the stock routine does.
+
+The same comparison works for input, using `K_READ` against
+`IO_READ_TARGET`.
+
 **`K_GETDEV`**
 Reports which peripheral devices the BIOS detected at boot (for
 example, whether a real-time clock is present).
@@ -452,6 +527,8 @@ Reads back the exit code of the last command that ran.
 | `FCB_IOBUF_LEN` | 512 | Size of the I/O buffer that goes with each FCB. |
 | `DIRENT_LEN` | 139 | Size of the result buffer `K_DIR_READ` and `K_STAT` fill in. |
 | `DIR_STATE_LEN` | 9 | Size of the snapshot buffer `K_DIR_SAVE_STATE`/`K_DIR_RESTORE_STATE` use. |
+| `IO_TYPE_TARGET` | `PROG_BASE - 114` | Word holding the real console output routine found at boot - compare against `K_TYPE`'s address field to tell whether output is redirected. |
+| `IO_READ_TARGET` | `PROG_BASE - 112` | The same, for console input and `K_READ`. |
 | `ATTR_DIR` | `$10` | `DIRENT_ATTR` bit for a subdirectory. |
 | `ATTR_HIDDEN` | `$02` | `DIRENT_ATTR` bit for a hidden entry. |
 

@@ -407,9 +407,15 @@ ATTR_HIDDEN:    equ     $02         ; DIRENT_ATTR bit set for hidden
 ; code, irrelevant once ELF-DOS is already running; setting the
 ; hardware UART's baud rate uses f_usetbd directly (progs/baud.asm),
 ; a genuinely different routine.
-K_TYPE:         equ     $011E       ; -> f_type
-K_MSG:          equ     $0121       ; -> f_msg
-K_INMSG:        equ     $0124       ; -> f_inmsg
+K_TYPE:         equ     $011E       ; -> the real console output
+                                    ; routine, self-modified at boot
+                                    ; (NOT f_type), and rewritten
+                                    ; again while output is redirected
+K_MSG:          equ     $0121       ; -> _redir_msg (NOT f_msg): loops
+                                    ; over the string calling K_TYPE,
+                                    ; so it inherits redirection
+K_INMSG:        equ     $0124       ; -> _redir_inmsg (NOT f_inmsg);
+                                    ; same per-byte K_TYPE loop
 K_GETDEV:       equ     $0127       ; -> f_getdev
 K_GETTOD:       equ     $012A       ; -> f_gettod
 K_SETTOD:       equ     $012D       ; -> f_settod
