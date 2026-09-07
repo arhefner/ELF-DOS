@@ -83,6 +83,7 @@
 #define     SECTOR_SIZE $0200           ; 512 bytes per sector
 #define     CNT_ADDR    $4404           ; volatile sector count in header
 #define     NV_CNT_ADDR $4409           ; non-volatile sector count in header
+#define     LAST_ADDR   $440B           ; bytes used in the last NV sector
 
             org         $4400
 
@@ -101,12 +102,15 @@
 ;   $4404-$4405  word   VOLATILE sector count   -- patched by sys
 ;   $4406-$4408  lbr boot_main  <- KERN_ENTRY, must stay here
 ;   $4409-$440A  word   NON-VOLATILE sector count -- patched by sys
+;   $440B-$440C  word   bytes used in the LAST non-volatile sector,
+;                       1..512 -- patched by tools/split_kernel.py
 ;--------------------------------------------------------------
             db          'K','R','N'     ; 3-byte magic signature
             db          1               ; kernel major version
             dw          0               ; volatile sectors -- patched by sys
             lbr         boot_main       ; $4406 -- MBR's entry point
             dw          0               ; non-volatile sectors -- ditto
+            dw          0               ; bytes in last NV sector -- ditto
 
 ;--------------------------------------------------------------
 ; Bootstrap entry point (reached via the lbr at $4406)
@@ -224,7 +228,60 @@ boot_load_nv:
             glo         rc
             lbz         load_err        ; none in ROM and none on disk
 boot_nv_go: mov         ra,NVK_BASE
-            call        load_sectors
+
+            ; Load every sector but the last one straight to memory...
+            dec         rc                  ; RC = full sectors (>= 0)
+            call        load_sectors        ; a no-op if that leaves 0
+
+            ; ...and the last one through a buffer, copying out only the
+            ; bytes the image really occupies.
+            ;
+            ; WHY: a sector read always writes a full 512 bytes, so
+            ; loading the last one directly would scribble up to 511
+            ; bytes PAST the image. Those bytes are not merely wasted --
+            ; on this hardware the non-volatile kernel sits just below an
+            ; EEPROM, and a write into an EEPROM's address range starts
+            ; an internal write cycle that takes the whole chip offline
+            ; for milliseconds. The BIOS lives in that chip, so the very
+            ; next SCRT return (fetched through R5, which points into
+            ; BIOS ROM) reads a busy chip, executes garbage, and hangs
+            ; with no output at all. That is exactly what NVK_BASE=$BD00
+            ; did. Copying out an exact byte count makes it structurally
+            ; impossible to write outside the image, so NVK_BASE no
+            ; longer has to be hand-placed to dodge the overrun.
+            ;
+            ; boot_scratch is free here: every one of its other uses is
+            ; inside boot_init2, which does not run until the load is
+            ; finished.
+            ;
+            ; RA survives f_ideread -- load_sectors above already relies
+            ; on exactly that, so it is established behaviour, not a new
+            ; assumption. RC is NOT trusted across the call; it is
+            ; reloaded from the header afterwards.
+            mov         rf,boot_scratch
+            call        f_ideread
+            lbdf        load_err
+
+            mov         rf,LAST_ADDR
+            lda         rf
+            phi         rc
+            ldn         rf
+            plo         rc                  ; RC = bytes in the last sector
+            mov         rf,boot_scratch
+
+            ; Test-before-copy, so a zero count copies nothing rather
+            ; than wrapping to 65536 (DEC sets no flags on this CPU, so
+            ; the check has to be explicit either way).
+nv_copy:    ghi         rc
+            lbnz        nv_copy_go
+            glo         rc
+            lbz         nv_copy_done
+nv_copy_go: lda         rf                  ; D = byte, RF++
+            str         ra                  ; store it, RA++ below
+            inc         ra
+            dec         rc
+            lbr         nv_copy
+nv_copy_done:
 
             ; It must really be there now. A silent miss here would hand
             ; control to whatever happens to occupy NVK_BASE -- exactly

@@ -99,6 +99,7 @@ def sectors(n):
 # fixed entry point does not move.
 KVOL_CNT_OFFSET = 4      # $4404-$4405, big-endian
 KNV_CNT_OFFSET = 9       # $4409-$440A, big-endian
+KNV_LAST_OFFSET = 11     # $440B-$440C, bytes used in the last sector
 KRNBOOT_SECTORS = 5      # must match boot/krnboot.asm and boot/mbr.asm
 
 
@@ -131,17 +132,17 @@ def main():
     if vol_end >= nvk_base:
         sys.exit(f"error: volatile region ends at {vol_end:04x}, at or past "
                  f"NVK_BASE ({nvk_base:04x})")
-    # krnboot loads WHOLE sectors, so the final one is written in full
-    # even when the image only partly fills it. Check the address the
-    # load actually reaches, not the image's own end -- the difference
-    # is up to 511 bytes, and at NVK_BASE=$BD00 it silently ran into ROM
-    # and hung the machine at boot with no output.
-    nv_load_end = nvk_base + sectors(len(data) - (nvk_base - base)) * SECTOR_SIZE - 1
-    if nv_load_end > nvk_top:
-        sys.exit(f"error: non-volatile image ends at {nv_end:04x}, but "
-                 f"krnboot loads whole sectors and would write through "
-                 f"{nv_load_end:04x}, past NVK_TOP ({nvk_top:04x}). "
-                 f"Lower NVK_BASE.")
+    # krnboot reads the last sector into a buffer and copies out only
+    # the bytes the image occupies (see boot/krnboot.asm's nv_copy), so
+    # the load writes exactly len(nv) bytes and the image's own end IS
+    # the last address touched. Before that, the load rounded up to a
+    # whole sector and could run up to 511 bytes past the image -- which
+    # on this hardware reached into an EEPROM and hung the machine at
+    # boot with no output. Keep the two in step: if that buffered copy
+    # is ever removed, this check has to go back to the rounded-up span.
+    if nv_end > nvk_top:
+        sys.exit(f"error: non-volatile image ends at {nv_end:04x}, past "
+                 f"NVK_TOP ({nvk_top:04x}). Lower NVK_BASE.")
 
     vol = data[0:vol_end - base + 1]
     nv = data[nvk_base - base:]
@@ -179,10 +180,16 @@ def main():
                  f"boot/mbr.asm and sys/sys.c, and this tool in step")
 
     vol_sectors, nv_sectors = sectors(len(vol)), sectors(len(nv))
+    # Bytes the non-volatile image actually uses in its final sector
+    # (1..512). krnboot copies exactly this many out of its buffer, so
+    # it never writes past the image -- see the note above.
+    nv_last = len(nv) - (nv_sectors - 1) * SECTOR_SIZE
+    assert 1 <= nv_last <= SECTOR_SIZE, nv_last
     for off, n, what in ((KVOL_CNT_OFFSET, vol_sectors, "volatile"),
-                         (KNV_CNT_OFFSET, nv_sectors, "non-volatile")):
+                         (KNV_CNT_OFFSET, nv_sectors, "non-volatile"),
+                         (KNV_LAST_OFFSET, nv_last, "last-sector byte count")):
         if n > 0xFFFF:
-            sys.exit(f"error: {what} image needs {n} sectors, max 65535")
+            sys.exit(f"error: {what} needs {n}, max 65535")
         boot[off] = (n >> 8) & 0xFF
         boot[off + 1] = n & 0xFF
 
@@ -195,8 +202,9 @@ def main():
     print(f"split_kernel: image {full_out}: krnboot {KRNBOOT_SECTORS} + "
           f"volatile {vol_sectors} + non-volatile {nv_sectors} = "
           f"{KRNBOOT_SECTORS + vol_sectors + nv_sectors} sectors")
-    print(f"split_kernel: header counts patched -- "
-          f"$4404={vol_sectors} (volatile), $4409={nv_sectors} (non-volatile)")
+    print(f"split_kernel: header patched -- $4404={vol_sectors} (volatile), "
+          f"$4409={nv_sectors} (non-volatile), $440b={nv_last} "
+          f"(bytes used in the last non-volatile sector)")
 
 
 if __name__ == "__main__":

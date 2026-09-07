@@ -432,29 +432,31 @@ def main():
     # On a ROM machine that is the physical end of the part; on a
     # RAM-only machine it is the highest address krnboot may load to.
     #
-    # Measure what krnboot actually WRITES, not the image's byte length.
-    # It loads whole 512-byte sectors, so the final sector is written in
-    # full even when the image only partly fills it -- up to 511 bytes
-    # past the image's own end. Checking the byte end let NVK_BASE=$BD00
-    # pass while the load ran 256 bytes into ROM at $F000, which hung the
-    # machine at boot with no output at all. The overrun is invisible at
-    # a base where those bytes happen to land in free RAM, which is
-    # exactly why it has to be checked rather than eyeballed.
+    # This is the last address krnboot writes. It reads the final sector
+    # into a buffer and copies out only the bytes the image occupies
+    # (boot/krnboot.asm, nv_copy), so the image's own end is the real
+    # limit.
+    #
+    # It was NOT always so: the load used to round up to a whole sector
+    # and could write up to 511 bytes past the image. At NVK_BASE=$BD00
+    # that reached $F000 -- inside an EEPROM, where a write starts an
+    # internal write cycle that takes the chip (and the BIOS living in
+    # it) offline, so the next SCRT return fetched garbage and the
+    # machine hung at boot with no output. If that buffered copy is ever
+    # removed, this check must go back to measuring the rounded-up span.
     SECTOR = 512
     nv_bytes = nv_top - nvk_base + 1
     nv_sectors = (nv_bytes + SECTOR - 1) // SECTOR
-    load_end = nvk_base + nv_sectors * SECTOR - 1
-    nv_margin = nvk_top - load_end
+    nv_margin = nvk_top - nv_top
     if nv_margin < 0:
         failed = True
-        print(f"  FAIL: non-volatile image is {nv_bytes} bytes "
-              f"({nv_sectors} sectors), so krnboot writes "
-              f"{nvk_base:04x}-{load_end:04x} -- {-nv_margin} bytes past "
-              f"NVK_TOP ({nvk_top:04x}). Lower NVK_BASE.")
+        print(f"  FAIL: non-volatile image is {nv_bytes} bytes, ending at "
+              f"{nv_top:04x} -- {-nv_margin} bytes past NVK_TOP "
+              f"({nvk_top:04x}). Lower NVK_BASE.")
     print(f"check_kernel_margin: {'OK' if nv_margin >= 0 else 'FAILED'} -- "
-          f"non-volatile image ends {nv_top:04x}, krnboot writes through "
-          f"{load_end:04x} ({nv_sectors} whole sectors), {nv_margin} bytes "
-          f"below NVK_TOP ({nvk_top:04x}).")
+          f"non-volatile image {nvk_base:04x}-{nv_top:04x} ({nv_bytes} bytes, "
+          f"{nv_sectors} sectors, last partly used), {nv_margin} bytes below "
+          f"NVK_TOP ({nvk_top:04x}).")
 
     sys.exit(1 if failed else 0)
 
