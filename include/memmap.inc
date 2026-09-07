@@ -39,15 +39,40 @@
 ; enforces -- it is NOT used to derive NVK_BASE today; see the branch
 ; notes for the planned NVK_TOP -> NVK_BASE auto-derivation).
 ;
-; The default targets a 32K RAM + 32K ROM machine: RAM $0000-$7FFF,
-; ROM $8000-$FFFF. Deliberately the SAME numbers on a RAM-only
-; development machine, where krnboot simply loads the non-volatile
-; image into RAM at $8000 -- so the memory map a dev box exercises is
-; byte-for-byte the map a ROM machine gets, and hardware testing on
-; one genuinely validates the other.
+; Currently set for a 60K RAM + 4K ROM machine: RAM $0000-$EFFF, ROM
+; from $F000. The non-volatile kernel is loaded into high RAM every
+; boot (there is no room for it in a 4K ROM), so NVK_BASE is placed as
+; HIGH as it can go -- every byte it moves up is a byte of program RAM
+; handed back below it.
 ;
-NVK_BASE:       equ     $8000       ; start of the non-volatile kernel
-NVK_TOP:        equ     $FFFF       ; ceiling; build fails if exceeded
+; PICKING NVK_BASE BY HAND (see the branch notes on the deferred
+; NVK_TOP -> NVK_BASE auto-derivation):
+;
+;   1. Build. check_kernel_margin.py reports the non-volatile region's
+;      real span and its headroom under NVK_TOP.
+;   2. If it FAILS (region past NVK_TOP), lower NVK_BASE and rebuild.
+;      If headroom is large, raise it.
+;
+; Do NOT expect base + size to be constant while doing this. -r
+; relaxation shortens a long branch only when source and target share a
+; 256-byte page, so moving NVK_BASE shifts every proc and flips a few
+; branches either way: measured sizes ranged 12905-12919 bytes across
+; bases only 144 apart, and $BD90 -- which arithmetic said would end
+; exactly at $EFFE -- actually overran $EFFF by 5. Always trust the
+; built figure, never the computed one.
+;
+; $BD00 was chosen over the highest base that fits ($BD8D, 9 bytes of
+; headroom): it gives up 141 bytes of program RAM out of ~45,000
+; (0.3%) for 145 bytes of headroom instead of 9, so an ordinary kernel
+; change does not immediately force another hand-tuning round. It is
+; also page-aligned, which keeps the arithmetic easy to redo.
+;
+; For a 32K RAM + 32K ROM machine, use NVK_BASE $8000 / NVK_TOP $FFFF:
+; the kernel then sits in ROM, krnboot finds the signature already
+; present and skips loading it entirely.
+;
+NVK_BASE:       equ     $BD00       ; start of the non-volatile kernel
+NVK_TOP:        equ     $EFFF       ; ceiling; build fails if exceeded
 
 ; Signature krnboot checks to decide "is the non-volatile kernel
 ; already here (ROM), or must I load it from disk (RAM)?". Sits at
