@@ -424,12 +424,33 @@ byte alone:
 Save the previous contents first and put them back before exiting,
 unless the takeover is meant to outlive the program.
 
-**`K_MSG` and `K_INMSG` are safe to hook; `K_TYPE` and `K_READ` are
-not.** The kernel rewrites the `K_TYPE` and `K_READ` entries itself
-whenever a command redirects its input or output, and restores them
-afterwards, so a hook installed there is silently discarded. Nothing in
-the kernel ever writes the `K_MSG` or `K_INMSG` entries, so a hook there
-stays put.
+**`K_MSG` and `K_INMSG` need only the one write.** Nothing in the
+kernel ever touches those two entries, so a hook there stays put.
+
+**`K_TYPE` and `K_READ` need a second write.** The kernel rewrites
+those two itself: when a command redirects its input or output it points
+them at its own file-writing and file-reading routines, and when the
+command finishes it puts them back. What it puts back is whatever the
+words `IO_TYPE_TARGET` and `IO_READ_TARGET` contain - the console
+routines found at boot. So a hook that writes only the table entry is
+undone by the very next command, redirected or not.
+
+Writing the hook's address to the matching word as well as to the table
+entry is all it takes. The kernel then restores the hook rather than the
+boot routine:
+
+```asm
+            ; take over single-character output
+            mov     rf, K_TYPE+1        ; the live entry ...
+            call    store_my_addr
+            mov     rf, IO_TYPE_TARGET  ; ... and the record the kernel
+            call    store_my_addr       ;     restores it from
+```
+
+Read those two words as "the console output and input routines as they
+are now", not "as the BIOS supplied them". Replacing the console means
+replacing what they name. Keep the original contents if the hook is ever
+to be removed.
 
 **A hook must preserve the registers the stock routine preserves.**
 `K_INMSG` saves and restores `RF`, `RC`, `R9`, `RA` and `RD`, and
@@ -450,8 +471,9 @@ paints the screen directly would bypass it, and `SOMECOMMAND > FILE`
 would draw on the display instead of writing the file.
 
 To avoid that, a hook can ask whether the console is currently live by
-comparing `K_TYPE`'s address field against the word at `IO_TYPE_TARGET`,
-which always holds the real console output routine detected at boot:
+comparing `K_TYPE`'s address field against the word at `IO_TYPE_TARGET`.
+The test works whether or not the console has been replaced, because a
+hook updates both together and redirection only ever changes the entry:
 
 - **equal** - output is not redirected; use the fast path.
 - **different** - output is going somewhere else; fall back to looping
@@ -527,7 +549,7 @@ Reads back the exit code of the last command that ran.
 | `FCB_IOBUF_LEN` | 512 | Size of the I/O buffer that goes with each FCB. |
 | `DIRENT_LEN` | 139 | Size of the result buffer `K_DIR_READ` and `K_STAT` fill in. |
 | `DIR_STATE_LEN` | 9 | Size of the snapshot buffer `K_DIR_SAVE_STATE`/`K_DIR_RESTORE_STATE` use. |
-| `IO_TYPE_TARGET` | `PROG_BASE - 114` | Word holding the real console output routine found at boot - compare against `K_TYPE`'s address field to tell whether output is redirected. |
+| `IO_TYPE_TARGET` | `PROG_BASE - 114` | Word naming the current console output routine. The kernel restores `K_TYPE` from it after every command, so a console hook must update it too; comparing it against `K_TYPE`'s address field also tells a hook whether output is redirected. |
 | `IO_READ_TARGET` | `PROG_BASE - 112` | The same, for console input and `K_READ`. |
 | `ATTR_DIR` | `$10` | `DIRENT_ATTR` bit for a subdirectory. |
 | `ATTR_HIDDEN` | `$02` | `DIRENT_ATTR` bit for a hidden entry. |

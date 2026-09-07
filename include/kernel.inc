@@ -339,8 +339,16 @@ RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
 ; link unit from kernel.bin and can only reach kernel-resident state
 ; through a fixed address (or the K_* jump table) either way, same
 ; reasoning as every other RUN_* field on this page.
-IO_READ_TARGET:     equ     PROG_BASE-112   ; word: real f_uread/f_bread
-IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
+; HOOK POINT (documented in docs/DEVELOPER_GUIDE.md, "Replacing the
+; console with your own"): because _redir_teardown restores K_TYPE/
+; K_READ from these two words unconditionally after every command, they
+; are the supported way to install a persistent console driver -- write
+; the new routine's address to BOTH the jump-table entry and the word
+; here, and the kernel restores the hook rather than the boot routine.
+; So read these as "the console routines as they are NOW", not "as the
+; BIOS supplied them": a hook is entitled to change them.
+IO_READ_TARGET:     equ     PROG_BASE-112   ; word: current console read
+IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: current console type
 
 ; K_TYPE/K_READ: the jump-table addresses (kernel/kernel.asm), restated
 ; here (matching kernel_api.inc's own identical constants -- "restated,
