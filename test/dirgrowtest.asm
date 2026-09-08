@@ -78,7 +78,8 @@ start:
 
 dgt_have_arg:
             mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
+            inc     rb
+            inc     rb          ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb

@@ -3557,7 +3557,8 @@ euf_loop:
             lbnz    euf_copy1           ; not a backslash: plain copy
 
             mov     r7, rf
-            add16   r7, 2
+            inc     r7
+            inc     r7
             glo     r7
             str     r2
             glo     r8
@@ -3632,7 +3633,7 @@ euf_fallback_2:
             str     rb
             inc     rb
             mov     r7, rf
-            add16   r7, 1
+            inc     r7
             ldn     r7
             str     rb
             inc     rb
@@ -3643,7 +3644,10 @@ euf_do_hex:
             ; \xXX: need exactly 4 bytes total (\, x, and 2 hex
             ; digits) still within the field
             mov     r7, rf
-            add16   r7, 4
+            inc     r7
+            inc     r7
+            inc     r7
+            inc     r7
             glo     r7
             str     r2
             glo     r8
@@ -3655,14 +3659,17 @@ euf_do_hex:
             lbnf    euf_fallback_2      ; RF+4 > END: not enough room
 
             mov     r7, rf
-            add16   r7, 2
+            inc     r7
+            inc     r7
             ldn     r7
             call    euf_hexdigit
             lbnf    euf_fallback_2
             plo     ra                  ; RA.0 = digit1 value
 
             mov     r7, rf
-            add16   r7, 3
+            inc     r7
+            inc     r7
+            inc     r7
             ldn     r7
             call    euf_hexdigit
             lbnf    euf_fallback_2
@@ -3683,7 +3690,11 @@ euf_do_dec:
             ; \dNNN: need exactly 5 bytes total (\, d, 3 decimal
             ; digits) still within the field
             mov     r7, rf
-            add16   r7, 5
+            inc     r7
+            inc     r7
+            inc     r7
+            inc     r7
+            inc     r7
             glo     r7
             str     r2
             glo     r8
@@ -3699,21 +3710,27 @@ euf_do_dec:
             plo     rd                  ; RD = 0 (running value)
 
             mov     r7, rf
-            add16   r7, 2
+            inc     r7
+            inc     r7
             ldn     r7
             call    euf_decdigit
             lbnf    euf_fallback_2
             call    euf_dec_accum       ; RD = RD*10 + digit
 
             mov     r7, rf
-            add16   r7, 3
+            inc     r7
+            inc     r7
+            inc     r7
             ldn     r7
             call    euf_decdigit
             lbnf    euf_fallback_2
             call    euf_dec_accum
 
             mov     r7, rf
-            add16   r7, 4
+            inc     r7
+            inc     r7
+            inc     r7
+            inc     r7
             ldn     r7
             call    euf_decdigit
             lbnf    euf_fallback_2
@@ -3733,7 +3750,10 @@ euf_do_oct:
             ; already confirmed 0-7 by the dispatch check above) still
             ; within the field
             mov     r7, rf
-            add16   r7, 4
+            inc     r7
+            inc     r7
+            inc     r7
+            inc     r7
             glo     r7
             str     r2
             glo     r8
@@ -3753,7 +3773,8 @@ euf_do_oct:
             call    euf_oct_accum       ; RD = RD*8 + digit
 
             mov     r7, rf
-            add16   r7, 2
+            inc     r7
+            inc     r7
             ldn     r7
             call    euf_decdigit
             lbnf    euf_fallback_2
@@ -3764,7 +3785,9 @@ euf_do_oct:
             call    euf_oct_accum
 
             mov     r7, rf
-            add16   r7, 3
+            inc     r7
+            inc     r7
+            inc     r7
             ldn     r7
             call    euf_decdigit
             lbnf    euf_fallback_2
@@ -3785,7 +3808,9 @@ euf_do_ctrl:
             ; \^C: need exactly 3 bytes total (\, ^, and the control
             ; letter/character) still within the field
             mov     r7, rf
-            add16   r7, 3
+            inc     r7
+            inc     r7
+            inc     r7
             glo     r7
             str     r2
             glo     r8
@@ -3797,7 +3822,8 @@ euf_do_ctrl:
             lbnf    euf_fallback_2
 
             mov     r7, rf
-            add16   r7, 2
+            inc     r7
+            inc     r7
             ldn     r7
             ani     $DF                 ; case-fold c3 (safe -- every
                                         ; letter in the real $40-$5F

@@ -681,7 +681,7 @@ vs_sector_done:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = byte1:byte2 (16-bit)
-            add16   rd, 1
+            inc     rd
 
             ghi     rd
             lbnz    vs_no_carry

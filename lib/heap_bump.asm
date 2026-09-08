@@ -127,7 +127,7 @@ ba_have_size:
             sub16   rb, r9              ; RB = remaining
 
             mov     rd, rc
-            sub16   rd, 1               ; RD = size - 1 (safe: size
+            dec     rd          ; RD = size - 1 (safe: size
                                         ; >= 1 on this path)
 
             ; remaining >= size-1 ?

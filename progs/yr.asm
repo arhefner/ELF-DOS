@@ -756,7 +756,7 @@ yrd_read_block:
             phi     rc
             ldn     rd
             plo     rc                  ; RC = block_len
-            sub16   rc, 1               ; RC = block_len-1 (ym_recv_
+            dec     rc          ; RC = block_len-1 (ym_recv_
                                         ; block's pre-decremented
                                         ; convention)
             call    ym_recv_block

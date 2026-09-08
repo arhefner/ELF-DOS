@@ -1094,7 +1094,7 @@ ysdb_type_sent:
             phi     rc
             ldn     rd
             plo     rc
-            sub16   rc, 1               ; ym_send_block's own
+            dec     rc          ; ym_send_block's own
                                         ; pre-decremented convention
             call    ym_send_block
 

@@ -1472,7 +1472,7 @@ crp_read_next_dir_sector:
             phi     r9
             ldn     r7
             plo     r9
-            add16   r9, 1
+            inc     r9
             mov     r7, crp_dpb_root_sector_idx
             ghi     r9
             str     r7
@@ -1622,7 +1622,7 @@ crp_lba_inc:
             phi     rd
             ldn     rf
             plo     rd
-            add16   rd, 1
+            inc     rd
             ghi     rd
             lbnz    cli2_no_carry
             glo     rd

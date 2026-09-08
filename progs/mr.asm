@@ -240,7 +240,8 @@ start:
 
             ; --- argv[1]: could be a flag or the destination ---
             mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
+            inc     rb
+            inc     rb          ; RB = &argv[1]
             lda     rb
             phi     rd
             ldn     rb
@@ -263,7 +264,10 @@ start_after_flag1:
 
             ; --- argv[2]: could be a SECOND flag or the destination ---
             mov     rb, ra
-            add16   rb, 4               ; RB = &argv[2]
+            inc     rb
+            inc     rb
+            inc     rb
+            inc     rb          ; RB = &argv[2]
             lda     rb
             phi     rd
             ldn     rb

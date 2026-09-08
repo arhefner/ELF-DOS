@@ -87,7 +87,8 @@ start:
             lbnf    usage               ; argc < 2: no filename given
 
             mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
+            inc     rb
+            inc     rb          ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -333,7 +334,8 @@ sys_stat_loop:
             ; nowhere near the 64K this would start truncating)
             mov     rf, sys_dirent_buf
             add16   rf, DIRENT_SIZE
-            add16   rf, 2               ; RF = &dirent[DIRENT_SIZE+2]
+            inc     rf
+            inc     rf          ; RF = &dirent[DIRENT_SIZE+2]
             lda     rf                  ; D = size byte (low word MSB),
                                         ; RF++
             phi     r7

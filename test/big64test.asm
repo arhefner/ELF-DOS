@@ -670,7 +670,9 @@ bt_pattern_byte:
 ;------------------------------------------------------------------
 bt_pos_inc:
             mov     r8, bt_pos
-            add16   r8, 3               ; R8 -> &bt_pos[3] (LSB)
+            inc     r8
+            inc     r8
+            inc     r8          ; R8 -> &bt_pos[3] (LSB)
             ldn     r8
             adi     1
             str     r8
@@ -785,7 +787,9 @@ bt_mismatch_reset:
 ;------------------------------------------------------------------
 bt_record_mismatch:
             mov     r8, bt_mismatch_count
-            add16   r8, 3               ; -> &bt_mismatch_count[3] (LSB)
+            inc     r8
+            inc     r8
+            inc     r8          ; -> &bt_mismatch_count[3] (LSB)
             ldn     r8
             adi     1
             str     r8

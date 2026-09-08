@@ -61,7 +61,8 @@ start:
             str     rb                  ; mt_base = mem_base
 
             mov     rf, LOADER_ARGS
-            add16   rf, 2
+            inc     rf
+            inc     rf
             lda     rf
             phi     r8
             ldn     rf
@@ -82,7 +83,7 @@ start:
             ldn     rb
             plo     ra                  ; RA = mem_base
             sub16   rd, ra
-            sub16   rd, 1               ; RD = total_usable
+            dec     rd          ; RD = total_usable
             mov     rb, mt_total
             ghi     rd
             str     rb
@@ -360,7 +361,8 @@ start:
             phi     r8
             ldn     rb
             plo     r8                  ; R8 = mt_base
-            add16   r8, 2               ; R8 = expected data pointer
+            inc     r8
+            inc     r8          ; R8 = expected data pointer
                                         ; (mt_base + 2)
             call    mt_check_eq
 

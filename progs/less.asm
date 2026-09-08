@@ -162,7 +162,8 @@ start:
             lbnf    usage
 
             mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
+            inc     rb
+            inc     rb          ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -1330,9 +1331,13 @@ less_find_prev_line_start:
             ; project already uses elsewhere for 32-bit subtraction
             ; (e.g. progs/chkdsk.asm's own chk_sub32).
             mov     r7, less_top
-            add16   r7, 3               ; r7 -> less_top+3 (LSB)
+            inc     r7
+            inc     r7
+            inc     r7          ; r7 -> less_top+3 (LSB)
             mov     r8, less_backscan_start
-            add16   r8, 3               ; r8 -> dest+3 (LSB)
+            inc     r8
+            inc     r8
+            inc     r8          ; r8 -> dest+3 (LSB)
 
             ldi     LESS_BACKSCAN_LEN+1
             str     r2
@@ -1376,9 +1381,13 @@ lfp_start_ok:
             ; (which was < LESS_BACKSCAN_LEN+1 in that exact case), or
             ; it wasn't clamped and diff==LESS_BACKSCAN_LEN+1 exactly)
             mov     r7, less_top
-            add16   r7, 3
+            inc     r7
+            inc     r7
+            inc     r7
             mov     r8, less_backscan_start
-            add16   r8, 3
+            inc     r8
+            inc     r8
+            inc     r8
 
             ldn     r8
             str     r2
@@ -1506,7 +1515,9 @@ lfp_found:
                                         ; LESS_BACKSCAN_LEN)
 
             mov     r7, less_new_line
-            add16   r7, 3               ; r7 -> less_new_line+3 (LSB)
+            inc     r7
+            inc     r7
+            inc     r7          ; r7 -> less_new_line+3 (LSB)
 
             glo     r9
             str     r2
@@ -2133,7 +2144,10 @@ lsvr_do_shift:
             mov     r8, less_visible
             add16   r8, r7              ; R8 = &less_visible[i] (source)
             mov     rc, r8
-            add16   rc, 4               ; RC = &less_visible[i+1] (dest)
+            inc     rc
+            inc     rc
+            inc     rc
+            inc     rc          ; RC = &less_visible[i+1] (dest)
 
             lda     r8
             str     rc
@@ -2222,7 +2236,9 @@ zero4bytes:
 ;------------------------------------------------------------------
 less_pos_add16:
             mov     r7, less_pos
-            add16   r7, 3               ; R7 -> less_pos+3 (LSB byte)
+            inc     r7
+            inc     r7
+            inc     r7          ; R7 -> less_pos+3 (LSB byte)
 
             glo     rd
             str     r2

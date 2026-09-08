@@ -81,7 +81,8 @@ start:
             ; since it's only meaningful for THIS specific invocation
             ; (see this file's own header comment)
             mov     rf, LOADER_ARGS
-            add16   rf, 2
+            inc     rf
+            inc     rf
             lda     rf
             phi     rd
             ldn     rf

@@ -40,14 +40,18 @@ start:
                                         ; missing
 
             mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
+            inc     rb
+            inc     rb          ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
             plo     rf                  ; RF = argv[1] (path)
 
             mov     rb, ra
-            add16   rb, 4               ; RB = &argv[2]
+            inc     rb
+            inc     rb
+            inc     rb
+            inc     rb          ; RB = &argv[2]
             lda     rb
             phi     rd
             ldn     rb

@@ -735,7 +735,9 @@ rwb_pattern_byte:
 ;------------------------------------------------------------------
 rwb_pos_inc:
             mov     r8, rwb_pos
-            add16   r8, 3               ; R8 -> &rwb_pos[3] (LSB)
+            inc     r8
+            inc     r8
+            inc     r8          ; R8 -> &rwb_pos[3] (LSB)
             ldn     r8
             adi     1
             str     r8
@@ -848,7 +850,9 @@ rwb_mismatch_reset:
 ;------------------------------------------------------------------
 rwb_record_mismatch:
             mov     r8, rwb_mismatch_count
-            add16   r8, 3               ; -> &rwb_mismatch_count[3]
+            inc     r8
+            inc     r8
+            inc     r8          ; -> &rwb_mismatch_count[3]
                                         ; (LSB)
             ldn     r8
             adi     1

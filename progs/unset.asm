@@ -87,7 +87,8 @@ un_advance:
             phi     r8
             ldn     rf
             plo     r8
-            add16   r8, 2
+            inc     r8
+            inc     r8
             mov     rf, un_cur_off
             ghi     r8
             str     rf

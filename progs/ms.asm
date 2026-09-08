@@ -172,7 +172,8 @@ start:
 
             ; --- argv[1]: could be a flag or the first filename ---
             mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
+            inc     rb
+            inc     rb          ; RB = &argv[1]
             lda     rb
             phi     rd
             ldn     rb
@@ -195,7 +196,10 @@ start_after_flag1:
 
             ; --- argv[2]: could be a SECOND flag or the first filename ---
             mov     rb, ra
-            add16   rb, 4               ; RB = &argv[2]
+            inc     rb
+            inc     rb
+            inc     rb
+            inc     rb          ; RB = &argv[2]
             lda     rb
             phi     rd
             ldn     rb
@@ -777,7 +781,7 @@ mpf_hdr_have_nul:
             mov     rd, ms_hdr_buf
             sub16   rf, rd              ; RF = R8 - ms_hdr_buf
             mov     rc, rf
-            add16   rc, 1
+            inc     rc
 
             mov     rf, ms_hdr_buf
             call    ms_send_block       ; DF = 0/1

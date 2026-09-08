@@ -88,7 +88,8 @@ start:
             ; argv[1] must be present and non-NUL to consider -- fall
             ; through to validating it as a drive-letter token
             mov     rb, ra
-            add16   rb, 2
+            inc     rb
+            inc     rb
             lda     rb
             phi     rf
             ldn     rb
@@ -628,9 +629,13 @@ chk_fr_ioerr:
 ;------------------------------------------------------------------
 chk_add32:
             mov     r7, rf
-            add16   r7, 3               ; R7 -> acc byte3 (LSB)
+            inc     r7
+            inc     r7
+            inc     r7          ; R7 -> acc byte3 (LSB)
             mov     r8, rd
-            add16   r8, 3               ; R8 -> addend byte3 (LSB)
+            inc     r8
+            inc     r8
+            inc     r8          ; R8 -> addend byte3 (LSB)
 
             ldn     r8
             str     r2
@@ -682,9 +687,13 @@ chk_add32:
 ;------------------------------------------------------------------
 chk_sub32:
             mov     r7, rf
-            add16   r7, 3               ; R7 -> minuend byte3 (LSB)
+            inc     r7
+            inc     r7
+            inc     r7          ; R7 -> minuend byte3 (LSB)
             mov     r8, rd
-            add16   r8, 3               ; R8 -> subtrahend byte3 (LSB)
+            inc     r8
+            inc     r8
+            inc     r8          ; R8 -> subtrahend byte3 (LSB)
 
             ldn     r8
             str     r2
@@ -1498,11 +1507,17 @@ cwd_too_deep:
 ;------------------------------------------------------------------
 chk_cmp32:
             mov     r7, rf
-            add16   r7, 3
+            inc     r7
+            inc     r7
+            inc     r7
             mov     r8, rd
-            add16   r8, 3
+            inc     r8
+            inc     r8
+            inc     r8
             mov     r9, chk_cmp32_scratch
-            add16   r9, 3
+            inc     r9
+            inc     r9
+            inc     r9
 
             ldn     r8
             str     r2
@@ -1693,7 +1708,7 @@ chk_lba_inc:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = bits 15-8 : bits 7-0
-            add16   rd, 1
+            inc     rd
             ghi     rd
             lbnz    clbi_no_carry
             glo     rd
@@ -1893,7 +1908,7 @@ chk_read_next_dir_sector:
             phi     r9
             ldn     r7
             plo     r9
-            add16   r9, 1
+            inc     r9
             mov     r7, chk_dpb_root_sector_idx
             ghi     r9
             str     r7
@@ -2556,7 +2571,7 @@ cfsl_entry_done:
             phi     r9
             ldn     r7
             plo     r9
-            add16   r9, 1
+            inc     r9
             mov     r7, chk_fscan_cluster
             ghi     r9
             str     r7
@@ -2592,7 +2607,7 @@ cfsl_sector_advance:
             phi     r9
             ldn     r7
             plo     r9
-            add16   r9, 1
+            inc     r9
             mov     r7, chk_fscan_sector_idx
             ghi     r9
             str     r7
@@ -2666,7 +2681,9 @@ cmul_no_add:
             ; real ranges this routine is ever called with here, see
             ; this routine's own header)
             mov     rf, chk_mul_multiplicand
-            add16   rf, 3
+            inc     rf
+            inc     rf
+            inc     rf
             ldn     rf
             shl
             str     rf
@@ -2745,7 +2762,9 @@ chk_scale_mul_result_x512:
             phi     rd
             ldn     r8
             plo     rd                  ; RD = dest, dereferenced (fresh)
-            add16   rd, 3
+            inc     rd
+            inc     rd
+            inc     rd
             ldn     rd
             shl
             str     rd
