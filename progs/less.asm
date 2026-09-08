@@ -36,7 +36,15 @@
 ;     text along with everything else (see scroll_up_and_print_bottom/
 ;     scroll_down_and_print_top's own header comments for exactly
 ;     which two rows and why an unscoped scroll disturbs each of them
-;     differently depending on direction).
+;     differently depending on direction). Each of those two rows is
+;     therefore CLEARED (ESC[K at column 1) BEFORE its new text is
+;     printed, never after: a scrolled row still holds real text, and
+;     printing over it only covers the columns actually written -- a
+;     TAB in the new line advances the cursor without writing anything,
+;     so the old text shows through the gap (hardware-reported
+;     2026-09-08: fragments of the scrolled-up status line appearing
+;     inside a tab-indented content line). A trailing clear cannot fix
+;     that; it only erases past the END of the new text.
 ;
 ;     Both move types are built on ONE mechanism: less_visible[] is a sliding
 ;     window holding the START OFFSET of every currently-displayed
@@ -938,9 +946,20 @@ dp_status:
             rtn
 
 ;------------------------------------------------------------------
-; print_status_line
+; print_status_line: every caller positions at column 1 of the status
+; row immediately before calling this, so the leading clear-to-EOL
+; below wipes the WHOLE row before any text lands on it. That matters
+; after a scroll: RI leaves a real CONTENT line sitting on the status
+; row, and IND/RI both leave one on the row above -- text printed over
+; a dirty row only covers the columns it actually writes, so anything
+; longer than the new text (or anything under a TAB, which advances
+; the cursor without writing) shows straight through. Clearing FIRST
+; is the only form that handles the tab case; a trailing clear can't.
 ;------------------------------------------------------------------
 print_status_line:
+            call    K_INMSG
+            db      27,'[K',0
+
             mov     rf, less_status_mode
             ldn     rf
             lbnz    psl_notfound
@@ -965,11 +984,12 @@ psl_notfound:
 
 ;------------------------------------------------------------------
 ; less_reprint_status: repositions to the status row and reprints it
-; ALONE, with a trailing clear-to-end-of-line (in case the new text is
-; shorter than whatever was there before) -- used by lsf_notfound so
-; showing/dismissing the "Pattern not found" message doesn't need a
-; full page redraw, unlike every other status-line update in this
-; file (which happens as the tail end of a real draw_page call).
+; ALONE -- used by lsf_notfound so showing/dismissing the "Pattern not
+; found" message doesn't need a full page redraw, unlike every other
+; status-line update in this file (which happens as the tail end of a
+; real draw_page call). Needs no clear of its own: print_status_line
+; clears the row itself now, which also covers this routine's original
+; reason for existing (the new text being shorter than what was there).
 ;------------------------------------------------------------------
 less_reprint_status:
             mov     rf, less_page_lines
@@ -977,8 +997,6 @@ less_reprint_status:
             adi     1
             call    position_at_row
             call    print_status_line
-            call    K_INMSG
-            db      27,'[K',0
             rtn
 
 ;------------------------------------------------------------------
@@ -1097,10 +1115,12 @@ scroll_up_and_print_bottom:
             mov     rf, less_page_lines
             ldn     rf
             call    position_at_row
+            call    K_INMSG
+            db      27,'[K',0           ; clear the WHOLE row FIRST --
+                                        ; see the header above for why a
+                                        ; trailing clear isn't enough
             mov     rf, less_line_buf
             call    K_MSG
-            call    K_INMSG
-            db      27,'[K',0
 
             mov     rf, less_page_lines
             ldn     rf
@@ -1126,10 +1146,11 @@ scroll_down_and_print_top:
             call    K_INMSG
             db      27,'M',0            ; RI -- scrolls down by 1;
                                         ; cursor stays at row 1
+            call    K_INMSG
+            db      27,'[K',0           ; clear the WHOLE row FIRST --
+                                        ; see the header above
             mov     rf, less_line_buf
             call    K_MSG
-            call    K_INMSG
-            db      27,'[K',0
 
             mov     rf, less_page_lines
             ldn     rf
