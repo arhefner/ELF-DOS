@@ -71,3 +71,122 @@
             str     rf
             rtn
             endp
+
+;------------------------------------------------------------------
+; shl32: the 4-byte big-endian value at [RF] <<= 1.
+; Args: RF = pointer.  Modifies: R7, D, DF
+;------------------------------------------------------------------
+            proc    shl32
+            mov     r7, rf
+            inc     r7
+            inc     r7
+            inc     r7                  ; -> byte 3 (LSB)
+            ldn     r7
+            shl                         ; DF = carry out
+            str     r7
+            dec     r7
+            ldn     r7
+            shlc
+            str     r7
+            dec     r7
+            ldn     r7
+            shlc
+            str     r7
+            dec     r7
+            ldn     r7
+            shlc
+            str     r7
+            rtn
+            endp
+
+;------------------------------------------------------------------
+; add32: the 4-byte big-endian value at [RF] += the one at [RD].
+; LSB first with carry propagated -- the same byte-chain shape the
+; kernel's own 32-bit arithmetic uses (a 16-bit ADD16 on each half
+; would NOT carry across the halves).
+; Args: RF = destination pointer, RD = addend pointer
+; Modifies: R7, R8, D, DF
+;------------------------------------------------------------------
+            proc    add32
+            mov     r7, rf
+            inc     r7
+            inc     r7
+            inc     r7                  ; -> dest LSB
+            mov     r8, rd
+            inc     r8
+            inc     r8
+            inc     r8                  ; -> addend LSB
+
+            ldn     r8
+            str     r2
+            ldn     r7
+            add
+            str     r7
+
+            dec     r7
+            dec     r8
+            ldn     r8
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+
+            dec     r7
+            dec     r8
+            ldn     r8
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+
+            dec     r7
+            dec     r8
+            ldn     r8
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+            rtn
+            endp
+
+;------------------------------------------------------------------
+; addbyte32: the 4-byte big-endian value at [RF] += D (unsigned byte).
+; Args: RF = pointer, D = the byte.  Modifies: R7, R8, D, DF
+;------------------------------------------------------------------
+            proc    addbyte32
+            plo     r8                  ; stash the byte -- "plo" leaves
+                                        ; D alone, "mov" would not
+                                        ; (gotcha #4)
+            mov     r7, rf
+            inc     r7
+            inc     r7
+            inc     r7                  ; -> LSB
+
+            glo     r8
+            str     r2
+            ldn     r7
+            add
+            str     r7
+
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+            rtn
+            endp

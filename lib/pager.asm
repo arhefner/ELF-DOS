@@ -62,6 +62,8 @@ LESS_MAX_VISIBLE: equ   80          ; cap on less_page_lines -- bounds the
                                     ; print via ESC[<row>H -- comfortably
                                     ; under 100, so the row-number
                                     ; formatter never needs a 3rd digit
+COUNT_MAX_DIGITS: equ   9           ; a 9-digit count still fits
+                                    ; comfortably inside 32 bits
 LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
                                     ; <= 255 -- less_stack_count is a byte)
 
@@ -77,6 +79,12 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   src_search
             extrn   src_search_top
             extrn   src_search_resume
+            extrn   src_last_page
+            extrn   src_goto_result
+            extrn   src_goto
+            extrn   shl32
+            extrn   add32
+            extrn   addbyte32
             extrn   copy4bytes
             extrn   copy4bytes_to_r8
             extrn   zero4bytes
@@ -106,6 +114,11 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   less_rows_name
             extrn   less_esc_buf
             extrn   less_search_len
+            extrn   less_count
+            extrn   less_count_x2
+            extrn   less_count_buf
+            extrn   less_count_len
+            extrn   less_count_pending
 
             ; --- init state ---
             call    src_rewind          ; the SOURCE resets its own state
@@ -122,6 +135,12 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             ldi     0
             str     rf                  ; empty pattern -- 'n' is a
                                         ; no-op until a real search runs
+            mov     rf, less_count_len
+            ldi     0
+            str     rf
+            mov     rf, less_count_pending
+            ldi     0
+            str     rf
             mov     rf, less_search_resume
             call    zero4bytes
 
@@ -191,6 +210,37 @@ main_loop:
             glo     r9
             str     rf                  ; less_key = key pressed
 
+            ; A leading NUMBER is a prefix argument for 'g'/'G'
+            ; (a line number for a text source, a byte offset for a
+            ; fixed-width one -- only the source decides). Collect the
+            ; digits here and keep reading; anything else dispatches
+            ; normally, taking whatever count had accumulated with it.
+            mov     rf, less_key
+            ldn     rf
+            smi     '0'
+            lbnf    ml_not_digit
+            smi     10
+            lbdf    ml_not_digit
+            call    count_digit
+            lbr     main_loop
+
+ml_not_digit:
+            ; hand the pending count to this command and clear it, so a
+            ; count can never leak into a LATER one
+            mov     rf, less_count_len
+            ldn     rf
+            plo     r9
+            mov     rf, less_count_pending
+            glo     r9
+            str     rf
+            lbz     ml_no_count         ; nothing typed: leave the
+                                        ; status line alone
+            mov     rf, less_count_len
+            ldi     0
+            str     rf
+            call    less_reprint_status ; wipe the ":123" echo
+
+ml_no_count:
             mov     rf, less_key
             ldn     rf
             xri     27                  ; ESC -- check for an arrow-key
@@ -432,6 +482,10 @@ cmd_back_done:
 ; of exactly that bug).
 ;------------------------------------------------------------------
 cmd_top:
+            mov     rf, less_count_pending
+            ldn     rf
+            lbnz    cmd_goto_number     ; "<n>g" -- a numbered jump
+
             mov     rf, less_stack_count
             ldi     0
             str     rf
@@ -463,72 +517,28 @@ cmd_top:
 ; asked for over the old "confusing tradeoff".
 ;------------------------------------------------------------------
 cmd_goto_end:
+            mov     rf, less_count_pending
+            ldn     rf
+            lbnz    cmd_goto_number     ; "<n>G" is the same as "<n>g",
+                                        ; matching real less
+
+            ; A "big jump": clear the history stack rather than pushing
+            ; the page being left, same as cmd_top and a search match.
             mov     rf, less_stack_count
             ldi     0
             str     rf
 
-            mov     rf, less_candidate_top  ; reused as scratch: a
-                                        ; known 4-byte zero to seek to
-            call    zero4bytes
-            mov     rf, less_candidate_top
-            call    src_seek_to
-            mov     rf, less_candidate_top
-            mov     rd, src_pos
-            call    copy4bytes
-
-            mov     rf, less_visible_count
-            ldi     0
-            str     rf
-
-cge_scan_loop:
-            mov     rf, src_pos
-            mov     rd, less_new_line
-            call    copy4bytes          ; candidate = start of the
-                                        ; line about to be read
-
-            call    src_read_line
-            lbdf    cge_scan_done       ; true EOF -- scan complete
-
-            mov     rb, less_page_lines
-            ldn     rb
-            str     r2
-            mov     rf, less_visible_count
+            ; Ask the SOURCE for the top of the last page. This used to
+            ; read the whole file forward, keeping a sliding window of
+            ; the last page_lines line starts -- O(file size) for a
+            ; result that is O(one screen) of backward steps. Only the
+            ; source can walk backward, since only it knows what a line
+            ; is; less_visible[] does not need filling here either,
+            ; because draw_page repopulates it from less_top anyway.
+            mov     rf, less_page_lines
             ldn     rf
-            sm                          ; D = count - page_lines, DF=1
-                                        ; iff count >= page_lines (full)
-            lbdf    cge_shift
-
-            ; GROWING: window still has room -- append at [count],
-            ; count++, nothing to drop or shift
-            mov     rf, less_visible_count
-            ldn     rf
-            plo     r9
-            ldi     0
-            phi     r9
-            shl16   r9
-            shl16   r9
-            mov     r8, less_visible
-            add16   r8, r9
-            mov     rf, less_new_line
-            call    copy4bytes_to_r8
-
-            mov     rf, less_visible_count
-            ldn     rf
-            adi     1
-            str     rf
-            lbr     cge_scan_loop
-
-cge_shift:
-            call    less_shift_left_core  ; drops [0] (no stack push),
-                                        ; shifts down, appends
-                                        ; less_new_line
-            lbr     cge_scan_loop
-
-cge_scan_done:
-            ; less_visible[] now holds exactly the last
-            ; min(page_lines, total lines in the file) lines --
-            ; commit and redraw from its own first entry
-            mov     rf, less_visible
+            call    src_last_page
+            mov     rf, src_goto_result
             mov     rd, less_top
             call    copy4bytes
             call    less_goto
@@ -627,6 +637,116 @@ cmd_quit:
             db      13,10,0             ; land the shell's next prompt
                                         ; at the start of a fresh line
             ldi     0                   ; exit code 0 = success
+            rtn
+
+;------------------------------------------------------------------
+; cmd_goto_number: "<n>g" / "<n>G" -- jump to whatever the SOURCE
+; makes of the number n. The pager only collected the digits; it has
+; no idea whether n counts lines, bytes or sectors, and does not need
+; to. A count past the end of the data is not an error here: the
+; source says so (DF=1) and this shows the last page, exactly as a
+; bare 'G' would, because that is a display decision.
+;------------------------------------------------------------------
+cmd_goto_number:
+            mov     rf, less_stack_count
+            ldi     0
+            str     rf                  ; a "big jump": clear history
+
+            mov     rf, less_count
+            call    src_goto
+            lbdf    cgn_past_end
+
+            mov     rf, src_goto_result
+            mov     rd, less_top
+            call    copy4bytes
+            call    less_goto
+            lbr     main_loop
+
+cgn_past_end:
+            mov     rf, less_page_lines
+            ldn     rf
+            call    src_last_page
+            mov     rf, src_goto_result
+            mov     rd, less_top
+            call    copy4bytes
+            call    less_goto
+            lbr     main_loop
+
+;------------------------------------------------------------------
+; count_digit: fold the ASCII digit in less_key into less_count
+; (less_count = less_count*10 + digit) and echo the digits typed so
+; far on the status row, so a prefix argument is visible as it is
+; entered rather than being typed blind.
+;
+; Capped at COUNT_MAX_DIGITS, which keeps the value well inside 32
+; bits -- further digits are ignored rather than silently wrapping the
+; count around into a completely different position.
+;------------------------------------------------------------------
+count_digit:
+            mov     rf, less_count_len
+            ldn     rf
+            smi     COUNT_MAX_DIGITS
+            lbdf    cd_echo             ; already full: ignore the digit
+                                        ; but keep the echo on screen
+
+            ; first digit of a fresh count: start from zero
+            mov     rf, less_count_len
+            ldn     rf
+            lbnz    cd_accumulate
+            mov     rf, less_count
+            call    zero4bytes
+
+cd_accumulate:
+            ; less_count = less_count*10 + digit, via 8c + 2c
+            mov     rf, less_count
+            call    shl32               ; 2c
+            mov     rf, less_count
+            mov     rd, less_count_x2
+            call    copy4bytes          ; keep 2c
+            mov     rf, less_count
+            call    shl32               ; 4c
+            mov     rf, less_count
+            call    shl32               ; 8c
+            mov     rf, less_count
+            mov     rd, less_count_x2
+            call    add32               ; 10c
+            mov     rf, less_key
+            ldn     rf
+            smi     '0'
+            plo     r9                  ; the digit's value
+            mov     rf, less_count
+            glo     r9
+            call    addbyte32
+
+            ; remember the character too, purely for the echo
+            mov     rf, less_count_len
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     r9
+            mov     r8, less_count_buf
+            add16   r8, r9
+            mov     rf, less_key
+            ldn     rf
+            str     r8
+            inc     r8
+            ldi     0
+            str     r8                  ; keep it NUL-terminated
+
+            mov     rf, less_count_len
+            ldn     rf
+            adi     1
+            str     rf
+
+cd_echo:
+            mov     rf, less_page_lines
+            ldn     rf
+            adi     1
+            call    position_at_row
+            call    K_INMSG
+            db      27,'[K',':',0
+            mov     rf, less_count_buf
+            call    K_MSG
             rtn
 
 ;------------------------------------------------------------------
@@ -1796,6 +1916,11 @@ less_candidate_top:     ds      4       ; scratch, used during search
 
 less_search_buf:        ds      LESS_SEARCH_MAX
 less_search_len:        db      0       ; parsed pattern length in BYTES
+less_count:             ds      4       ; prefix argument being typed
+less_count_x2:          ds      4       ; scratch for the *10 step
+less_count_buf:         ds      COUNT_MAX_DIGITS+1
+less_count_len:         db      0       ; digits typed so far (0 = none)
+less_count_pending:     db      0       ; count handed to THIS command
 less_search_start:      ds      4       ; scan-start scratch, set fresh by
                                         ; the caller each search
 less_search_resume:     ds      4       ; where 'n' resumes
@@ -1847,4 +1972,9 @@ less_esc_buf:           ds      10
                 public  less_rows_name
                 public  less_esc_buf
                 public  less_search_len
+                public  less_count
+                public  less_count_x2
+                public  less_count_buf
+                public  less_count_len
+                public  less_count_pending
             endp

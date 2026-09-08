@@ -888,6 +888,323 @@ ss_bump:
             rtn
             endp
 
+;------------------------------------------------------------------
+; src_open: open the named file and learn its size.
+;
+; Part of the SOURCE CONTRACT. Opening was deliberately left OUT of the
+; contract when the pager was first split out (2026-09-08), on the
+; reasoning that a memory or sector source has nothing to open -- but
+; that was the wrong call twice over. It left progs/less.asm reaching
+; directly into less_fcb/less_iobuf, which are source-private; and a
+; sector source does have setup of its own (which drive), it just is
+; not a file open. RF is therefore "whatever identifies the data" --
+; a path here, a drive spec elsewhere.
+;
+; The size is captured here, once, via K_STAT: K_FILE_SEEK cannot
+; report it, since its own documented return carries only the low word
+; of the resulting position (kernel_api.inc says so explicitly), which
+; is not enough for a file over 64K.
+;
+; Args:    RF = pointer to a NUL-terminated path
+; Returns: DF=0 opened, src_size holds the byte count;  DF=1 failed
+; Modifies: everything
+;------------------------------------------------------------------
+            proc    src_open
+            extrn   less_fcb
+            extrn   less_iobuf
+            extrn   src_size
+            extrn   src_stat_buf
+            extrn   src_open_path
+
+            mov     r8, src_open_path   ; keep the path: K_FILE_OPEN
+            ghi     rf                  ; clobbers RF
+            str     r8
+            inc     r8
+            glo     rf
+            str     r8
+
+            mov     rd, less_fcb
+            mov     ra, less_iobuf
+            ldi     0                   ; mode 0 = read
+            call    K_FILE_OPEN
+            lbdf    sop_fail
+
+            mov     rf, src_open_path
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, r8
+            mov     rd, src_stat_buf
+            call    K_STAT
+            lbdf    sop_nosize
+
+            mov     rf, src_stat_buf
+            add16   rf, DIRENT_SIZE
+            mov     rd, src_size
+            call    copy4bytes
+            clc
+            rtn
+
+sop_nosize:
+            ; opened, but the size is unknown -- treat it as 0 so
+            ; src_last_page just lands at the top rather than
+            ; misbehaving. The file is still perfectly readable.
+            mov     rf, src_size
+            call    zero4bytes
+            clc
+            rtn
+
+sop_fail:
+            stc
+            rtn
+
+            extrn   copy4bytes
+            extrn   zero4bytes
+            endp
+
+;------------------------------------------------------------------
+; src_last_page: the position of the first of the LAST n lines --
+; what the pager needs to display the end of the file.
+;
+; Walks BACKWARD n times from the end with src_prev_start, instead of
+; the pager's previous approach of reading the whole file forward
+; while keeping a sliding window of the last n line starts. That was
+; O(file size); this is O(n) bounded backward scans, and n is one
+; screen. Only the source can do it, since only the source knows what
+; a "line" is -- a fixed-width source would just subtract.
+;
+; Stepping back n times is right for both shapes of file. When the
+; file ends with a newline the end position is the start of a phantom
+; empty line, so one step back lands on the last real line; when it
+; does not, the end position is mid-line and one step back lands on
+; that same last line's start (src_prev_start's window excludes the
+; byte immediately before its argument, so a mid-line argument finds
+; the start of its OWN line). Either way step 1 is the last line and
+; step n is the (n-1)th line before it.
+;
+; Args:    D = n (number of display lines; 1..255)
+; Returns: src_goto_result = the position to display from. Never
+;          fails: it clamps at 0 for a file shorter than n lines.
+; Modifies: everything
+;------------------------------------------------------------------
+            proc    src_last_page
+            extrn   src_size
+            extrn   src_goto_result
+            extrn   src_prev_result
+            extrn   src_prev_start
+            extrn   copy4bytes
+            extrn   slp_n
+
+            plo     r7                  ; stash n (gotcha #4)
+            mov     rf, slp_n
+            glo     r7
+            str     rf
+
+            mov     rf, src_size
+            mov     rd, src_goto_result
+            call    copy4bytes          ; walk back from the end
+
+slp_loop:
+            mov     rf, slp_n
+            ldn     rf
+            lbz     slp_done            ; n steps taken
+
+            ; stop at the very start of the file -- src_prev_start's
+            ; own precondition is a position > 0
+            mov     rf, src_goto_result
+            ldn     rf
+            lbnz    slp_step
+            inc     rf
+            ldn     rf
+            lbnz    slp_step
+            inc     rf
+            ldn     rf
+            lbnz    slp_step
+            inc     rf
+            ldn     rf
+            lbz     slp_done            ; all four bytes zero
+
+slp_step:
+            mov     rf, src_goto_result
+            call    src_prev_start
+            mov     rf, src_prev_result
+            mov     rd, src_goto_result
+            call    copy4bytes
+
+            mov     rf, slp_n
+            ldn     rf
+            smi     1
+            str     rf
+            lbr     slp_loop
+
+slp_done:
+            rtn
+            endp
+
+;------------------------------------------------------------------
+; src_goto: turn a user-typed number into a position to display.
+;
+; Part of the SOURCE CONTRACT, and the point at which the number the
+; pager collected stops being an abstraction: HERE it is a 1-based
+; LINE NUMBER, because that is what a number means for a text file. A
+; fixed-width source reads the same number as a byte offset and just
+; masks it down to its row -- the pager never has to know which.
+;
+; Counts LFs forward from the start. There is no index to consult, so
+; this is inherently O(position); that is the honest cost of a line
+; number over a byte offset, and it is bounded by the file size.
+;
+; Args:    RF = pointer to a 4-byte count (1-based; 0 is treated as 1)
+; Returns: DF=0 -- src_goto_result = the start of that line
+;          DF=1 -- the count is past the end of the data. The pager
+;                  decides what to do (it shows the last page, the
+;                  same as 'G'), because that is a display policy, not
+;                  a property of the data.
+; Modifies: everything
+;------------------------------------------------------------------
+            proc    src_goto
+            extrn   src_goto_result
+            extrn   src_goto_want
+            extrn   src_goto_line
+            extrn   src_goto_pos
+            extrn   get_next_byte
+            extrn   src_seek_to
+            extrn   copy4bytes
+            extrn   zero4bytes
+
+            mov     rd, src_goto_want
+            call    copy4bytes          ; src_goto_want = *RF
+
+            mov     rf, src_goto_result
+            call    zero4bytes
+            mov     rf, src_goto_pos
+            call    zero4bytes
+            mov     rf, src_goto_line
+            call    zero4bytes
+            mov     rf, src_goto_line
+            inc     rf
+            inc     rf
+            inc     rf
+            ldi     1
+            str     rf                  ; we start on line 1, at 0
+
+            ; line 0 or 1 is the top of the file -- already the answer
+            mov     rf, src_goto_want
+            call    sg_is_le_one
+            lbdf    sg_done
+
+            mov     rf, src_goto_result
+            call    src_seek_to         ; result is still 0 here
+
+sg_loop:
+            call    get_next_byte
+            lbdf    sg_past_end
+            plo     r9
+
+            mov     rf, src_goto_pos
+            call    sg_bump             ; pos++
+
+            glo     r9
+            xri     10
+            lbnz    sg_loop             ; not a line ending
+
+            ; a new line starts at the current position
+            mov     rf, src_goto_line
+            call    sg_bump
+            mov     rf, src_goto_pos
+            mov     rd, src_goto_result
+            call    copy4bytes
+
+            ; reached the wanted line?
+            mov     rf, src_goto_line
+            mov     rd, src_goto_want
+            call    sg_equal
+            lbnf    sg_loop
+sg_done:
+            clc
+            rtn
+
+sg_past_end:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; sg_is_le_one: DF=1 iff the 4-byte value at [RF] is 0 or 1.
+;------------------------------------------------------------------
+sg_is_le_one:
+            ldn     rf
+            lbnz    sg_gt_one
+            inc     rf
+            ldn     rf
+            lbnz    sg_gt_one
+            inc     rf
+            ldn     rf
+            lbnz    sg_gt_one
+            inc     rf
+            ldn     rf
+            smi     2
+            lbnf    sg_le_one           ; < 2
+sg_gt_one:
+            clc
+            rtn
+sg_le_one:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; sg_equal: DF=1 iff the 4-byte values at [RF] and [RD] are equal.
+;------------------------------------------------------------------
+sg_equal:
+            ldi     4
+            plo     r7
+sg_eq_loop:
+            lda     rd
+            str     r2
+            lda     rf
+            sm
+            lbnz    sg_ne
+            dec     r7
+            glo     r7
+            lbnz    sg_eq_loop
+            stc
+            rtn
+sg_ne:
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; sg_bump: the 4-byte big-endian value at [RF] += 1.
+;------------------------------------------------------------------
+sg_bump:
+            mov     r7, rf
+            inc     r7
+            inc     r7
+            inc     r7
+            ldn     r7
+            adi     1
+            str     r7
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+            rtn
+            endp
+
             proc    _src_file_data
             .link   .align  32          ; the FCB must not straddle a page
                                         ; (K_FILE_OPEN rejects one that
@@ -931,6 +1248,16 @@ ss_cur:                 ds      4
 ss_line:                ds      4
 ss_cand_line:           ds      4
 
+; --- src_open / src_last_page ---
+src_size:               ds      4       ; byte count, captured at open
+src_goto_result:        ds      4       ; src_last_page's answer
+src_open_path:          dw      0
+slp_n:                  db      0
+src_stat_buf:           ds      DIRENT_LEN
+src_goto_want:          ds      4
+src_goto_line:          ds      4
+src_goto_pos:           ds      4
+
                 public  less_fcb
                 public  less_iobuf
                 public  src_pos
@@ -956,4 +1283,12 @@ ss_cand_line:           ds      4
                 public  ss_cur
                 public  ss_line
                 public  ss_cand_line
+                public  src_size
+                public  src_goto_result
+                public  src_open_path
+                public  slp_n
+                public  src_stat_buf
+                public  src_goto_want
+                public  src_goto_line
+                public  src_goto_pos
             endp

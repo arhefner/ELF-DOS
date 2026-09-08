@@ -28,8 +28,7 @@
 
             extrn   pager_run
             extrn   src_close
-            extrn   less_fcb
-            extrn   less_iobuf
+            extrn   src_open
 
             org     PROG_BASE
 
@@ -53,11 +52,8 @@ start:
             phi     rf
             ldn     rb
             plo     rf                  ; RF = argv[1] (filename)
-            mov     rd, less_fcb
-            mov     ra, less_iobuf
-            ldi     0                   ; mode = read
-            call    K_FILE_OPEN
-            lbdf    not_found
+            call    src_open            ; the SOURCE owns its own FCB
+            lbdf    not_found           ; and learns its own size
 
             ; The file is open: hand the whole session to the pager and
             ; close up when it comes back. The program opens the source
