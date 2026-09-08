@@ -508,8 +508,57 @@ rlh_done:
 ; get_next_byte: pulls the next raw byte from the file via a small
 ; chunk buffer, refilling it from disk (K_FILE_READ) as needed.
 ; Returns: D = byte, DF=0 -- or DF=1 if the file is exhausted.
+            extrn   get_next_byte
 ;------------------------------------------------------------------
-get_next_byte:
+src_pos_add16:
+            mov     r7, src_pos
+            add16   r7, 3               ; R7 -> src_pos+3 (LSB byte)
+
+            glo     rd
+            str     r2
+            ldn     r7
+            add                         ; D = pos.b3 + rd.lo, DF=carry
+            str     r7
+
+            dec     r7
+            ghi     rd
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
+
+            rtn
+            endp
+
+;------------------------------------------------------------------
+; get_next_byte: pulls the next raw byte from the file via a small
+; chunk buffer, refilling it from disk (K_FILE_READ) as needed.
+; Its own proc (rather than a label inside src_read_line, where it
+; started) because src_search reads the file as a plain byte stream
+; too -- both callers go through this one buffered reader.
+; Returns: D = byte, DF=0 -- or DF=1 if the file is exhausted.
+; Modifies: R7, R8, RC, RD, RF
+;------------------------------------------------------------------
+            proc    get_next_byte
+            extrn   less_fcb
+            extrn   less_chunk_buf
+            extrn   less_chunk_ptr
+            extrn   less_chunk_remaining
+
             mov     rf, less_chunk_remaining
             ldn     rf
             lbnz    gnb_have
@@ -577,22 +626,243 @@ gnb_have:
 ; chk_add32 -- independently hand-verified here against a concrete
 ; example (0x0000FFFF + 0x0002 = 0x00010001) before being trusted.
 ; Modifies: R7 (and D). RD's bytes are consumed, not needed after.
+            endp
+
 ;------------------------------------------------------------------
-src_pos_add16:
-            mov     r7, src_pos
-            add16   r7, 3               ; R7 -> src_pos+3 (LSB byte)
+; src_search: find the pattern's bytes at or after a start position.
+;
+; The pattern is a COUNTED byte string, not a NUL-terminated one -- the
+; pager parses escapes ("\n", "\x38", ...) before calling, so a pattern
+; can contain any byte at all, $00 included. What those bytes MEAN is
+; this source's business: here they are matched against the file's raw
+; content, so a pattern may span a line boundary and may contain the
+; line terminator itself.
+;
+; Scanning is a single forward pass over get_next_byte, with a re-seek
+; only when a partial match fails (i.e. the first byte matched but a
+; later one did not). A failed FIRST byte costs nothing -- the stream
+; is already positioned on the next candidate -- so the common case is
+; one sequential read of the file, not a seek per byte.
+;
+; Args:    RF   = pattern bytes (not NUL-terminated)
+;          RC.0 = pattern length, 1..255
+;          RD   = pointer to a 4-byte start position
+; Returns: DF=0 -- found:
+;            src_search_top    = start of the LINE containing the match
+;                                (what the pager displays; a different
+;                                source would round to its own row)
+;            src_search_resume = start of the line AFTER the match,
+;                                where a following search resumes
+;          DF=1 -- no match at or after the start position.
+; Leaves the source's own read position and src_pos unspecified: every
+; caller follows a search with a seek of its own.
+; Modifies: everything.
+;------------------------------------------------------------------
+            proc    src_search
+            extrn   get_next_byte
+            extrn   src_seek_to
+            extrn   copy4bytes
+            extrn   src_search_top
+            extrn   src_search_resume
+            extrn   ss_pat
+            extrn   ss_len
+            extrn   ss_i
+            extrn   ss_last
+            extrn   ss_cand
+            extrn   ss_cur
+            extrn   ss_line
+            extrn   ss_cand_line
 
-            glo     rd
-            str     r2
-            ldn     r7
-            add                         ; D = pos.b3 + rd.lo, DF=carry
-            str     r7
+            ; --- stash every argument before anything can clobber it ---
+            mov     r8, ss_pat
+            ghi     rf
+            str     r8
+            inc     r8
+            glo     rf
+            str     r8                  ; ss_pat = RF
 
-            dec     r7
-            ghi     rd
+            mov     r8, ss_len          ; (clobbers D -- gotcha #4)
+            glo     rc
+            str     r8                  ; ss_len = RC.0
+
+            mov     rf, rd
+            mov     rd, ss_cand
+            call    copy4bytes          ; ss_cand = *RD
+
+            mov     rf, ss_cand
+            mov     rd, ss_cur
+            call    copy4bytes
+            mov     rf, ss_cand
+            mov     rd, ss_line
+            call    copy4bytes          ; ss_cur = ss_line = ss_cand
+
+            mov     rf, ss_len
+            ldn     rf
+            lbz     ss_notfound         ; empty pattern never matches
+
+            mov     rf, ss_cand
+            call    src_seek_to
+
+ss_scan:
+            ; this position is the candidate: remember it and the line
+            ; it sits on BEFORE consuming the byte
+            mov     rf, ss_cur
+            mov     rd, ss_cand
+            call    copy4bytes
+            mov     rf, ss_line
+            mov     rd, ss_cand_line
+            call    copy4bytes
+
+            call    get_next_byte
+            lbdf    ss_notfound
+            plo     r9                  ; stash the byte (gotcha #4)
+
+            mov     rf, ss_cur
+            call    ss_bump             ; ss_cur++
+
+            glo     r9
             str     r2
+            ldn     r2
+            xri     10
+            lbnz    ss_scan_not_lf
+            mov     rf, ss_cur          ; the byte WAS an LF: the next
+            mov     rd, ss_line         ; position starts a new line
+            call    copy4bytes
+
+ss_scan_not_lf:
+            ; remember it, in case the whole match turns out to be
+            ; just this one byte (see ss_found's resume handling)
+            mov     rf, ss_last
+            glo     r9
+            str     rf
+
+            mov     rf, ss_pat
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = pattern
+            ldn     r8                  ; D = pattern[0]
+            str     r2
+            glo     r9
+            sm                          ; byte - pattern[0]
+            lbnz    ss_scan             ; no: next candidate, no seek
+
+            ; first byte matched -- verify the rest
+            mov     rf, ss_i
+            ldi     1
+            str     rf
+
+ss_verify:
+            mov     rf, ss_i
+            ldn     rf
+            str     r2
+            mov     rf, ss_len
+            ldn     rf
+            sm                          ; len - i
+            lbz     ss_found            ; i == len: whole pattern matched
+
+            call    get_next_byte
+            lbdf    ss_notfound
+            plo     r9
+
+            mov     rf, ss_cur
+            call    ss_bump
+
+            ; deliberately do NOT advance ss_line here: on a mismatch
+            ; we re-seek back to ss_cand+1, and ss_line must still
+            ; describe THAT position, not wherever verification got to
+            mov     rf, ss_last
+            glo     r9
+            str     rf
+
+            mov     rf, ss_pat
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, ss_i
+            ldn     rf
+            str     r2
+            glo     r8
+            add
+            plo     r8
+            ghi     r8
+            adci    0
+            phi     r8                  ; R8 = pattern + i
+            ldn     r8
+            str     r2
+            glo     r9
+            sm
+            lbnz    ss_mismatch
+
+            mov     rf, ss_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     ss_verify
+
+ss_mismatch:
+            ; step past this candidate and resume the sequential scan
+            ; from there. ss_line is still correct for ss_cand+1: it
+            ; was advanced above only if the CANDIDATE byte was an LF,
+            ; in which case ss_cand+1 is exactly the new line's start.
+            mov     rf, ss_cand
+            call    ss_bump
+            mov     rf, ss_cand
+            mov     rd, ss_cur
+            call    copy4bytes
+            mov     rf, ss_cand
+            call    src_seek_to
+            lbr     ss_scan
+
+ss_found:
+            mov     rf, ss_cand_line
+            mov     rd, src_search_top
+            call    copy4bytes
+
+            ; resume at the start of the next line. If the match's own
+            ; last byte was the LF, we are already there -- scanning on
+            ; would skip a whole line.
+            mov     rf, ss_last
+            ldn     rf
+            xri     10
+            lbz     ss_resume_here
+
+ss_resume_loop:
+            call    get_next_byte
+            lbdf    ss_resume_here      ; EOF: resume there, so a
+                                        ; following search reports
+                                        ; "not found" immediately
+            plo     r9
+            mov     rf, ss_cur
+            call    ss_bump
+            glo     r9
+            xri     10
+            lbnz    ss_resume_loop
+
+ss_resume_here:
+            mov     rf, ss_cur
+            mov     rd, src_search_resume
+            call    copy4bytes
+            clc
+            rtn
+
+ss_notfound:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; ss_bump: the 4-byte big-endian value at [RF] += 1, LSB first with
+; carry propagated -- the same shape as src_pos_add16's own chain.
+; Args: RF = pointer to a 4-byte value.  Modifies: R7, D, DF
+;------------------------------------------------------------------
+ss_bump:
+            mov     r7, rf
+            inc     r7
+            inc     r7
+            inc     r7                  ; R7 -> byte 3 (LSB)
             ldn     r7
-            adc
+            adi     1
             str     r7
 
             dec     r7
@@ -609,6 +879,12 @@ src_pos_add16:
             adc
             str     r7
 
+            dec     r7
+            ldi     0
+            str     r2
+            ldn     r7
+            adc
+            str     r7
             rtn
             endp
 
@@ -643,6 +919,18 @@ less_backscan_start:    ds      4
 less_backscan_count:    db      0
 less_backscan_idx:      db      0
 
+; --- src_search's results (read by the pager) and its own scratch ---
+src_search_top:         ds      4
+src_search_resume:      ds      4
+ss_pat:                 dw      0
+ss_len:                 db      0
+ss_i:                   db      0
+ss_last:                db      0
+ss_cand:                ds      4
+ss_cur:                 ds      4
+ss_line:                ds      4
+ss_cand_line:           ds      4
+
                 public  less_fcb
                 public  less_iobuf
                 public  src_pos
@@ -658,4 +946,14 @@ less_backscan_idx:      db      0
                 public  less_backscan_start
                 public  less_backscan_count
                 public  less_backscan_idx
+                public  src_search_top
+                public  src_search_resume
+                public  ss_pat
+                public  ss_len
+                public  ss_i
+                public  ss_last
+                public  ss_cand
+                public  ss_cur
+                public  ss_line
+                public  ss_cand_line
             endp

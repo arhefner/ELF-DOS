@@ -74,6 +74,9 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   src_pos
             extrn   src_line_buf
             extrn   src_prev_result
+            extrn   src_search
+            extrn   src_search_top
+            extrn   src_search_resume
             extrn   copy4bytes
             extrn   copy4bytes_to_r8
             extrn   zero4bytes
@@ -102,6 +105,7 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   less_key
             extrn   less_rows_name
             extrn   less_esc_buf
+            extrn   less_search_len
 
             ; --- init state ---
             call    src_rewind          ; the SOURCE resets its own state
@@ -114,7 +118,7 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             mov     rf, less_status_mode
             ldi     0
             str     rf
-            mov     rf, less_search_buf
+            mov     rf, less_search_len
             ldi     0
             str     rf                  ; empty pattern -- 'n' is a
                                         ; no-op until a real search runs
@@ -544,6 +548,16 @@ cmd_search:
             ldn     rf
             lbz     cs_cancel           ; empty pattern: cancel
 
+            ; Turn what was typed into raw BYTES. Escapes are parsed
+            ; here, in the pager, because they belong to the input --
+            ; the same reason the '/' prompt does. What the resulting
+            ; bytes MEAN is the source's business (see src_search).
+            call    parse_escapes
+            lbdf    cs_bad_escape
+            mov     rf, less_search_len
+            ldn     rf
+            lbz     cs_cancel           ; parsed away to nothing
+
             ; a NEW search always (re)establishes both the scan start
             ; and the "if this fails, 'n' retries from here" baseline
             ; as the current view position -- lsf_found below advances
@@ -564,9 +578,33 @@ cs_cancel:
                                         ; the prompt line remnants
             lbr     main_loop
 
+cs_bad_escape:
+            ; Report and drop the pattern rather than searching for
+            ; something the user did not mean -- silently treating a
+            ; bad escape as literal text hides typos.
+            mov     rf, less_search_len
+            ldi     0
+            str     rf
+            mov     rf, less_status_mode
+            ldi     2
+            str     rf
+            call    less_goto           ; redraw, then overwrite the
+            mov     rf, less_page_lines ; status row with the message
+            ldn     rf
+            adi     1
+            call    position_at_row
+            call    print_status_line
+            call    K_READ              ; "press any key", same as the
+                                        ; not-found path below
+            mov     rf, less_status_mode
+            ldi     0
+            str     rf
+            call    less_reprint_status
+            lbr     main_loop
+
 ;------------------------------------------------------------------
 cmd_next:
-            mov     rf, less_search_buf
+            mov     rf, less_search_len
             ldn     rf
             lbz     main_loop           ; no previous pattern: ignore
 
@@ -614,33 +652,25 @@ cmd_quit:
 ; so a following 'n' just retries the identical scan.
 ;------------------------------------------------------------------
 less_search_forward:
-            mov     rf, less_search_start
-            call    src_seek_to
-            mov     rf, less_search_start
-            mov     rd, src_pos
-            call    copy4bytes
-
-lsf_loop:
-            mov     rf, src_pos
-            mov     rd, less_candidate_top
-            call    copy4bytes          ; candidate = start of the
-                                        ; line we're about to read
-
-            call    src_read_line
+            ; The whole scan belongs to the source: only it knows what
+            ; its bytes are and what a displayable position is (a line
+            ; start here, a row start for a fixed-width source). The
+            ; pager supplies the pattern and the starting point and
+            ; takes back two positions.
+            mov     rd, less_search_start
+            mov     rf, less_search_buf
+            mov     r8, less_search_len ; (mov clobbers D -- load the
+            ldn     r8                  ;  length AFTER the pointers)
+            plo     rc
+            call    src_search
             lbdf    lsf_notfound
 
-            mov     rf, src_line_buf
-            mov     r8, less_search_buf
-            call    line_contains
-            lbnf    lsf_found
-            lbr     lsf_loop
+            mov     rf, src_search_top
+            mov     rd, less_candidate_top
+            call    copy4bytes
 
 lsf_found:
-            ; src_pos has already been advanced past the matched
-            ; line by src_read_line -- that's exactly "one line past
-            ; the match", snapshot it before less_goto below
-            ; overwrites src_pos with the match's own start instead.
-            mov     rf, src_pos
+            mov     rf, src_search_resume
             mov     rd, less_search_resume
             call    copy4bytes
 
@@ -851,7 +881,12 @@ print_status_line:
 
             mov     rf, less_status_mode
             ldn     rf
-            lbnz    psl_notfound
+            lbz     psl_normal
+            xri     2
+            lbz     psl_bad_escape
+            lbr     psl_notfound
+
+psl_normal:
 
             mov     rf, less_at_eof
             ldn     rf
@@ -869,6 +904,11 @@ psl_end:
 psl_notfound:
             call    K_INMSG
             db      "-- Pattern not found -- press any key --",0
+            rtn
+
+psl_bad_escape:
+            call    K_INMSG
+            db      "-- Bad escape (use \\ \n \r \t \0 \xHH) -- press any key --",0
             rtn
 
 ;------------------------------------------------------------------
@@ -1206,47 +1246,158 @@ clu_display:
             lbr     main_loop
 
 ;------------------------------------------------------------------
-; line_contains: does the NUL-terminated string at RF (haystack)
-; contain the NUL-terminated string at R8 (needle, must be non-empty)
-; as a substring? Naive search via pure pointer-walking (no computed
-; offsets/indices at all, so CLAUDE.md gotcha #18 -- an ADD16/SUB16
-; register-register op silently clobbering a just-staged str-r2
-; comparison byte -- structurally can't apply here).
-; Returns: DF=0 if found, DF=1 if not.
-; Modifies: everything (RF, R8, RA, RB, RC)
+; parse_escapes: rewrite less_search_buf in place, turning C-style
+; escapes into the bytes they name, and set less_search_len to the
+; resulting COUNT. Output is always shorter than input (every escape
+; collapses 2+ characters into 1), so rewriting in place is safe --
+; the same read-cursor/write-cursor convention progs/shell.asm's own
+; tokenizer uses.
+;
+; Recognized: \\  \n  \r  \t  \0  \xHH  (exactly two hex digits).
+; Anything else after a backslash -- including end-of-string -- is an
+; error rather than a literal, so a typo is reported instead of being
+; silently searched for.
+;
+; A counted result is the whole point: the pattern can then contain
+; ANY byte, $00 included, which a NUL-terminated one never could.
+;
+; Makes no calls except to its own leaf helper below, so RF/RD/R9 stay
+; safely register-resident throughout.
+; Args:    (none -- operates on less_search_buf)
+; Returns: DF=0 ok, less_search_len set;  DF=1 malformed escape
 ;------------------------------------------------------------------
-line_contains:
-            mov     ra, r8              ; RA = needle start (constant)
+parse_escapes:
+            mov     rf, less_search_buf ; read cursor
+            mov     rd, less_search_buf ; write cursor
+            ldi     0
+            plo     r9                  ; R9.0 = count
 
-lc_outer:
-            ldn     rf                  ; peek the haystack char here
-            lbz     lc_notfound         ; haystack exhausted: no match
+pe_loop:
+            ldn     rf
+            lbz     pe_done
+            xri     92                  ; backslash?
+            lbz     pe_escape
 
-            mov     rb, rf              ; RB = inner haystack pointer
-            mov     rc, ra              ; RC = inner needle pointer,
-                                        ; reset to the needle's start
-lc_inner:
-            ldn     rc                  ; needle char
-            lbz     lc_match            ; needle exhausted: full match
-
-            str     r2                  ; stage the needle char
-            ldn     rb                  ; D = haystack char
-            sm                          ; D = haystack_char - needle_char
-            lbnz    lc_next_outer       ; mismatch
-
-            inc     rb
-            inc     rc
-            lbr     lc_inner
-
-lc_next_outer:
+            ldn     rf                  ; ordinary byte: copy it
+            str     rd
             inc     rf
-            lbr     lc_outer
+            inc     rd
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     pe_loop
 
-lc_match:
+pe_escape:
+            inc     rf                  ; step over the backslash
+            ldn     rf
+            lbz     pe_error            ; trailing backslash
+
+            xri     'n'
+            lbz     pe_lf
+            ldn     rf
+            xri     'r'
+            lbz     pe_cr
+            ldn     rf
+            xri     't'
+            lbz     pe_tab
+            ldn     rf
+            xri     '0'
+            lbz     pe_nul
+            ldn     rf
+            xri     92
+            lbz     pe_backslash
+            ldn     rf
+            xri     'x'
+            lbz     pe_hex
+            lbr     pe_error
+
+pe_lf:      ldi     10
+            lbr     pe_emit
+pe_cr:      ldi     13
+            lbr     pe_emit
+pe_tab:     ldi     9
+            lbr     pe_emit
+pe_nul:     ldi     0
+            lbr     pe_emit
+pe_backslash:
+            ldi     92
+            lbr     pe_emit
+
+pe_hex:
+            inc     rf                  ; first hex digit
+            ldn     rf
+            call    pe_hexval
+            lbdf    pe_error
+            shl
+            shl
+            shl
+            shl
+            plo     r8                  ; high nibble, in place
+
+            inc     rf                  ; second hex digit
+            ldn     rf
+            call    pe_hexval
+            lbdf    pe_error
+            str     r2
+            glo     r8
+            or                          ; D = (hi << 4) | lo
+            lbr     pe_emit
+
+pe_emit:
+            str     rd
+            inc     rf                  ; step over the escape's last char
+            inc     rd
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     pe_loop
+
+pe_done:
+            mov     rf, less_search_len
+            glo     r9
+            str     rf
             clc
             rtn
 
-lc_notfound:
+pe_error:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; pe_hexval: D = an ASCII character -> DF=0 with D = its hex value,
+; or DF=1 if it is not a hex digit. Touches only D/DF and R8.1, so
+; parse_escapes' own RF/RD/R9 survive the call untouched.
+;------------------------------------------------------------------
+pe_hexval:
+            phi     r8                  ; keep the character
+            smi     '0'
+            lbnf    pe_hv_bad           ; below '0'
+            smi     10                  ; ('0'..'9') -> < 0 here
+            lbnf    pe_hv_dec
+
+            ghi     r8
+            ani     $DF                 ; fold a..f up to A..F (only
+                                        ; letters reach here, so this
+                                        ; is the same safe fold the
+                                        ; shell's drive-letter check uses)
+            smi     'A'
+            lbnf    pe_hv_bad           ; between '9' and 'A'
+            str     r2
+            ldi     6
+            sm                          ; 6 - (c - 'A')
+            lbnf    pe_hv_bad           ; 'F' is the last valid one
+            ldn     r2
+            adi     10                  ; 'A' -> 10
+            clc
+            rtn
+
+pe_hv_dec:
+            ghi     r8
+            smi     '0'
+            clc
+            rtn
+
+pe_hv_bad:
             stc
             rtn
 
@@ -1644,6 +1795,7 @@ less_top:               ds      4       ; start of the displayed page
 less_candidate_top:     ds      4       ; scratch, used during search
 
 less_search_buf:        ds      LESS_SEARCH_MAX
+less_search_len:        db      0       ; parsed pattern length in BYTES
 less_search_start:      ds      4       ; scan-start scratch, set fresh by
                                         ; the caller each search
 less_search_resume:     ds      4       ; where 'n' resumes
@@ -1694,4 +1846,5 @@ less_esc_buf:           ds      10
                 public  less_key
                 public  less_rows_name
                 public  less_esc_buf
+                public  less_search_len
             endp
