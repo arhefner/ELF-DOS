@@ -165,6 +165,37 @@ K_INIT:         equ     $0106       ; reserved -- kernel boot entry, do not call
 ; available RAM, since each FCB lives in the caller's own memory).
 ; K_FILE_OPEN itself no longer returns anything meaningful in D on
 ; success -- the caller already has the FCB pointer they passed in.
+;
+; *** AN FCB MUST NOT STRADDLE A 256-BYTE PAGE BOUNDARY. ***
+; The kernel reaches an FCB's fields by adding a field offset to the
+; LOW BYTE of the FCB pointer alone, so an FCB split across a page
+; would have its upper fields read from the wrong page. K_FILE_OPEN
+; REJECTS a straddling FCB -- it returns DF=1 before touching any of
+; its own state, so the open fails cleanly at the first call instead
+; of corrupting memory for the life of the file. There is no distinct
+; error message: it looks like any other failed open, it happens at
+; RUN time, and only on the builds where the address happens to land
+; badly. Declare every FCB 32-aligned and it can never happen:
+;
+;   ; flat file (no proc): align the label directly
+;   .align  32
+;   my_fcb:     ds      FCB_LEN
+;   my_iobuf:   ds      FCB_IOBUF_LEN
+;
+;   ; inside a proc: align the PROC BASE, and keep the FCB(s) first.
+;   ; ".link .align" moves the proc's base address, which only aligns
+;   ; a label while nothing has been emitted yet -- Link/02 refuses it
+;   ; anywhere else in a proc. Several FCBs may share one aligned proc
+;   ; as long as they are adjacent and FIRST (offsets 0, 32, 64 ...).
+;               proc    _my_data
+;               .link   .align 32
+;   my_fcb:     ds      FCB_LEN
+;   my_fcb2:    ds      FCB_LEN
+;   ; ... everything else after
+;
+; An FCB carved out of a heap or himem reservation at run time must be
+; aligned by the CALLER (round the returned pointer up to a multiple
+; of 32); nothing checks it for you until K_FILE_OPEN refuses it.
 FCB_LEN:        equ     32
 FCB_IOBUF_LEN:  equ     512
 
