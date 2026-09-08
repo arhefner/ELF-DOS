@@ -153,6 +153,7 @@ willing to spend. To open a file, a program reserves two blocks of its
 own memory:
 
 ```asm
+            .align  32              ; REQUIRED -- see below
 my_fcb:     ds      FCB_LEN         ; 32 bytes -- need not be pre-zeroed
 my_iobuf:   ds      FCB_IOBUF_LEN   ; 512 bytes, this FCB's own sector buffer
 ```
@@ -164,6 +165,45 @@ small-integer handle to keep track of. The internal layout of an FCB is
 not documented here and should not be relied on. Treat it as an opaque
 block the kernel manages on the caller's behalf.
 
+#### An FCB must not straddle a 256-byte page boundary
+
+The kernel reaches an FCB's fields by adding a field offset to the **low
+byte** of the FCB pointer alone. That is what makes field access cheap,
+and it is correct precisely while an FCB's 32 bytes stay inside one
+page. An FCB split across a page boundary would have its upper fields
+read from the wrong page.
+
+`K_FILE_OPEN` **rejects** a straddling FCB: it returns `DF` = 1 before
+touching any of its own state, so the open fails cleanly rather than
+corrupting memory for the life of the file. There is no distinct error
+message - it looks like any other failed open. Note what that means in
+practice: the check fires at *run* time, and only on the builds where
+the address happens to land badly, so an FCB that is merely *lucky*
+today can start failing after an unrelated edit shifts the code above
+it. Align every FCB and it can never happen.
+
+In a flat source file (no `proc`), align the label directly, as in the
+example above. Inside a `proc`, align the **proc's base** instead and
+keep the FCB first:
+
+```asm
+            proc    _my_data
+            .link   .align 32       ; must be the FIRST thing in the proc
+my_fcb:     ds      FCB_LEN         ; offset 0
+my_fcb2:    ds      FCB_LEN         ; offset 32 -- also aligned
+my_iobuf:   ds      FCB_IOBUF_LEN   ; everything else after
+            ...
+```
+
+`.link .align` moves the proc's base address, which only aligns a label
+while nothing has been emitted yet - Link/02 rejects it anywhere else in
+a proc. Several FCBs can share one aligned proc as long as they are
+adjacent and come first, so they land at offsets 0, 32, 64 and so on.
+
+An FCB carved out of a heap or a memory reservation at run time must be
+aligned by the **caller** - round the returned pointer up to a multiple
+of 32. Nothing checks it for you until `K_FILE_OPEN` refuses it.
+
 **`K_FILE_OPEN`**
 Opens a file for reading, or for reading and writing.
 - **Args:** `RF` = path, `D` = mode (0 = read, 1 = read/write, creating
@@ -171,7 +211,9 @@ Opens a file for reading, or for reading and writing.
   `FCB_LEN`-byte FCB, `RA` = pointer to the caller's `FCB_IOBUF_LEN`-byte
   I/O buffer.
 - **Returns:** `DF` = 0/1. `D` is not meaningful on return. The caller
-  already has the FCB pointer it passed in.
+  already has the FCB pointer it passed in. `DF` = 1 also covers an FCB
+  that straddles a page boundary (see above), which is a caller bug
+  rather than a filesystem condition.
 
 **`K_FILE_CLOSE`**
 Closes a file previously opened with `K_FILE_OPEN`.
@@ -545,7 +587,7 @@ Reads back the exit code of the last command that ran.
 |---|---|---|
 | `PROG_BASE` | (see `kernel_api.inc`) | The fixed address every program loads to. |
 | `LOADER_ARGS` | `PROG_BASE - 4` | Word 0 = `mem_base`, word 1 = `mem_top` - the program's usable memory range. |
-| `FCB_LEN` | 32 | Size of a File Control Block a program must allocate for each open file. |
+| `FCB_LEN` | 32 | Size of a File Control Block a program must allocate for each open file. Must be 32-aligned - see [Working with files](#working-with-files). |
 | `FCB_IOBUF_LEN` | 512 | Size of the I/O buffer that goes with each FCB. |
 | `DIRENT_LEN` | 139 | Size of the result buffer `K_DIR_READ` and `K_STAT` fill in. |
 | `DIR_STATE_LEN` | 9 | Size of the snapshot buffer `K_DIR_SAVE_STATE`/`K_DIR_RESTORE_STATE` use. |
