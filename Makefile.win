@@ -242,6 +242,16 @@ lib\vollabel.prg: lib\vollabel.asm include\opcodes.def include\kernel_api.inc in
 lib\lineedit.prg: lib\lineedit.asm include\opcodes.def include\bios.inc include\kernel_api.inc include\lineedit.inc
 	cd lib && $(ASM) $(ASMFLAGS) lineedit.asm
 
+lib\pos32.prg: lib\pos32.asm include\opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) pos32.asm
+
+lib\src_file.prg: lib\src_file.asm include\opcodes.def include\bios.inc include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) src_file.asm
+
+lib\pager.prg: lib\pager.asm include\opcodes.def include\bios.inc include\kernel_api.inc include\lineedit.inc
+	cd lib && $(ASM) $(ASMFLAGS) pager.asm
+
+
 lib\icall.prg: lib\icall.asm include\opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) icall.asm
 
@@ -338,11 +348,11 @@ bin\edlin: progs\edlin.prg lib\env.prg lib\lineedit.prg bin
 	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg lib\lineedit.prg
 	-del /F /Q bin\edlin.lkb
 
-progs\less.prg: progs\less.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\lineedit.inc
+progs\less.prg: progs\less.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) less.asm
 
-bin\less: progs\less.prg lib\env.prg lib\lineedit.prg bin
-	$(LINK) $(LFLAGS) -o bin\less progs\less.prg lib\env.prg lib\lineedit.prg
+bin\less: progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\env.prg lib\lineedit.prg bin
+	$(LINK) $(LFLAGS) -o bin\less progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\env.prg lib\lineedit.prg
 	-del /F /Q bin\less.lkb
 
 progs\move.prg: progs\move.asm include\kernel_api.inc include\bios.inc include\opcodes.def

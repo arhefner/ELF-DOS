@@ -1,0 +1,1697 @@
+;
+; pager.asm - a reusable full-screen pager: a sliding window over a data
+; source, bidirectional scrolling, paging, and forward search.
+;
+; Extracted from progs/less.asm (2026-09-08) so the same paging engine
+; can front different kinds of data. The pager owns the terminal, the
+; visible window and the history stack; it knows nothing whatever about
+; where the text comes from.
+;
+;   THE SOURCE CONTRACT -- what a data source must provide
+;   ------------------------------------------------------
+;     src_rewind    ()
+;           reset to the very beginning: src_pos = 0, buffers invalid.
+;     src_seek_to   (RF = ptr to a 4-byte position)
+;           reposition there. The CALLER updates src_pos to match; this
+;           only moves the source. (An asymmetry inherited from the
+;           original code and deliberately left alone during the split
+;           -- see progs/less.asm's history in CLAUDE.md.)
+;     src_read_line ()
+;           DF=0: src_line_buf holds the line starting at the current
+;                 position, NUL-terminated and capped at the source's
+;                 own maximum, and src_pos has advanced past it.
+;           DF=1: nothing left.
+;     src_prev_start(RF = ptr to a 4-byte position)
+;           src_prev_result = the start of the line BEFORE it.
+;     src_close     ()
+;           release whatever the source holds.
+;
+;   Shared variables: src_pos (current position) and src_line_buf (the
+;   line text), both owned and published by the source.
+;
+;   A POSITION IS AN OPAQUE 4-BYTE TOKEN. The pager stores positions in
+;   less_visible[] and less_stack and hands them back to the source, but
+;   never interprets one. That is the whole point: a byte offset for a
+;   file (lib/src_file.asm), the same for a hex view, LBA*512 + row*16
+;   for a sector dumper -- nothing here changes.
+;
+;   Entry point: pager_run (). Runs until the user quits, then returns;
+;   the caller opens the source beforehand and closes it afterward.
+;
+; Terminal behaviour (page redraw vs. IND/RI single-line scrolling, why
+; there is no DECSTBM scroll region, and why every scrolled row is
+; cleared BEFORE its new text is printed) is documented at the routines
+; that implement it, further down.
+;
+
+#include    include/opcodes.def
+#include    include/bios.inc
+#include    include/kernel_api.inc
+#include    include/lineedit.inc
+
+LESS_SEARCH_MAX: equ    32          ; longest search pattern (incl NUL)
+LESS_PAGE_LINES: equ    23          ; default screen height - 1
+LESS_MAX_VISIBLE: equ   80          ; cap on less_page_lines -- bounds the
+                                    ; less_visible[] sliding window's size;
+                                    ; a ROWS value producing a larger page
+                                    ; is clamped down to this. 80 gives
+                                    ; real headroom over a 50-row terminal
+                                    ; (found in hardware testing) and keeps
+                                    ; page_lines+1 -- the status row number
+                                    ; the line-move scroll helpers below
+                                    ; print via ESC[<row>H -- comfortably
+                                    ; under 100, so the row-number
+                                    ; formatter never needs a 3rd digit
+LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
+                                    ; <= 255 -- less_stack_count is a byte)
+
+            proc    pager_run
+            extrn   src_rewind
+            extrn   src_seek_to
+            extrn   src_read_line
+            extrn   src_prev_start
+            extrn   src_close
+            extrn   src_pos
+            extrn   src_line_buf
+            extrn   src_prev_result
+            extrn   copy4bytes
+            extrn   copy4bytes_to_r8
+            extrn   zero4bytes
+            extrn   env_getenv
+            extrn   env_parse_uint
+            extrn   read_line_ex
+            extrn   less_top
+            extrn   less_candidate_top
+            extrn   less_search_buf
+            extrn   less_search_start
+            extrn   less_search_resume
+            extrn   less_stack
+            extrn   less_stack_count
+            extrn   less_back_i
+            extrn   less_push_i
+            extrn   less_visible
+            extrn   less_visible_count
+            extrn   less_new_line
+            extrn   less_dropped
+            extrn   less_saved_pos
+            extrn   less_page_end
+            extrn   less_page_lines
+            extrn   less_lines_this_page
+            extrn   less_at_eof
+            extrn   less_status_mode
+            extrn   less_key
+            extrn   less_rows_name
+            extrn   less_esc_buf
+
+            ; --- init state ---
+            call    src_rewind          ; the SOURCE resets its own state
+                                        ; (src_pos = 0, buffers invalidated)
+            mov     rf, less_top
+            call    zero4bytes
+            mov     rf, less_stack_count
+            ldi     0
+            str     rf
+            mov     rf, less_status_mode
+            ldi     0
+            str     rf
+            mov     rf, less_search_buf
+            ldi     0
+            str     rf                  ; empty pattern -- 'n' is a
+                                        ; no-op until a real search runs
+            mov     rf, less_search_resume
+            call    zero4bytes
+
+            mov     rf, less_visible_count
+            ldi     0
+            str     rf
+
+            mov     rf, less_page_lines
+            ldi     LESS_PAGE_LINES
+            str     rf
+
+            ; --- read ROWS from the environment; if valid, override
+            ; less_page_lines with ROWS-1 (same "-1 for the status
+            ; line" reasoning as MORE's own identical block, which
+            ; this is copied from). RA/RC (entry argv/argc) are no
+            ; longer needed past this point. ---
+            mov     rf, less_rows_name
+            call    env_getenv          ; RF = value or 0
+            ghi     rf
+            lbnz    less_have_rows
+            glo     rf
+            lbz     less_draw_first     ; not set: keep the default
+
+less_have_rows:
+            call    env_parse_uint      ; RD = parsed value
+            ghi     rd
+            lbnz    less_rows_ok        ; high byte nonzero: >= 256
+            ldi     2
+            str     r2
+            glo     rd
+            sm                          ; DF=1 iff RD.lo >= 2
+            lbnf    less_draw_first     ; RD < 2: keep the default
+
+less_rows_ok:
+            sub16   rd, 1               ; RD = ROWS - 1
+            mov     rb, less_page_lines
+            glo     rd
+            str     rb
+
+less_draw_first:
+            ; clamp less_page_lines to LESS_MAX_VISIBLE -- bounds
+            ; less_visible[]'s fixed-size array regardless of what a
+            ; caller's ROWS happened to be set to. A no-op for the
+            ; compile-time default (23), which is already well under it.
+            mov     rf, less_page_lines
+            ldn     rf
+            smi     LESS_MAX_VISIBLE
+            lbnf    less_draw_first2    ; not exceeding the cap
+            mov     rf, less_page_lines
+            ldi     LESS_MAX_VISIBLE
+            str     rf
+
+less_draw_first2:
+            call    draw_page
+            lbr     main_loop
+
+;------------------------------------------------------------------
+; main_loop: read one console keystroke and dispatch it.
+;------------------------------------------------------------------
+main_loop:
+            call    K_READ              ; D = key (blocking)
+            plo     r9                  ; stash D briefly -- "mov"
+                                        ; clobbers D (gotcha #4), and
+                                        ; nothing calls anything else
+                                        ; before it's read back below
+            mov     rf, less_key
+            glo     r9
+            str     rf                  ; less_key = key pressed
+
+            mov     rf, less_key
+            ldn     rf
+            xri     27                  ; ESC -- check for an arrow-key
+                                        ; CSI sequence
+            lbz     less_escape
+
+            mov     rf, less_key
+            ldn     rf
+            xri     ' '
+            lbz     cmd_forward
+
+            mov     rf, less_key
+            ldn     rf
+            ani     $DF                 ; uppercase-fold
+            xri     'F'
+            lbz     cmd_forward
+
+            mov     rf, less_key
+            ldn     rf
+            ani     $DF
+            xri     'B'
+            lbz     cmd_back
+
+            mov     rf, less_key        ; 'g'/'G' are DELIBERATELY NOT
+            ldn     rf                  ; case-folded here, matching
+            xri     'g'                 ; real less: lowercase goes to
+            lbz     cmd_top             ; the top, uppercase to the end
+
+            mov     rf, less_key
+            ldn     rf
+            xri     'G'
+            lbz     cmd_goto_end
+
+            mov     rf, less_key
+            ldn     rf
+            xri     '/'
+            lbz     cmd_search
+
+            mov     rf, less_key
+            ldn     rf
+            ani     $DF
+            xri     'N'
+            lbz     cmd_next
+
+            mov     rf, less_key
+            ldn     rf
+            ani     $DF
+            xri     'Q'
+            lbz     cmd_quit
+
+            mov     rf, less_key
+            ldn     rf
+            ani     $DF
+            xri     'J'
+            lbz     cmd_line_down
+
+            mov     rf, less_key
+            ldn     rf
+            ani     $DF
+            xri     'K'
+            lbz     cmd_line_up
+
+            mov     rf, less_key
+            ldn     rf
+            xri     14                  ; Ctrl-N
+            lbz     cmd_line_down
+            mov     rf, less_key
+            ldn     rf
+            xri     5                   ; Ctrl-E
+            lbz     cmd_line_down
+            mov     rf, less_key
+            ldn     rf
+            xri     16                  ; Ctrl-P
+            lbz     cmd_line_up
+            mov     rf, less_key
+            ldn     rf
+            xri     25                  ; Ctrl-Y
+            lbz     cmd_line_up
+
+            lbr     main_loop           ; unrecognized key: ignore
+
+;------------------------------------------------------------------
+; less_escape: reads the rest of a CSI escape sequence -- "ESC [ A"/
+; "ESC [ B" (Up/Down, Left/Right aren't meaningful here) or the longer
+; 4-byte "ESC [ 5 ~"/"ESC [ 6 ~" (PgUp/PgDn, the same VT220/xterm
+; convention this project's own Delete-key handling, ESC[3~, already
+; established elsewhere) and dispatches. Uses K_READ for every follow-
+; on read, matching progs/shell.asm's own current (2026-08-26) choice
+; for this exact situation over a raw f_uread call -- see rlwh_escape's
+; own header comment in shell.asm for the full byte-drop history and
+; why this is a real, acknowledged risk rather than a settled-safe
+; default; if arrow/PgUp/PgDn keys prove unreliable on real hardware,
+; that write-up is the first place to look. Any sequence that doesn't
+; match exactly (wrong byte at any position) is silently discarded
+; rather than guessed at, matching this project's established
+; preference for a visibly-inert malformed sequence over a masked one.
+;------------------------------------------------------------------
+less_escape:
+            call    K_READ
+            plo     r9
+            glo     r9
+            xri     '['
+            lbnz    main_loop           ; not a CSI sequence: discard
+
+            call    K_READ
+            plo     r9
+            glo     r9
+            xri     'A'
+            lbz     cmd_line_up
+            glo     r9
+            xri     'B'
+            lbz     cmd_line_down
+            glo     r9
+            xri     '5'
+            lbz     less_escape_pgup
+            glo     r9
+            xri     '6'
+            lbz     less_escape_pgdn
+            lbr     main_loop           ; any other letter: ignore
+
+less_escape_pgup:
+            call    K_READ
+            plo     r9
+            glo     r9
+            xri     '~'
+            lbnz    main_loop           ; malformed: discard
+            lbr     cmd_back
+
+less_escape_pgdn:
+            call    K_READ
+            plo     r9
+            glo     r9
+            xri     '~'
+            lbnz    main_loop
+            lbr     cmd_forward
+
+;------------------------------------------------------------------
+cmd_forward:
+            mov     rf, less_at_eof
+            ldn     rf
+            lbnz    main_loop           ; already at EOF: ignore
+
+            call    less_push_visible_all  ; push the OLD page's lines
+
+            ; new top = wherever we currently are -- forward paging
+            ; is sequential, so src_pos already sits exactly at the
+            ; start of the next page with no seek needed.
+            mov     rf, src_pos
+            mov     rd, less_top
+            call    copy4bytes
+
+            call    draw_page
+            lbr     main_loop
+
+;------------------------------------------------------------------
+; cmd_back: pops up to less_page_lines entries from less_stack, one at
+; a time. If the stack runs dry before that (or was already empty),
+; falls back to a real backward scan (src_prev_start) for
+; the REMAINING steps -- the same fallback cmd_line_up uses, and for
+; the same reason: an earlier version just stopped early instead,
+; which meant 'b' after a big jump ('G', 'g', a search match -- none
+; of which push their own old page onto less_stack anymore, see
+; cmd_goto_end's own header comment for why) could pop stale, non-
+; adjacent entries left over from BEFORE that jump, landing somewhere
+; confusingly unrelated rather than genuinely one page back. Stops
+; early (using whatever position it has reached) if less_top hits 0 --
+; there's nothing before the true start of the file to scan into.
+; A zero-step result (nothing popped AND nothing scanned) is a no-op.
+;------------------------------------------------------------------
+cmd_back:
+            mov     rf, less_back_i
+            ldi     0
+            str     rf
+
+cmd_back_loop:
+            mov     rb, less_page_lines
+            ldn     rb
+            str     r2
+            mov     rf, less_back_i
+            ldn     rf
+            sm                          ; D = back_i - page_lines, DF=1
+                                        ; iff back_i >= page_lines
+            lbdf    cmd_back_done
+
+            call    less_pop_top
+            lbnf    cmd_back_step_done  ; DF=0: popped a real entry
+
+            ; stack empty -- fall back to a real scan, if there's
+            ; anything left to scan into
+            mov     rf, less_top
+            ldn     rf
+            lbnz    cmd_back_scan
+            inc     rf
+            ldn     rf
+            lbnz    cmd_back_scan
+            inc     rf
+            ldn     rf
+            lbnz    cmd_back_scan
+            inc     rf
+            ldn     rf
+            lbnz    cmd_back_scan
+            lbr     cmd_back_check      ; all 4 bytes are 0: stop here
+
+cmd_back_scan:
+            mov     rf, less_top
+            call    src_prev_start
+            mov     rf, src_prev_result
+            mov     rd, less_top
+            call    copy4bytes
+
+cmd_back_step_done:
+            mov     rf, less_back_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     cmd_back_loop
+
+cmd_back_check:
+            mov     rf, less_back_i
+            ldn     rf
+            lbz     main_loop           ; zero successful steps: ignore
+
+cmd_back_done:
+            call    less_goto
+            lbr     main_loop
+
+;------------------------------------------------------------------
+; cmd_top ('g'): jump to byte 0. This is a "big jump", not a
+; sequential step -- the page that was on screen before it isn't
+; necessarily adjacent to anything reachable from the new position, so
+; (unlike cmd_forward/cmd_line_down, which only ever move into
+; genuinely sequential content and are always safe to push) it clears
+; less_stack instead of pushing the old page onto it. A stale entry
+; left over from before the jump would otherwise let 'b'/up-arrow pop
+; straight to some unrelated old position instead of correctly
+; scanning backward from wherever the jump actually landed -- see
+; cmd_back's own header for the full reasoning (this used to push,
+; and cmd_goto_end's identical old behavior was the confirmed source
+; of exactly that bug).
+;------------------------------------------------------------------
+cmd_top:
+            mov     rf, less_stack_count
+            ldi     0
+            str     rf
+            mov     rf, less_top
+            call    zero4bytes
+            call    less_goto
+            lbr     main_loop
+
+;------------------------------------------------------------------
+; cmd_goto_end ('G'): jump to the file's true last page -- there's no
+; way to know where that starts without actually reading up to it (a
+; text file has no fixed line width), so this scans the WHOLE file
+; forward from byte 0, maintaining a trailing window of exactly
+; less_page_lines lines the entire way (reusing less_shift_left_core,
+; the SAME array-shift logic single-line-down moves already use, just
+; called directly in a loop instead of via less_shift_visible_left).
+;
+; Deliberately does NOT push each scanned line onto less_stack (see
+; less_shift_left_core's own header for why), and -- like cmd_top --
+; clears less_stack entirely rather than pushing the OLD (pre-jump)
+; page onto it. An earlier version pushed the old page here, which
+; meant the FIRST up-arrow/'b' after 'G' would pop that stale entry
+; instead of ever reaching the real backward-scan fallback
+; (src_prev_start) -- landing on some unrelated old line
+; instead of the true adjacent one. Clearing the stack means every
+; 'b'/up-arrow after 'G' goes through the scan fallback from the very
+; first press, which is slower (a real backward disk scan each time)
+; but always lands on the correct, adjacent line -- exactly what was
+; asked for over the old "confusing tradeoff".
+;------------------------------------------------------------------
+cmd_goto_end:
+            mov     rf, less_stack_count
+            ldi     0
+            str     rf
+
+            mov     rf, less_candidate_top  ; reused as scratch: a
+                                        ; known 4-byte zero to seek to
+            call    zero4bytes
+            mov     rf, less_candidate_top
+            call    src_seek_to
+            mov     rf, less_candidate_top
+            mov     rd, src_pos
+            call    copy4bytes
+
+            mov     rf, less_visible_count
+            ldi     0
+            str     rf
+
+cge_scan_loop:
+            mov     rf, src_pos
+            mov     rd, less_new_line
+            call    copy4bytes          ; candidate = start of the
+                                        ; line about to be read
+
+            call    src_read_line
+            lbdf    cge_scan_done       ; true EOF -- scan complete
+
+            mov     rb, less_page_lines
+            ldn     rb
+            str     r2
+            mov     rf, less_visible_count
+            ldn     rf
+            sm                          ; D = count - page_lines, DF=1
+                                        ; iff count >= page_lines (full)
+            lbdf    cge_shift
+
+            ; GROWING: window still has room -- append at [count],
+            ; count++, nothing to drop or shift
+            mov     rf, less_visible_count
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     r9
+            shl16   r9
+            shl16   r9
+            mov     r8, less_visible
+            add16   r8, r9
+            mov     rf, less_new_line
+            call    copy4bytes_to_r8
+
+            mov     rf, less_visible_count
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     cge_scan_loop
+
+cge_shift:
+            call    less_shift_left_core  ; drops [0] (no stack push),
+                                        ; shifts down, appends
+                                        ; less_new_line
+            lbr     cge_scan_loop
+
+cge_scan_done:
+            ; less_visible[] now holds exactly the last
+            ; min(page_lines, total lines in the file) lines --
+            ; commit and redraw from its own first entry
+            mov     rf, less_visible
+            mov     rd, less_top
+            call    copy4bytes
+            call    less_goto
+            lbr     main_loop
+
+;------------------------------------------------------------------
+cmd_search:
+            call    K_INMSG
+            db      13,10,'/',0
+            mov     rf, less_search_buf
+            ldi     LESS_SEARCH_MAX-1
+            plo     rc
+            ldi     LE_MODE_REDIR
+            call    read_line_ex
+
+            mov     rf, less_search_buf
+            ldn     rf
+            lbz     cs_cancel           ; empty pattern: cancel
+
+            ; a NEW search always (re)establishes both the scan start
+            ; and the "if this fails, 'n' retries from here" baseline
+            ; as the current view position -- lsf_found below advances
+            ; less_search_resume past the match on success; on
+            ; failure it's left at this same baseline.
+            mov     rf, src_pos
+            mov     rd, less_search_start
+            call    copy4bytes
+            mov     rf, src_pos
+            mov     rd, less_search_resume
+            call    copy4bytes
+
+            call    less_search_forward
+            lbr     main_loop
+
+cs_cancel:
+            call    less_goto           ; redraw current page, clearing
+                                        ; the prompt line remnants
+            lbr     main_loop
+
+;------------------------------------------------------------------
+cmd_next:
+            mov     rf, less_search_buf
+            ldn     rf
+            lbz     main_loop           ; no previous pattern: ignore
+
+            ; resume scanning from just past the last match (see
+            ; less_search_forward's own header for why this can't
+            ; just be src_pos -- less_goto always forces
+            ; src_pos == less_top, which after landing on a match IS
+            ; the match's own start, not one line past it)
+            mov     rf, less_search_resume
+            mov     rd, less_search_start
+            call    copy4bytes
+
+            call    less_search_forward
+            lbr     main_loop
+
+;------------------------------------------------------------------
+cmd_quit:
+            call    src_close
+            call    K_INMSG
+            db      13,10,0             ; land the shell's next prompt
+                                        ; at the start of a fresh line
+            ldi     0                   ; exit code 0 = success
+            rtn
+
+;------------------------------------------------------------------
+; less_search_forward: scan forward from less_search_start (set by
+; the caller -- cmd_search uses the current view position, cmd_next
+; uses less_search_resume) for less_search_buf (case-sensitive
+; literal substring), one line at a time.
+;
+; On a match: snapshots less_search_resume = the position one line
+; PAST the match (so a later 'n' continues instead of re-matching the
+; same line forever -- this can't just be "whatever src_pos ends up
+; at", since less_goto below always forces src_pos == less_top, and
+; less_top after landing on a match IS the match's own start), then
+; clears less_stack (a match is a "big jump", not adjacent to the old
+; page -- see lsf_found's own comment), sets the new top to the
+; matched line's start, and redraws there.
+;
+; On reaching EOF with no match: redraws the CURRENT (unchanged) page
+; with a "not found" status line, and leaves the read position
+; exactly where it was before the scan (less_goto re-seeks to
+; less_top, which never moved). less_search_resume is left untouched
+; (still the search's own starting baseline, set by the caller) --
+; so a following 'n' just retries the identical scan.
+;------------------------------------------------------------------
+less_search_forward:
+            mov     rf, less_search_start
+            call    src_seek_to
+            mov     rf, less_search_start
+            mov     rd, src_pos
+            call    copy4bytes
+
+lsf_loop:
+            mov     rf, src_pos
+            mov     rd, less_candidate_top
+            call    copy4bytes          ; candidate = start of the
+                                        ; line we're about to read
+
+            call    src_read_line
+            lbdf    lsf_notfound
+
+            mov     rf, src_line_buf
+            mov     r8, less_search_buf
+            call    line_contains
+            lbnf    lsf_found
+            lbr     lsf_loop
+
+lsf_found:
+            ; src_pos has already been advanced past the matched
+            ; line by src_read_line -- that's exactly "one line past
+            ; the match", snapshot it before less_goto below
+            ; overwrites src_pos with the match's own start instead.
+            mov     rf, src_pos
+            mov     rd, less_search_resume
+            call    copy4bytes
+
+            ; A search match is a "big jump" like 'g'/'G' -- clear
+            ; less_stack rather than pushing the old (pre-search) page
+            ; onto it, so a later 'b'/up-arrow correctly scans backward
+            ; from the match instead of popping a stale, unrelated
+            ; entry from before the search ran. See cmd_goto_end's own
+            ; header for the full reasoning (same bug, same fix).
+            mov     rf, less_stack_count
+            ldi     0
+            str     rf
+            mov     rf, less_candidate_top
+            mov     rd, less_top
+            call    copy4bytes
+            call    less_goto           ; seeks + redraws (normal
+                                        ; status line)
+            rtn
+
+lsf_notfound:
+            ; restore src_pos (and the FCB's real position) to what
+            ; they were for THIS page before the scan -- less_top
+            ; never changed, so there's no need for less_goto's own
+            ; full CLS+redraw here, just the status line needs
+            ; touching; less_page_end holds exactly the right value
+            ; (snapshotted by draw_page's own dp_status, every time)
+            mov     rf, less_page_end
+            mov     rd, src_pos
+            call    copy4bytes
+            mov     rf, src_pos
+            call    src_seek_to
+
+            mov     rf, less_status_mode
+            ldi     1
+            str     rf
+            call    less_reprint_status ; status row only -- see its
+                                        ; own header comment
+
+            call    K_READ              ; consume the "press any key"
+                                        ; keystroke HERE, matching
+                                        ; MORE's own "-- More --"/"any
+                                        ; key continues" convention --
+                                        ; an earlier version left this
+                                        ; unconsumed, so the very next
+                                        ; real keystroke fell straight
+                                        ; through to main_loop's normal
+                                        ; dispatch instead of just
+                                        ; dismissing the message. A
+                                        ; LATER version redrew the
+                                        ; whole page here (via
+                                        ; less_goto) to restore the
+                                        ; normal status line, which
+                                        ; visibly flickered the entire
+                                        ; screen just to change one
+                                        ; row -- less_reprint_status
+                                        ; below fixes that too.
+
+            mov     rf, less_status_mode
+            ldi     0
+            str     rf
+            call    less_reprint_status
+            rtn
+
+;------------------------------------------------------------------
+; less_goto: seek to less_top (via src_seek_to), set src_pos =
+; less_top, and redraw.
+;------------------------------------------------------------------
+less_goto:
+            mov     rf, less_top
+            call    src_seek_to
+
+            mov     rf, less_top
+            mov     rd, src_pos
+            call    copy4bytes
+
+            call    draw_page
+            rtn
+
+;------------------------------------------------------------------
+; draw_page: clear the screen and print up to less_page_lines lines
+; starting from the CURRENT position (precondition: src_pos ==
+; less_top, and the FCB/chunk buffer are correctly positioned there --
+; every caller of draw_page establishes this first), then a status
+; line at the FIXED row less_page_lines+1 -- not just wherever content
+; happens to stop -- so it always lands on the exact same physical row
+; scroll_up_and_print_bottom/scroll_down_and_print_top/
+; less_reprint_status already assume when THEY reprint the status line
+; later. Sets less_at_eof if EOF is hit before a full page prints.
+;
+; This explicit positioning matters specifically on a SHORT last page
+; (fewer real lines in the file than less_page_lines, i.e. viewing at
+; or near true EOF): without it, the status line would print right
+; after however many real lines got shown -- several rows ABOVE the
+; fixed row every other caller expects -- leaving stray, never-cleared
+; text sitting in the middle of the content area. The very next single-
+; line move (up/down-arrow) would then scroll the WHOLE screen via
+; IND/RI, dragging that leftover text around instead of erasing it,
+; compounding with every further move -- confirmed as the real cause
+; of a hardware-reported bug (2026-09-02) where phantom lines appeared
+; mid-screen, then a `(END)` prompt ended up stuck partway down the
+; page, after paging near the end of a file whose last page didn't
+; fill the screen.
+;
+; Also (re)populates the ENTIRE less_visible[] window from scratch --
+; less_visible[i] is snapshotted to src_pos immediately before the
+; i-th src_read_line call, so it always holds that line's own real
+; start offset -- and sets less_visible_count to however many lines
+; actually got shown (< less_page_lines only when EOF was hit). This
+; is what lets a later single line-up move walk back through EVERY
+; line of whatever page was most recently drawn, not just its first.
+;------------------------------------------------------------------
+draw_page:
+            call    K_INMSG
+            db      27,'[H',27,'[J',0
+
+            mov     rf, less_at_eof
+            ldi     0
+            str     rf
+            mov     rf, less_lines_this_page
+            ldi     0
+            str     rf
+
+dp_loop:
+            ; less_visible[i] = src_pos (i = less_lines_this_page,
+            ; the index about to be filled)
+            mov     rf, less_lines_this_page
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     r9
+            shl16   r9
+            shl16   r9                  ; R9 = i*4
+            mov     r8, less_visible
+            add16   r8, r9              ; R8 = &less_visible[i]
+            mov     rf, src_pos
+            call    copy4bytes_to_r8
+
+            call    src_read_line
+            lbdf    dp_eof
+
+            mov     rf, src_line_buf
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+
+            mov     rf, less_lines_this_page
+            ldn     rf
+            adi     1
+            str     rf
+
+            mov     rf, less_page_lines
+            ldn     rf                  ; D = page_lines
+            str     r2
+            mov     rf, less_lines_this_page
+            ldn     rf                  ; D = lines_printed
+            sm                          ; D = lines_printed -
+                                        ; page_lines, DF=1 iff
+                                        ; lines_printed >= page_lines
+            lbnf    dp_loop             ; not yet a full page
+
+            lbr     dp_status
+
+dp_eof:
+            mov     rf, less_at_eof
+            ldi     1
+            str     rf
+
+dp_status:
+            mov     rb, less_visible_count
+            mov     rf, less_lines_this_page
+            ldn     rf
+            str     rb                  ; less_visible_count =
+                                        ; less_lines_this_page
+
+            ; snapshot the correct "resume" position for THIS page --
+            ; used by a failed search (lsf_notfound) to restore
+            ; src_pos/the FCB position without needing a full redraw
+            ; to re-derive it
+            mov     rf, src_pos
+            mov     rd, less_page_end
+            call    copy4bytes
+
+            ; ALWAYS reprint at the fixed status row, regardless of how
+            ; many real content lines were actually drawn -- see this
+            ; routine's own header comment for why a short last page
+            ; makes this matter.
+            mov     rf, less_page_lines
+            ldn     rf
+            adi     1
+            call    position_at_row
+            call    print_status_line
+            rtn
+
+;------------------------------------------------------------------
+; print_status_line: every caller positions at column 1 of the status
+; row immediately before calling this, so the leading clear-to-EOL
+; below wipes the WHOLE row before any text lands on it. That matters
+; after a scroll: RI leaves a real CONTENT line sitting on the status
+; row, and IND/RI both leave one on the row above -- text printed over
+; a dirty row only covers the columns it actually writes, so anything
+; longer than the new text (or anything under a TAB, which advances
+; the cursor without writing) shows straight through. Clearing FIRST
+; is the only form that handles the tab case; a trailing clear can't.
+;------------------------------------------------------------------
+print_status_line:
+            call    K_INMSG
+            db      27,'[K',0
+
+            mov     rf, less_status_mode
+            ldn     rf
+            lbnz    psl_notfound
+
+            mov     rf, less_at_eof
+            ldn     rf
+            lbnz    psl_end
+
+            call    K_INMSG
+            db      "-- LESS: SPACE next  b back  g top  G end  / search  n again  q quit --",0
+            rtn
+
+psl_end:
+            call    K_INMSG
+            db      "-- (END) --  b back  g top  / search  q quit --",0
+            rtn
+
+psl_notfound:
+            call    K_INMSG
+            db      "-- Pattern not found -- press any key --",0
+            rtn
+
+;------------------------------------------------------------------
+; less_reprint_status: repositions to the status row and reprints it
+; ALONE -- used by lsf_notfound so showing/dismissing the "Pattern not
+; found" message doesn't need a full page redraw, unlike every other
+; status-line update in this file (which happens as the tail end of a
+; real draw_page call). Needs no clear of its own: print_status_line
+; clears the row itself now, which also covers this routine's original
+; reason for existing (the new text being shorter than what was there).
+;------------------------------------------------------------------
+less_reprint_status:
+            mov     rf, less_page_lines
+            ldn     rf
+            adi     1
+            call    position_at_row
+            call    print_status_line
+            rtn
+
+;------------------------------------------------------------------
+; format_row_number: writes D's decimal digits (1 or 2 -- D is always
+; < 100, see LESS_MAX_VISIBLE's own comment) at [RF], WITHOUT a NUL
+; terminator. Makes no calls, so every register here is safely
+; register-resident throughout (no memory round-trips needed).
+; Args:    D = value (0-99), RF = write cursor
+; Returns: RF = advanced past the digit(s) written
+; Verified against Python's own str() across the full 0..99 range
+; before being trusted here (2026-09-01).
+;------------------------------------------------------------------
+format_row_number:
+            plo     r8                  ; stash D (gotcha #4 -- nothing
+                                        ; between here and its use below
+                                        ; clobbers D except deliberately)
+            ldi     0
+            phi     r8                  ; R8 = value, zero-extended
+            glo     r8
+            smi     10
+            lbnf    frn_one_digit       ; < 10: DF=0 (borrow)
+
+            glo     r8
+            plo     r9                  ; R9.0 = remaining value
+            ldi     0
+            plo     rb                  ; RB.0 = tens count
+
+frn_tens_loop:
+            glo     r9
+            smi     10
+            lbnf    frn_tens_done       ; would borrow: r9 is the final
+                                        ; remainder, unchanged by this
+                                        ; failed attempt
+            plo     r9
+            glo     rb
+            adi     1
+            plo     rb
+            lbr     frn_tens_loop
+
+frn_tens_done:
+            glo     rb
+            adi     '0'
+            str     rf
+            inc     rf
+            glo     r9
+            adi     '0'
+            str     rf
+            inc     rf
+            rtn
+
+frn_one_digit:
+            glo     r8
+            adi     '0'
+            str     rf
+            inc     rf
+            rtn
+
+;------------------------------------------------------------------
+; position_at_row: moves the cursor to row D, column 1 (ESC[<D>;1H).
+; Args: D = row number (1-99)
+;------------------------------------------------------------------
+position_at_row:
+            plo     r7                  ; stash D (gotcha #4)
+            mov     rf, less_esc_buf
+            ldi     27
+            str     rf
+            inc     rf
+            ldi     '['
+            str     rf
+            inc     rf
+            glo     r7
+            call    format_row_number
+            ldi     ';'
+            str     rf
+            inc     rf
+            ldi     '1'
+            str     rf
+            inc     rf
+            ldi     'H'
+            str     rf
+            inc     rf
+            ldi     0
+            str     rf
+
+            mov     rf, less_esc_buf
+            call    K_MSG
+            rtn
+
+;------------------------------------------------------------------
+; scroll_up_and_print_bottom: scrolls the WHOLE terminal up by one
+; line via IND (ESC D, "Index") -- the plain two-character VT100
+; sequence, not CSI-based SU (ESC[1S). Switched 2026-09-01 after a
+; hardware round confirmed ESC[S has no visible effect on the actual
+; terminal in use (the two rows this routine repositions/reprints
+; updated correctly, but nothing else on screen shifted) -- CSI SU/SD
+; are an ECMA-48/ANSI X3.64 addition, not part of the original VT100
+; set, unlike IND/RI, which are. IND only scrolls when the cursor is
+; ALREADY at the bottom margin (with no scroll region set, that's the
+; terminal's own real last row) -- otherwise it just moves the cursor
+; down one row with no scroll at all -- so this positions there FIRST
+; (row less_page_lines+1, the status line's own row) before sending
+; it. Same reasoning as the old SU-based version for why BOTH rows
+; still need reprinting afterward: IND leaves the cursor at the
+; (now blank) bottom row, having moved what WAS there (the status
+; line's text) up into what should be the new bottom CONTENT row.
+;------------------------------------------------------------------
+scroll_up_and_print_bottom:
+            mov     rf, less_page_lines
+            ldn     rf
+            adi     1
+            call    position_at_row     ; the true bottom margin
+            call    K_INMSG
+            db      27,'D',0            ; IND -- scrolls up by 1;
+                                        ; cursor stays at this row
+
+            mov     rf, less_page_lines
+            ldn     rf
+            call    position_at_row
+            call    K_INMSG
+            db      27,'[K',0           ; clear the WHOLE row FIRST --
+                                        ; see the header above for why a
+                                        ; trailing clear isn't enough
+            mov     rf, src_line_buf
+            call    K_MSG
+
+            mov     rf, less_page_lines
+            ldn     rf
+            adi     1
+            call    position_at_row
+            call    print_status_line
+            rtn
+
+;------------------------------------------------------------------
+; scroll_down_and_print_top: scrolls the WHOLE terminal down by one
+; line via RI (ESC M, "Reverse Index") -- IND's own upward
+; counterpart, same reasoning as scroll_up_and_print_bottom's own
+; header comment. RI only scrolls when the cursor is ALREADY at the
+; top margin (row 1, with no scroll region set), so this positions
+; there first. Leaves the cursor at row 1 (now blank) -- both rows
+; still need reprinting, same as before: the new top content line at
+; row 1, then the status line at row less_page_lines+1 (RI pushes
+; whatever WAS at the real last row off the bottom entirely).
+;------------------------------------------------------------------
+scroll_down_and_print_top:
+            call    K_INMSG
+            db      27,'[H',0           ; the true top margin
+            call    K_INMSG
+            db      27,'M',0            ; RI -- scrolls down by 1;
+                                        ; cursor stays at row 1
+            call    K_INMSG
+            db      27,'[K',0           ; clear the WHOLE row FIRST --
+                                        ; see the header above
+            mov     rf, src_line_buf
+            call    K_MSG
+
+            mov     rf, less_page_lines
+            ldn     rf
+            adi     1
+            call    position_at_row
+            call    print_status_line
+            rtn
+
+;------------------------------------------------------------------
+; cmd_line_down: move the view down by exactly one line (down-arrow,
+; j/J, Ctrl-N, Ctrl-E). Seek-free -- src_pos already sits exactly at
+; the next line to reveal, since it's only ever changed by reading
+; sequentially forward or by an explicit seek that keeps it in sync.
+;------------------------------------------------------------------
+cmd_line_down:
+            mov     rf, less_at_eof
+            ldn     rf
+            lbnz    main_loop           ; already at EOF: ignore
+
+            mov     rf, src_pos
+            mov     rd, less_new_line
+            call    copy4bytes          ; less_new_line = current
+                                        ; src_pos (where the new
+                                        ; bottom line starts)
+
+            call    src_read_line      ; into src_line_buf; advances
+                                        ; src_pos past it
+            lbdf    cld_eof
+
+            call    less_shift_visible_left
+            call    scroll_up_and_print_bottom
+            lbr     main_loop
+
+cld_eof:
+            mov     rf, less_at_eof
+            ldi     1
+            str     rf
+            lbr     main_loop
+
+;------------------------------------------------------------------
+; cmd_line_up: move the view up by exactly one line (up-arrow, k/K,
+; Ctrl-P, Ctrl-Y). If less_stack has a recorded entry, use it (no
+; scan needed -- this is the common case, since ordinary forward
+; browsing always records history). If the stack is EMPTY (e.g. right
+; after 'g'/'G'/a search match, all of which clear less_stack rather
+; than push -- see cmd_goto_end's own header comment for why), fall
+; back to a genuine backward scan (src_prev_start) instead
+; of just giving up: an earlier version treated "no history" as
+; "nothing to do", which made up-arrow immediately after 'G' silently
+; do nothing at all (or, when the stack instead held a stale pre-jump
+; entry, jump much further back than one line) -- confusing, per the
+; user's own direct feedback, since real `less` always finds the
+; previous line regardless of how it got there.
+; Needs one seek either way -- to whatever the stack or the scan
+; produces -- since that's not generally wherever the FCB happens to
+; be positioned.
+;
+; src_pos MUST come out of this routine still meaning exactly what
+; every other caller assumes it means: "one past the CURRENT bottom-
+; most visible line" -- cmd_forward and cmd_line_down both just read
+; sequentially from wherever the chunk buffer/FCB already sit, trusting
+; src_pos (and the real underlying read position, which the two must
+; always agree on) to already be correct. less_top's own read via
+; src_read_line below only ever fetches the NEW TOP line's text for
+; display -- as a side effect it leaves src_pos/the FCB sitting one
+; line PAST that (i.e. at the window's SECOND entry), which is NOT the
+; window's true bottom whenever the window holds more than 2 entries.
+; src_pos is therefore explicitly reseeked back afterward in BOTH
+; outcomes below, to whichever value genuinely represents the (possibly
+; unchanged) bottom -- less_saved_pos (GROWING: the bottom didn't move)
+; or less_dropped (FULL: the bottom moved to what fell off the end).
+; A real hardware-reported bug (2026-09-02) traced to exactly this:
+; skipping the reseek in the GROWING case left src_pos advancing by
+; only one line per up-arrow instead of tracking the true bottom, so a
+; later down-arrow (pressed before the window ever re-filled the
+; screen) would re-read and re-display a line ALREADY visible near the
+; top of the window -- a duplicated "phantom" line, not the genuinely
+; next unseen content.
+;------------------------------------------------------------------
+cmd_line_up:
+            ; snapshot src_pos before anything below can touch it --
+            ; this is the value to restore in the GROWING case, since
+            ; the window's bottom (and so the correct forward-resume
+            ; position) doesn't move when only the top grows.
+            mov     rf, src_pos
+            mov     rd, less_saved_pos
+            call    copy4bytes
+
+            call    less_pop_top
+            lbnf    clu_have_top        ; DF=0: got a real entry
+
+            ; stack empty -- can we scan backward? Only if less_top
+            ; isn't already 0 (the true start of the file, nothing
+            ; before it at all).
+            mov     rf, less_top
+            ldn     rf
+            lbnz    clu_can_scan
+            inc     rf
+            ldn     rf
+            lbnz    clu_can_scan
+            inc     rf
+            ldn     rf
+            lbnz    clu_can_scan
+            inc     rf
+            ldn     rf
+            lbnz    clu_can_scan
+            lbr     main_loop           ; all 4 bytes are 0: ignore
+
+clu_can_scan:
+            mov     rf, less_top
+            call    src_prev_start
+            mov     rf, src_prev_result
+            mov     rd, less_top
+            call    copy4bytes
+
+clu_have_top:
+            ; less_top now holds the new top row's offset
+            mov     rf, less_top
+            call    src_seek_to
+
+            mov     rf, less_top
+            mov     rd, less_new_line
+            call    copy4bytes
+
+            call    src_read_line      ; content for display only --
+                                        ; its side effect on src_pos/
+                                        ; the chunk buffer is irrelevant
+                                        ; and gets fully overwritten
+                                        ; below either way, see this
+                                        ; routine's own header comment
+
+            call    less_shift_visible_right
+            lbdf    clu_restore_saved  ; DF=1: window just grew -- the
+                                        ; bottom hasn't moved, restore
+                                        ; the value saved at entry
+
+            ; DF=0: the dropped line is no longer in view -- resume
+            ; future forward reads from exactly where it starts. Both
+            ; the FCB/chunk-buffer state AND the src_pos variable need
+            ; re-syncing here -- setting the variable alone would leave
+            ; the ACTUAL read position stuck one line past the window's
+            ; second entry, silently disagreeing with what src_pos
+            ; claims (the same class of bug this fix exists for).
+            mov     rf, less_dropped
+            call    src_seek_to
+            mov     rf, less_dropped
+            mov     rd, src_pos
+            call    copy4bytes
+            lbr     clu_display
+
+clu_restore_saved:
+            mov     rf, less_saved_pos
+            call    src_seek_to
+            mov     rf, less_saved_pos
+            mov     rd, src_pos
+            call    copy4bytes
+
+clu_display:
+            mov     rf, less_at_eof
+            ldi     0
+            str     rf                  ; moved away from the tail
+
+            call    scroll_down_and_print_top
+            lbr     main_loop
+
+;------------------------------------------------------------------
+; line_contains: does the NUL-terminated string at RF (haystack)
+; contain the NUL-terminated string at R8 (needle, must be non-empty)
+; as a substring? Naive search via pure pointer-walking (no computed
+; offsets/indices at all, so CLAUDE.md gotcha #18 -- an ADD16/SUB16
+; register-register op silently clobbering a just-staged str-r2
+; comparison byte -- structurally can't apply here).
+; Returns: DF=0 if found, DF=1 if not.
+; Modifies: everything (RF, R8, RA, RB, RC)
+;------------------------------------------------------------------
+line_contains:
+            mov     ra, r8              ; RA = needle start (constant)
+
+lc_outer:
+            ldn     rf                  ; peek the haystack char here
+            lbz     lc_notfound         ; haystack exhausted: no match
+
+            mov     rb, rf              ; RB = inner haystack pointer
+            mov     rc, ra              ; RC = inner needle pointer,
+                                        ; reset to the needle's start
+lc_inner:
+            ldn     rc                  ; needle char
+            lbz     lc_match            ; needle exhausted: full match
+
+            str     r2                  ; stage the needle char
+            ldn     rb                  ; D = haystack char
+            sm                          ; D = haystack_char - needle_char
+            lbnz    lc_next_outer       ; mismatch
+
+            inc     rb
+            inc     rc
+            lbr     lc_inner
+
+lc_next_outer:
+            inc     rf
+            lbr     lc_outer
+
+lc_match:
+            clc
+            rtn
+
+lc_notfound:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; less_push_offset: pushes the 4-byte value at [RF] onto less_stack
+; (silently dropped, not an error, if the stack is already at
+; LESS_STACK_MAX -- see this file's own header comment).
+; Args:    RF = pointer to a 4-byte value (fully consumed -- callers
+;          must not rely on its value surviving this call)
+;------------------------------------------------------------------
+less_push_offset:
+            mov     rb, less_stack_count
+            ldn     rb
+            smi     LESS_STACK_MAX
+            lbdf    lpo_done            ; count >= MAX: full, skip
+
+            mov     rb, less_stack_count
+            ldn     rb
+            plo     r9
+            ldi     0
+            phi     r9                  ; R9 = count (zero-extended)
+            shl16   r9                  ; R9 = count*2
+            shl16   r9                  ; R9 = count*4
+            mov     r8, less_stack
+            add16   r8, r9              ; R8 = &less_stack[count*4]
+
+            call    copy4bytes_to_r8    ; copies [RF] (4 bytes) to [R8]
+
+            mov     rb, less_stack_count
+            ldn     rb
+            adi     1
+            str     rb
+
+lpo_done:
+            rtn
+
+;------------------------------------------------------------------
+; less_push_visible_all: pushes less_visible[0..less_visible_count-1]
+; onto less_stack, in order (index 0 first, so it ends up deepest/
+; oldest -- the same LIFO convention every other push already uses).
+; Called at every SEQUENTIAL full-page transition (cmd_forward), so a
+; line-up move afterward can walk back through EVERY line of the page
+; being left, not just its first. Deliberately NOT called by any "big
+; jump" (cmd_top/cmd_goto_end/lsf_found) -- those clear less_stack
+; instead, since the page they're leaving isn't necessarily adjacent
+; to where the jump lands (see cmd_goto_end's own header for the bug
+; this caused when it used to push here too). The source address is
+; recomputed fresh from memory each iteration (via less_push_i),
+; rather than trusted in a register across the call to
+; less_push_offset.
+;------------------------------------------------------------------
+less_push_visible_all:
+            mov     rf, less_push_i
+            ldi     0
+            str     rf                  ; less_push_i = 0
+
+lpva_loop:
+            mov     rb, less_visible_count
+            ldn     rb
+            str     r2
+            mov     rf, less_push_i
+            ldn     rf
+            sm                          ; D = push_i - count, DF=1 iff
+                                        ; push_i >= count
+            lbdf    lpva_done
+
+            mov     rf, less_push_i
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     r9
+            shl16   r9
+            shl16   r9                  ; R9 = push_i*4
+            mov     rf, less_visible
+            add16   rf, r9              ; RF = &less_visible[push_i*4]
+
+            call    less_push_offset
+
+            mov     rf, less_push_i
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     lpva_loop
+
+lpva_done:
+            rtn
+
+;------------------------------------------------------------------
+; less_pop_top: pops the most recently pushed offset into less_top.
+; Returns: DF=0 on success, DF=1 if the stack was already empty
+; (less_top left unchanged in that case).
+;------------------------------------------------------------------
+less_pop_top:
+            mov     rf, less_stack_count
+            ldn     rf
+            lbz     lpop_empty
+
+            smi     1                   ; D = new count (count-1)
+            str     rf                  ; write the decremented count
+                                        ; back (D unmodified by str)
+
+            plo     r9
+            ldi     0
+            phi     r9                  ; R9 = new count (the slot to pop)
+            shl16   r9
+            shl16   r9
+            mov     r8, less_stack
+            add16   r8, r9              ; R8 = &less_stack[newcount*4]
+
+            mov     rf, less_top
+            lda     r8
+            str     rf
+            inc     rf
+            lda     r8
+            str     rf
+            inc     rf
+            lda     r8
+            str     rf
+            inc     rf
+            ldn     r8
+            str     rf
+
+            clc
+            rtn
+
+lpop_empty:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; less_shift_visible_left: shifts less_visible[] left by one entry --
+; drops entry 0 (pushed onto less_stack first, for a later line-up to
+; retrieve), shifts [1..count-1] down to [0..count-2] (a forward copy,
+; safe with no self-overwrite risk since dest < source), and appends
+; less_new_line (4 bytes, set by the caller beforehand) as the new
+; last entry. Only ever called when NOT at EOF, which -- per draw_page's
+; own invariant -- guarantees less_visible_count == less_page_lines, so
+; there's no partial-window case to handle here (unlike the right-shift
+; below, which does need one). Updates less_top = the new entry 0 (what
+; was entry 1 before the shift).
+; Verified via an independent Python mechanical simulation (2026-09-01)
+; before being trusted, including a full push-then-pop round-trip
+; against less_shift_visible_right confirming the window is restored
+; exactly.
+;------------------------------------------------------------------
+less_shift_visible_left:
+            mov     rf, less_visible
+            call    less_push_offset    ; push the entry about to drop
+            lbr     less_shift_left_core  ; tail-jump: less_shift_left_core
+                                        ; ends in rtn, which correctly
+                                        ; returns to WHOEVER called
+                                        ; less_shift_visible_left, since
+                                        ; lbr (unlike call) never
+                                        ; touches the return-address
+                                        ; stack itself
+
+;------------------------------------------------------------------
+; less_shift_left_core: the shift-down-and-insert half of
+; less_shift_visible_left, WITHOUT the push -- factored out
+; specifically for cmd_goto_end's own bulk forward scan, which needs
+; to shift the window on every line read but must NOT push each one
+; onto less_stack (that would either blow through LESS_STACK_MAX on
+; any reasonably-sized file, or -- worse -- silently bury real history
+; under thousands of scanned-through lines near the end of the file).
+; cmd_goto_end clears less_stack once, up front (see its own header --
+; a search match or 'g' does the same, all being "big jumps"), then
+; calls this directly for every line it scans past.
+;------------------------------------------------------------------
+less_shift_left_core:
+            mov     rf, less_visible_count
+            ldn     rf
+            smi     1
+            lbz     lsvl_insert         ; D==0 (count==1): nothing to
+                                        ; shift -- MUST check for zero
+                                        ; here, not DF/borrow (count==1
+                                        ; never borrows against smi 1,
+                                        ; so an earlier lbnf-based check
+                                        ; wrongly fell through and ran
+                                        ; the loop body once anyway,
+                                        ; reading out-of-bounds memory
+                                        ; at less_visible+4 -- caught by
+                                        ; re-tracing this exact case,
+                                        ; not by any assembler/sweep)
+            plo     r9                  ; R9.0 = count-1 (entries to move)
+            ldi     0
+            phi     r9
+
+            mov     r7, less_visible
+            add16   r7, 4               ; R7 = source, starts at entry 1
+            mov     r8, less_visible    ; R8 = dest, starts at entry 0
+
+lsvl_loop:
+            lda     r7
+            str     r8
+            inc     r8
+            lda     r7
+            str     r8
+            inc     r8
+            lda     r7
+            str     r8
+            inc     r8
+            lda     r7
+            str     r8
+            inc     r8
+
+            dec     r9
+            glo     r9
+            lbnz    lsvl_loop           ; R9 <= 39, so its high byte
+                                        ; never comes into play here
+
+lsvl_insert:
+            ; append less_new_line at less_visible[count-1] -- the
+            ; CURRENT (unchanged) count, since this routine never
+            ; changes less_visible_count
+            mov     rf, less_visible_count
+            ldn     rf
+            smi     1
+            plo     r9
+            ldi     0
+            phi     r9
+            shl16   r9
+            shl16   r9
+            mov     r8, less_visible
+            add16   r8, r9
+
+            mov     rf, less_new_line
+            call    copy4bytes_to_r8
+
+            ; less_top = the new entry 0
+            mov     rf, less_visible
+            mov     rd, less_top
+            call    copy4bytes
+            rtn
+
+;------------------------------------------------------------------
+; less_shift_visible_right: shifts less_visible[] right by one entry
+; and inserts less_new_line (set by the caller) at entry 0. Two
+; genuinely different cases, not one -- confirmed by tracing a
+; scroll-up-from-a-short-final-page scenario, then independently
+; verified in Python before writing this (2026-09-01):
+;
+;   - GROWING (less_visible_count < less_page_lines, e.g. line-up from
+;     a short/partial final page): every existing entry [0..count-1]
+;     shifts up to [1..count], NOTHING is dropped (there was room),
+;     and count simply grows by 1. Returns DF=1 -- the window's bottom
+;     hasn't moved, so the caller must restore src_pos to whatever it
+;     was BEFORE this call (its own incidental value right after this
+;     routine returns is the offset of the window's NEW second entry,
+;     not its bottom -- NOT safe to leave as-is; see cmd_line_up's own
+;     header comment for the real hardware bug this caused when an
+;     earlier version got this wrong).
+;   - FULL (count == page_lines, the ordinary case): less_visible
+;     [count-1] is captured into less_dropped first (the caller uses
+;     it to "un-consume" that line back into src_pos, since it's no
+;     longer in view), then [0..count-2] shifts up to [1..count-1],
+;     dropping the old last entry; count is unchanged (already at
+;     cap). Returns DF=0 -- less_dropped is valid.
+;
+; An earlier version of this routine always took the FULL path
+; unconditionally -- silently discarding a still-visible line instead
+; of shifting it whenever the window was still growing (e.g. every
+; time except after the very first successful up-arrow), a real
+; correctness bug caught only by re-tracing the growing case by hand,
+; not by any assembler/sweep check.
+;
+; Both cases share the same backward-copy shift helper (lsvr_do_shift,
+; below) -- a BACKWARD copy, highest index first, is required for a
+; right-shift regardless of which case: dest is always 4 bytes above
+; source, so a forward copy would clobber source data still needed by
+; a later iteration (same class of overlap this project's own
+; LINE_BUF-relocation precedent already established).
+;------------------------------------------------------------------
+less_shift_visible_right:
+            mov     rb, less_page_lines
+            ldn     rb
+            str     r2
+            mov     rf, less_visible_count
+            ldn     rf
+            sm                          ; D = count - page_lines, DF=1
+                                        ; iff count >= page_lines (full)
+            lbdf    lsvr_full
+
+;-- GROWING: count < page_lines -----------------------------------
+            mov     rf, less_visible_count
+            ldn     rf
+            lbz     lsvr_grow_no_shift  ; count==0: nothing existing
+                                        ; to shift at all
+            smi     1                   ; D = count-1 = highest
+                                        ; existing index to move
+            plo     r9
+            ldi     0
+            phi     r9
+            call    lsvr_do_shift
+
+lsvr_grow_no_shift:
+            mov     rf, less_new_line
+            mov     rd, less_visible
+            call    copy4bytes
+            mov     rf, less_new_line
+            mov     rd, less_top
+            call    copy4bytes
+
+            mov     rf, less_visible_count
+            ldn     rf
+            adi     1
+            str     rf
+
+            stc                         ; DF=1: nothing dropped
+            rtn
+
+;-- FULL: count == page_lines --------------------------------------
+lsvr_full:
+            ; less_dropped = less_visible[count-1]
+            mov     rf, less_visible_count
+            ldn     rf
+            smi     1
+            plo     r9
+            ldi     0
+            phi     r9
+            shl16   r9
+            shl16   r9
+            mov     r8, less_visible
+            add16   r8, r9              ; R8 = &less_visible[count-1]
+
+            mov     rf, r8
+            mov     rd, less_dropped
+            call    copy4bytes
+
+            mov     rf, less_visible_count
+            ldn     rf
+            smi     2
+            lbnf    lsvr_full_insert    ; count < 2 (i.e. page_lines==1
+                                        ; and count==1): the one entry
+                                        ; IS the drop -- nothing left
+                                        ; to shift
+
+            ; D still holds count-2 here -- the highest SOURCE index
+            ; to move
+            plo     r9
+            ldi     0
+            phi     r9
+            call    lsvr_do_shift
+
+lsvr_full_insert:
+            mov     rf, less_new_line
+            mov     rd, less_visible
+            call    copy4bytes
+            mov     rf, less_new_line
+            mov     rd, less_top
+            call    copy4bytes
+                                        ; count unchanged -- already at cap
+            clc                         ; DF=0: less_dropped is valid
+            rtn
+
+;------------------------------------------------------------------
+; lsvr_do_shift: shifts less_visible[] right by one, moving every
+; index from R9 down to 0 (inclusive) to index+1 -- a backward copy,
+; highest index first (required; see less_shift_visible_right's own
+; header). Args: R9 = highest source index to move (>= 0).
+;------------------------------------------------------------------
+lsvr_do_shift:
+            mov     r7, r9
+            shl16   r7
+            shl16   r7                  ; R7 = i*4
+            mov     r8, less_visible
+            add16   r8, r7              ; R8 = &less_visible[i] (source)
+            mov     rc, r8
+            add16   rc, 4               ; RC = &less_visible[i+1] (dest)
+
+            lda     r8
+            str     rc
+            inc     rc
+            lda     r8
+            str     rc
+            inc     rc
+            lda     r8
+            str     rc
+            inc     rc
+            ldn     r8
+            str     rc
+
+            glo     r9
+            lbz     lsvr_do_shift_ret   ; just processed i=0 -- stop
+                                        ; (post-test: avoids ever
+                                        ; needing to represent i=-1)
+            dec     r9
+            lbr     lsvr_do_shift
+
+lsvr_do_shift_ret:
+            rtn
+            endp
+
+            proc    _pager_data
+less_top:               ds      4       ; start of the displayed page
+less_candidate_top:     ds      4       ; scratch, used during search
+
+less_search_buf:        ds      LESS_SEARCH_MAX
+less_search_start:      ds      4       ; scan-start scratch, set fresh by
+                                        ; the caller each search
+less_search_resume:     ds      4       ; where 'n' resumes
+
+less_stack:             ds      LESS_STACK_MAX*4
+less_stack_count:       db      0
+less_back_i:            db      0       ; cmd_back's own loop counter
+less_push_i:            db      0       ; less_push_visible_all's counter
+
+less_visible:           ds      LESS_MAX_VISIBLE*4  ; sliding window of the
+                                        ; currently-displayed lines' own
+                                        ; start offsets
+less_visible_count:     db      0       ; how many of the above are valid
+
+less_new_line:          ds      4       ; value to insert/append, set by the
+                                        ; caller before either shift routine
+less_dropped:           ds      4       ; what a right-shift (line-up) drops
+less_saved_pos:         ds      4       ; src_pos, snapshotted by cmd_line_up
+less_page_end:          ds      4       ; draw_page's snapshot of the correct
+                                        ; src_pos for the CURRENT page
+
+less_page_lines:        db      LESS_PAGE_LINES
+less_lines_this_page:   db      0
+less_at_eof:            db      0
+less_status_mode:       db      0
+less_key:               db      0
+less_rows_name:         db      "ROWS",0
+less_esc_buf:           ds      10
+                public  less_top
+                public  less_candidate_top
+                public  less_search_buf
+                public  less_search_start
+                public  less_search_resume
+                public  less_stack
+                public  less_stack_count
+                public  less_back_i
+                public  less_push_i
+                public  less_visible
+                public  less_visible_count
+                public  less_new_line
+                public  less_dropped
+                public  less_saved_pos
+                public  less_page_end
+                public  less_page_lines
+                public  less_lines_this_page
+                public  less_at_eof
+                public  less_status_mode
+                public  less_key
+                public  less_rows_name
+                public  less_esc_buf
+            endp

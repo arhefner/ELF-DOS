@@ -297,6 +297,15 @@ lib/ymodem.prg: lib/ymodem.asm include/opcodes.def include/bios.inc include/kern
 lib/lineedit.prg: lib/lineedit.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/lineedit.inc
 	cd lib && $(ASM) $(ASMFLAGS) lineedit.asm
 
+lib/pos32.prg: lib/pos32.asm include/opcodes.def
+	cd lib && $(ASM) $(ASMFLAGS) pos32.asm
+
+lib/src_file.prg: lib/src_file.asm include/opcodes.def include/bios.inc include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) src_file.asm
+
+lib/pager.prg: lib/pager.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/lineedit.inc
+	cd lib && $(ASM) $(ASMFLAGS) pager.asm
+
 lib/icall.prg: lib/icall.asm include/opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) icall.asm
 
@@ -387,8 +396,8 @@ bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg | bin
 	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg
 	rm -f bin/edlin.lkb
 
-bin/less: progs/less.prg lib/env.prg lib/lineedit.prg | bin
-	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/env.prg lib/lineedit.prg
+bin/less: progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/env.prg lib/lineedit.prg | bin
+	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/env.prg lib/lineedit.prg
 	rm -f bin/less.lkb
 
 bin/shell: progs/shell.prg lib/env.prg | bin
