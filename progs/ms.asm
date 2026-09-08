@@ -172,8 +172,7 @@ start:
 
             ; --- argv[1]: could be a flag or the first filename ---
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rd
             ldn     rb
@@ -196,10 +195,7 @@ start_after_flag1:
 
             ; --- argv[2]: could be a SECOND flag or the first filename ---
             mov     rb, ra
-            inc     rb
-            inc     rb
-            inc     rb
-            inc     rb          ; RB = &argv[2]
+            add16   rb, 4               ; RB = &argv[2]
             lda     rb
             phi     rd
             ldn     rb
@@ -781,7 +777,7 @@ mpf_hdr_have_nul:
             mov     rd, ms_hdr_buf
             sub16   rf, rd              ; RF = R8 - ms_hdr_buf
             mov     rc, rf
-            inc     rc
+            add16   rc, 1
 
             mov     rf, ms_hdr_buf
             call    ms_send_block       ; DF = 0/1
@@ -1255,7 +1251,12 @@ ms_basename_buf:     ds      MAXFER_NAME_MAX+1
 ms_hdr_buf:           ds     MAXFER_NAME_MAX+5
 ms_numbuf:            ds     14
 ms_stat_buf:          ds     DIRENT_LEN
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 ms_fcb:               ds     FCB_LEN
+#if (ms_fcb & $FF) > (256 - FCB_LEN)
+#error ms_fcb crosses a page boundary
+#endif
 ms_iobuf:             ds     FCB_IOBUF_LEN
 ms_databuf:           ds     XFER_BUF_LEN
 

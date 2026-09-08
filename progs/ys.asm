@@ -734,7 +734,12 @@ ys_cur_path:         dw      0
 ys_cur_size_hi:       dw      0
 ys_cur_size_lo:       dw      0
 ys_basename:          ds      128
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 ys_fcb:               ds      FCB_LEN
+#if (ys_fcb & $FF) > (256 - FCB_LEN)
+#error ys_fcb crosses a page boundary
+#endif
 ys_iobuf:             ds      FCB_IOBUF_LEN
 ys_statbuf:           ds      DIRENT_LEN
 
@@ -1094,7 +1099,7 @@ ysdb_type_sent:
             phi     rc
             ldn     rd
             plo     rc
-            dec     rc          ; ym_send_block's own
+            sub16   rc, 1               ; ym_send_block's own
                                         ; pre-decremented convention
             call    ym_send_block
 

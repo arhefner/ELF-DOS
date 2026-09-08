@@ -2307,7 +2307,12 @@ pipe_lhs_start: dw      0
 pipe_lhs_len:   dw      0
 pipe_rhs_start: dw      0
 pipe_rhs_len:   dw      0
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 pipe_fcb:       ds      FCB_LEN
+#if (pipe_fcb & $FF) > (256 - FCB_LEN)
+#error pipe_fcb crosses a page boundary
+#endif
 pipe_iobuf:     ds      FCB_IOBUF_LEN
 pipe_echooff_line: db   "@echo off",10,0
 pipe_script_path: db    "/PIPETMP.BAT",0
@@ -4424,7 +4429,12 @@ if_pat_not:         db      "NOT",0
 if_pat_exist:       db      "EXIST",0
 if_pat_goto:        db      "GOTO",0
 
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 hist_fcb:           ds      FCB_LEN
+#if (hist_fcb & $FF) > (256 - FCB_LEN)
+#error hist_fcb crosses a page boundary
+#endif
 hist_iobuf:         ds      FCB_IOBUF_LEN
 hist_path:          ds      24
 hist_suffix:        db      "/bin/history.dat",0
@@ -4466,7 +4476,12 @@ rh_count:           db      0           ; rlwh_home's own backspace-
                                         ; loop counter
 re_pos:             db      0           ; rlwh_end's own print cursor
 
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 hist_tmp_fcb:       ds      FCB_LEN
+#if (hist_tmp_fcb & $FF) > (256 - FCB_LEN)
+#error hist_tmp_fcb crosses a page boundary
+#endif
 hist_tmp_iobuf:     ds      FCB_IOBUF_LEN
 hist_tmp_path:      ds      24
 hist_tmp_suffix:    db      "/bin/history.tmp",0

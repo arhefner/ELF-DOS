@@ -74,8 +74,7 @@ start:
             ; argv[1], read directly from RA -- still fresh, no calls
             ; have happened yet
             mov     rb, ra
-            inc     rb
-            inc     rb
+            add16   rb, 2
             lda     rb
             phi     rd
             ldn     rb

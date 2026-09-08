@@ -168,8 +168,7 @@ ex_advance:
             phi     r8
             ldn     rf
             plo     r8
-            inc     r8
-            inc     r8
+            add16   r8, 2
             mov     rf, ex_cur_off
             ghi     r8
             str     rf

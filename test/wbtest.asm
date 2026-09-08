@@ -47,8 +47,7 @@ start:
             lbnf    usage               ; argc < 2: no filename given
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -195,7 +194,12 @@ write_error:
             ldi     1
             rtn
 
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 wbtest_fcb:         ds      FCB_LEN
+#if (wbtest_fcb & $FF) > (256 - FCB_LEN)
+#error wbtest_fcb crosses a page boundary
+#endif
 wbtest_iobuf:       ds      FCB_IOBUF_LEN
 fill_byte:          db      0
 chunks_left_hi:     db      0

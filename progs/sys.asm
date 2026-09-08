@@ -87,8 +87,7 @@ start:
             lbnf    usage               ; argc < 2: no filename given
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -195,7 +194,12 @@ usage:
             ldi     1                   ; exit code 1 = error
             rtn
 
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 sys_fcb_struct: ds      FCB_LEN
+#if (sys_fcb_struct & $FF) > (256 - FCB_LEN)
+#error sys_fcb_struct crosses a page boundary
+#endif
 sys_iobuf:      ds      FCB_IOBUF_LEN
 sys_path_ptr:   dw      0
 
@@ -334,8 +338,7 @@ sys_stat_loop:
             ; nowhere near the 64K this would start truncating)
             mov     rf, sys_dirent_buf
             add16   rf, DIRENT_SIZE
-            inc     rf
-            inc     rf          ; RF = &dirent[DIRENT_SIZE+2]
+            add16   rf, 2               ; RF = &dirent[DIRENT_SIZE+2]
             lda     rf                  ; D = size byte (low word MSB),
                                         ; RF++
             phi     r7

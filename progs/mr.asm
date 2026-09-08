@@ -240,8 +240,7 @@ start:
 
             ; --- argv[1]: could be a flag or the destination ---
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rd
             ldn     rb
@@ -264,10 +263,7 @@ start_after_flag1:
 
             ; --- argv[2]: could be a SECOND flag or the destination ---
             mov     rb, ra
-            inc     rb
-            inc     rb
-            inc     rb
-            inc     rb          ; RB = &argv[2]
+            add16   rb, 4               ; RB = &argv[2]
             lda     rb
             phi     rd
             ldn     rb
@@ -1311,7 +1307,12 @@ mr_hdrname:         ds      MAXFER_NAME_MAX+1
 mr_hdrsize:         ds      4
 mr_destpath:        ds      MR_PATH_BUF_LEN
 mr_numbuf:          ds      14
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 mr_fcb:             ds      FCB_LEN
+#if (mr_fcb & $FF) > (256 - FCB_LEN)
+#error mr_fcb crosses a page boundary
+#endif
 mr_iobuf:           ds      FCB_IOBUF_LEN
 mr_buf:             ds      512
 

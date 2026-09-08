@@ -60,8 +60,7 @@ start:
             str     rb                  ; bt_base = mem_base
 
             mov     rf, LOADER_ARGS
-            inc     rf
-            inc     rf
+            add16   rf, 2
             lda     rf
             phi     r8
             ldn     rf

@@ -162,8 +162,7 @@ start:
             lbnf    usage
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -1331,13 +1330,9 @@ less_find_prev_line_start:
             ; project already uses elsewhere for 32-bit subtraction
             ; (e.g. progs/chkdsk.asm's own chk_sub32).
             mov     r7, less_top
-            inc     r7
-            inc     r7
-            inc     r7          ; r7 -> less_top+3 (LSB)
+            add16   r7, 3               ; r7 -> less_top+3 (LSB)
             mov     r8, less_backscan_start
-            inc     r8
-            inc     r8
-            inc     r8          ; r8 -> dest+3 (LSB)
+            add16   r8, 3               ; r8 -> dest+3 (LSB)
 
             ldi     LESS_BACKSCAN_LEN+1
             str     r2
@@ -1381,13 +1376,9 @@ lfp_start_ok:
             ; (which was < LESS_BACKSCAN_LEN+1 in that exact case), or
             ; it wasn't clamped and diff==LESS_BACKSCAN_LEN+1 exactly)
             mov     r7, less_top
-            inc     r7
-            inc     r7
-            inc     r7
+            add16   r7, 3
             mov     r8, less_backscan_start
-            inc     r8
-            inc     r8
-            inc     r8
+            add16   r8, 3
 
             ldn     r8
             str     r2
@@ -1515,9 +1506,7 @@ lfp_found:
                                         ; LESS_BACKSCAN_LEN)
 
             mov     r7, less_new_line
-            inc     r7
-            inc     r7
-            inc     r7          ; r7 -> less_new_line+3 (LSB)
+            add16   r7, 3               ; r7 -> less_new_line+3 (LSB)
 
             glo     r9
             str     r2
@@ -2144,10 +2133,7 @@ lsvr_do_shift:
             mov     r8, less_visible
             add16   r8, r7              ; R8 = &less_visible[i] (source)
             mov     rc, r8
-            inc     rc
-            inc     rc
-            inc     rc
-            inc     rc          ; RC = &less_visible[i+1] (dest)
+            add16   rc, 4               ; RC = &less_visible[i+1] (dest)
 
             lda     r8
             str     rc
@@ -2236,9 +2222,7 @@ zero4bytes:
 ;------------------------------------------------------------------
 less_pos_add16:
             mov     r7, less_pos
-            inc     r7
-            inc     r7
-            inc     r7          ; R7 -> less_pos+3 (LSB byte)
+            add16   r7, 3               ; R7 -> less_pos+3 (LSB byte)
 
             glo     rd
             str     r2
@@ -2285,7 +2269,12 @@ not_found:
 ;------------------------------------------------------------------
 ; Data
 ;------------------------------------------------------------------
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 less_fcb:               ds      FCB_LEN
+#if (less_fcb & $FF) > (256 - FCB_LEN)
+#error less_fcb crosses a page boundary
+#endif
 less_iobuf:              ds      FCB_IOBUF_LEN
 
 less_pos:                ds      4       ; current read position (MSB-first)

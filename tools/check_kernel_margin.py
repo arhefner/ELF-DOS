@@ -428,7 +428,37 @@ def main():
               f"bytes between the volatile top ({vol_top:04x}) and "
               f"{floor_name} ({floor_addr:04x}), the relay-region floor.")
 
-    # Check (3): the non-volatile region must fit under its ceiling.
+    # Check (3): no FCB may straddle a page boundary.
+    #
+    # kernel/file.asm computes an FCB field's address by adding the field
+    # offset to the base with 8-bit arithmetic only (ghi/phi/glo/adi/plo
+    # rather than a 16-bit add16), which saves 6 bytes a site across 46
+    # sites -- but is correct only while base_low + FCB_LEN - 1 cannot
+    # carry. file_open enforces it at run time for callers; this enforces
+    # it at build time for the kernel's own, where a violation would mean
+    # every file operation reading and writing the wrong addresses.
+    #
+    # Flat sources assert this themselves with a "#if"/"#error" pair next
+    # to the declaration. That is not available for an FCB inside a proc,
+    # whose final address is not known until link time -- hence this.
+    fcb_len = equs.get("FCB_LEN")
+    fcb_len = eval_expr(fcb_len, equs) if fcb_len is not None else 32
+    straddlers = [
+        (name, addr) for name, addr in symbols.items()
+        if name.endswith("_fcb") and (addr & 0xFF) > 256 - fcb_len
+    ]
+    checked = [n for n in symbols if n.endswith("_fcb")]
+    if straddlers:
+        failed = True
+        for name, addr in straddlers:
+            print(f"  FAIL: {name} at {addr:04x} (low byte {addr & 0xFF:02x}) "
+                  f"straddles a page boundary -- FCB field access uses 8-bit "
+                  f"arithmetic and would compute wrong addresses. Put it "
+                  f"first in a proc headed by '.link .align 32'.")
+    print(f"check_kernel_margin: {'OK' if not straddlers else 'FAILED'} -- "
+          f"{len(checked)} kernel FCB symbol(s) checked for page straddling.")
+
+    # Check (4): the non-volatile region must fit under its ceiling.
     # On a ROM machine that is the physical end of the part; on a
     # RAM-only machine it is the highest address krnboot may load to.
     #

@@ -735,9 +735,7 @@ rwb_pattern_byte:
 ;------------------------------------------------------------------
 rwb_pos_inc:
             mov     r8, rwb_pos
-            inc     r8
-            inc     r8
-            inc     r8          ; R8 -> &rwb_pos[3] (LSB)
+            add16   r8, 3               ; R8 -> &rwb_pos[3] (LSB)
             ldn     r8
             adi     1
             str     r8
@@ -850,9 +848,7 @@ rwb_mismatch_reset:
 ;------------------------------------------------------------------
 rwb_record_mismatch:
             mov     r8, rwb_mismatch_count
-            inc     r8
-            inc     r8
-            inc     r8          ; -> &rwb_mismatch_count[3]
+            add16   r8, 3               ; -> &rwb_mismatch_count[3]
                                         ; (LSB)
             ldn     r8
             adi     1
@@ -1020,7 +1016,12 @@ rwb_fail_count:         db      0
 rwb_dspan:              db      0
 rwb_count:              dw      0
 rwb_name:                db      "RWBOUND.DAT",0
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 rwb_fcb:                 ds      FCB_LEN
+#if (rwb_fcb & $FF) > (256 - FCB_LEN)
+#error rwb_fcb crosses a page boundary
+#endif
 rwb_iobuf:                ds      FCB_IOBUF_LEN
 rwb_pos:                 ds      4
 rwb_chunk:                ds      CHUNK_LEN

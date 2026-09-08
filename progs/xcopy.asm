@@ -156,8 +156,7 @@ start:
             ldn     rf
             plo     rd                  ; RD = mem_base
             mov     rf, LOADER_ARGS
-            inc     rf
-            inc     rf
+            add16   rf, 2
             lda     rf
             phi     r8
             ldn     rf
@@ -2133,11 +2132,26 @@ dst_final:            ds      132
 xc_cp_src:            dw      0
 xc_cp_dst:            dw      0
 xc_cp_answer:         db      0
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 xc_cp_src_fcb:        ds      FCB_LEN
+#if (xc_cp_src_fcb & $FF) > (256 - FCB_LEN)
+#error xc_cp_src_fcb crosses a page boundary
+#endif
 xc_cp_src_iobuf:      ds      FCB_IOBUF_LEN
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 xc_cp_dst_fcb:        ds      FCB_LEN
+#if (xc_cp_dst_fcb & $FF) > (256 - FCB_LEN)
+#error xc_cp_dst_fcb crosses a page boundary
+#endif
 xc_cp_dst_iobuf:      ds      FCB_IOBUF_LEN
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 xc_cp_ck_fcb:         ds      FCB_LEN
+#if (xc_cp_ck_fcb & $FF) > (256 - FCB_LEN)
+#error xc_cp_ck_fcb crosses a page boundary
+#endif
 xc_cp_ck_iobuf:       ds      FCB_IOBUF_LEN
 xc_cp_buf:            ds      XCOPY_CHUNK_LEN
 

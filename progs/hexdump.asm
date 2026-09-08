@@ -56,8 +56,7 @@ start:
             lbnf    usage               ; argc < 2: no filename given
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -333,7 +332,12 @@ hex_byte:
             inc     rf
             rtn
 
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 hd_fcb:         ds      FCB_LEN
+#if (hd_fcb & $FF) > (256 - FCB_LEN)
+#error hd_fcb crosses a page boundary
+#endif
 hd_iobuf:       ds      FCB_IOBUF_LEN
 hd_rowbuf:      ds      16
 hd_offset:      dw      0

@@ -103,8 +103,7 @@ start:
 
             ; --- does argv[1] look like a device flag? ---
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rd
             ldn     rb

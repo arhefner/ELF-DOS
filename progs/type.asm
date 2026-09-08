@@ -33,8 +33,7 @@ start:
             lbnf    usage               ; argc < 2: no filename given
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -107,7 +106,12 @@ usage:
             ldi     1                   ; exit code 1 = error
             rtn
 
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 type_fcb:       ds      FCB_LEN
+#if (type_fcb & $FF) > (256 - FCB_LEN)
+#error type_fcb crosses a page boundary
+#endif
 type_iobuf:     ds      FCB_IOBUF_LEN
 type_buf:       ds      TYPE_CHUNK_LEN
 

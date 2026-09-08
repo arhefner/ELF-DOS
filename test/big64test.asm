@@ -670,9 +670,7 @@ bt_pattern_byte:
 ;------------------------------------------------------------------
 bt_pos_inc:
             mov     r8, bt_pos
-            inc     r8
-            inc     r8
-            inc     r8          ; R8 -> &bt_pos[3] (LSB)
+            add16   r8, 3               ; R8 -> &bt_pos[3] (LSB)
             ldn     r8
             adi     1
             str     r8
@@ -787,9 +785,7 @@ bt_mismatch_reset:
 ;------------------------------------------------------------------
 bt_record_mismatch:
             mov     r8, bt_mismatch_count
-            inc     r8
-            inc     r8
-            inc     r8          ; -> &bt_mismatch_count[3] (LSB)
+            add16   r8, 3               ; -> &bt_mismatch_count[3] (LSB)
             ldn     r8
             adi     1
             str     r8
@@ -1453,7 +1449,12 @@ bt_check_s11:
 bt_fail_count:          db      0
 bt_loop_count:          db      0
 bt_name:                db      "BIG64TST.DAT",0
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 bt_fcb:                 ds      FCB_LEN
+#if (bt_fcb & $FF) > (256 - FCB_LEN)
+#error bt_fcb crosses a page boundary
+#endif
 bt_iobuf:               ds      FCB_IOBUF_LEN
 bt_pos:                 ds      4
 bt_chunk:               ds      CHUNK_LEN

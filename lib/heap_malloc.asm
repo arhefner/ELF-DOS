@@ -90,9 +90,8 @@ HEAP_MIN_SPLIT: equ     4
             ; block's own header)
             mov     r8, rf
             sub16   r8, rd
-            inc     r8          ; R8 = total size
-            dec     r8
-            dec     r8          ; R8 = usable size
+            add16   r8, 1               ; R8 = total size
+            sub16   r8, 2               ; R8 = usable size
 
             mov     rf, rd              ; RF = base (the block's own
                                         ; address)
@@ -197,14 +196,12 @@ ha_found:
 ha_split:
             ; new free block goes right after the allocated part
             mov     rd, r8
-            inc     rd
-            inc     rd
+            add16   rd, 2
             add16   rd, rc              ; RD = new free block's own
                                         ; address
 
             mov     r9, rb
-            dec     r9
-            dec     r9          ; R9 = new free block's own
+            sub16   r9, 2               ; R9 = new free block's own
                                         ; SIZE (remainder minus its
                                         ; own new header)
 
@@ -219,15 +216,13 @@ ha_split:
             ; header hasn't been touched yet, still holds the
             ; original NEXT)
             mov     rf, r8
-            inc     rf
-            inc     rf
+            add16   rf, 2
             lda     rf
             phi     r9
             ldn     rf
             plo     r9                  ; R9 = old block's own NEXT
             mov     rf, rd
-            inc     rf
-            inc     rf
+            add16   rf, 2
             ghi     r9
             str     rf
             inc     rf
@@ -274,8 +269,7 @@ ha_no_split:
             ; whatever pointed at it now points at ITS OWN next
             ; instead.
             mov     rf, r8
-            inc     rf
-            inc     rf
+            add16   rf, 2
             lda     rf
             phi     rd
             ldn     rf
@@ -327,8 +321,7 @@ ha_fail:
             proc    heap_free
 
             mov     r8, rf
-            dec     r8
-            dec     r8          ; R8 = block address
+            sub16   r8, 2               ; R8 = block address
 
             mov     rf, r8
             lda     rf
@@ -386,8 +379,7 @@ hf_insert:
             ; freed block's own NEXT = current candidate (RD,
             ; possibly 0)
             mov     rf, r8
-            inc     rf
-            inc     rf
+            add16   rf, 2
             ghi     rd
             str     rf
             inc     rf
@@ -429,8 +421,7 @@ hf_coalesce_fwd:
 
 hf_coalesce_fwd_check:
             mov     rf, r8
-            inc     rf
-            inc     rf
+            add16   rf, 2
             add16   rf, r9              ; RF = freed block's own end
                                         ; address
 
@@ -455,14 +446,12 @@ hf_coalesce_fwd_check:
             phi     ra
             ldn     rf
             plo     ra                  ; RA = RD's own SIZE
-            inc     ra
-            inc     ra
+            add16   ra, 2
             add16   r9, ra              ; R9 = freed block's new,
                                         ; merged SIZE
 
             mov     rf, rd
-            inc     rf
-            inc     rf
+            add16   rf, 2
             lda     rf
             phi     ra
             ldn     rf
@@ -498,8 +487,7 @@ hf_coalesce_back_check:
             ldn     rf
             plo     ra                  ; RA = RB's own SIZE
             mov     rf, rb
-            inc     rf
-            inc     rf
+            add16   rf, 2
             add16   rf, ra              ; RF = RB's own end address
 
             glo     r8
@@ -526,13 +514,11 @@ hf_coalesce_back_check:
                                         ; (possibly already merged)
                                         ; SIZE, reloaded fresh
 
-            inc     r9
-            inc     r9
+            add16   r9, 2
             add16   ra, r9              ; RA = RB's new, merged SIZE
 
             mov     rf, r8
-            inc     rf
-            inc     rf
+            add16   rf, 2
             lda     rf
             phi     r9
             ldn     rf

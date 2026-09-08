@@ -736,7 +736,12 @@ sk_expected:         dw      0
 sk_expected_byte:    db      0
 sk_name:             db      "SEEKTST.DAT",0
 sk_readbuf:          db      0
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 sk_fcb:              ds      FCB_LEN
+#if (sk_fcb & $FF) > (256 - FCB_LEN)
+#error sk_fcb crosses a page boundary
+#endif
 sk_iobuf:            ds      FCB_IOBUF_LEN
 sk_rampbuf:          ds      SEEK_FILE_LEN
 

@@ -42,8 +42,7 @@ start:
             lbnf    usage               ; argc < 2: no filename given
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -114,7 +113,12 @@ usage:
             rtn
 
 test_line:      db      "0123456789",10
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 wtest_fcb:      ds      FCB_LEN
+#if (wtest_fcb & $FF) > (256 - FCB_LEN)
+#error wtest_fcb crosses a page boundary
+#endif
 wtest_iobuf:    ds      FCB_IOBUF_LEN
 remaining:      db      0
 

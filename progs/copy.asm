@@ -961,9 +961,19 @@ copy_glob_ctx:  ds      GLOB_CTX_LEN
 ; variable needed. dst_fcb/dst_iobuf are reused for both the
 ; destination-exists check and the real destination open -- the first
 ; is always closed before the second happens.
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 src_fcb:    ds      FCB_LEN
+#if (src_fcb & $FF) > (256 - FCB_LEN)
+#error src_fcb crosses a page boundary
+#endif
 src_iobuf:  ds      FCB_IOBUF_LEN
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 dst_fcb:    ds      FCB_LEN
+#if (dst_fcb & $FF) > (256 - FCB_LEN)
+#error dst_fcb crosses a page boundary
+#endif
 dst_iobuf:  ds      FCB_IOBUF_LEN
 
 dstchk_arg: dw      0

@@ -47,8 +47,7 @@ start:
                                         ; display the current time
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -125,9 +124,7 @@ time_valid:
             call    K_GETTOD
 
             mov     rf, dt_buf
-            inc     rf
-            inc     rf
-            inc     rf          ; RF -> dt_buf[3] (hour)
+            add16   rf, 3               ; RF -> dt_buf[3] (hour)
             mov     rb, st_hour
             ldn     rb
             str     rf                  ; dt_buf[3] = hour
@@ -216,9 +213,7 @@ pu_done:
 ; ----------------------------------------------------------------
 print_time:
             mov     rf, dt_buf
-            inc     rf
-            inc     rf
-            inc     rf
+            add16   rf, 3
             ldn     rf
             plo     rd
             ldi     0
@@ -229,10 +224,7 @@ print_time:
             db      ":",0
 
             mov     rf, dt_buf
-            inc     rf
-            inc     rf
-            inc     rf
-            inc     rf
+            add16   rf, 4
             ldn     rf
             plo     rd
             ldi     0
@@ -243,11 +235,7 @@ print_time:
             db      ":",0
 
             mov     rf, dt_buf
-            inc     rf
-            inc     rf
-            inc     rf
-            inc     rf
-            inc     rf
+            add16   rf, 5
             ldn     rf
             plo     rd
             ldi     0

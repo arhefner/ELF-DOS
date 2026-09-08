@@ -856,9 +856,19 @@ move_glob_ctx:  ds      GLOB_CTX_LEN
 ; lib/move.asm (a completely separate file/link unit -- though as of
 ; the 2026-07-23 redesign, move_rename itself is stateless and owns no
 ; scratch of its own at all).
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 mv_src_fcb:     ds      FCB_LEN
+#if (mv_src_fcb & $FF) > (256 - FCB_LEN)
+#error mv_src_fcb crosses a page boundary
+#endif
 mv_src_iobuf:   ds      FCB_IOBUF_LEN
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 mv_dst_fcb:     ds      FCB_LEN
+#if (mv_dst_fcb & $FF) > (256 - FCB_LEN)
+#error mv_dst_fcb crosses a page boundary
+#endif
 mv_dst_iobuf:   ds      FCB_IOBUF_LEN
 
 dstchk_arg:     dw      0

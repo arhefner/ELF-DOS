@@ -225,8 +225,7 @@ dir_vol_after:
             ; the literal K_PATH_RESOLVE-and-maybe-list-a-directory
             ; logic below.
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rd
             ldn     rb
@@ -1332,12 +1331,7 @@ dir_hour12_done:
 
 pde_dirtag_blank:
             mov     rf, spaces13
-            inc     rf
-            inc     rf
-            inc     rf
-            inc     rf
-            inc     rf
-            inc     rf          ; 13-7=6 -- last 7 chars of
+            add16   rf, 6               ; 13-7=6 -- last 7 chars of
                                         ; spaces13 = 7 blank spaces,
                                         ; matching dir_tag's own width
             call    K_MSG

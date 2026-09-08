@@ -114,6 +114,8 @@
             extrn   fo_drive
             extrn   fr_request
             extrn   _fcb_calc_transferred
+            extrn   fopen_badfcb
+            extrn   _zero_dir_buf
             extrn   _fcb_advance_after_chunk
             extrn   fcrw_slot
             extrn   fcrw_iobuf
@@ -415,8 +417,11 @@ fst_cidx_done:
             phi     rb
             ldn     rf
             plo     rb                  ; RB = FCB base
-            mov     rf, rb
-            add16   rf, FCB_SCLUST
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_SCLUST
+            plo     rf
             lda     rf
             phi     rd
             ldn     rf
@@ -485,8 +490,11 @@ fst_no_wrap:
 
             call    _fcb_store_cclust
 
-            mov     rf, rb
-            add16   rf, FCB_CSECT
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CSECT
+            plo     rf
             glo     r9
             str     rf                  ; FCB_CSECT = new_csect
 
@@ -519,6 +527,21 @@ fst_ioerr:
 
             proc    file_open
 
+            ; An FCB must not straddle a page boundary. The field
+            ; accessors below add a field offset to the FCB base using
+            ; 8-bit arithmetic only, which is correct precisely because
+            ; base_low + FCB_LEN - 1 cannot carry. Reject a caller that
+            ; breaks that, rather than silently reading and writing the
+            ; wrong addresses for the life of the file.
+            ;
+            ; RD is the caller's FCB pointer and is still untouched here.
+            ; The test is cheap: the low byte plus FCB_LEN-1 carrying out
+            ; of 8 bits IS the straddle. Every source in this tree aligns
+            ; its FCBs (".align 32" plus a compile-time #if assertion in
+            ; flat files; a 32-aligned proc where the FCB lives inside
+            ; one), so this only fires for something built elsewhere or
+            ; built before that convention -- exactly the case that wants
+            ; a clean failure instead of corruption.
             ; save all 4 incoming values before RF gets reused below as
             ; a destination pointer for the writes: RF=path pointer
             ; (stashed in RB -- the only register free here that isn't
@@ -526,6 +549,27 @@ fst_ioerr:
             ; RD=caller's FCB pointer, RA=caller's I/O buffer pointer
             ; (both already stable in their own registers).
             plo     rc                  ; RC.0 = mode
+
+            ; Reject an FCB that straddles a page boundary: the field
+            ; accessors add a field offset to the base with 8-bit
+            ; arithmetic only, which is correct exactly while
+            ; base_low + FCB_LEN - 1 cannot carry, so a straddling FCB
+            ; would read and write wrong addresses for the file's whole
+            ; lifetime. Sources here align their FCBs (".align 32" plus a
+            ; compile-time #if in flat files, a 32-aligned proc
+            ; otherwise), so this only fires for something built
+            ; elsewhere -- which is exactly the case wanting a clean
+            ; failure rather than corruption.
+            ;
+            ; MUST come after "plo rc" above: D holds the incoming mode
+            ; on entry, and "glo rd" would destroy it. Putting this
+            ; check first is what stopped the system booting on its
+            ; first hardware round -- the mode was replaced by the FCB
+            ; pointer's low byte on every single open.
+            glo     rd
+            adi     FCB_LEN - 1
+            lbdf    fopen_badfcb
+
             mov     rb, rf              ; RB = path pointer
 
             mov     rf, fo_name
@@ -779,8 +823,11 @@ fopen_flags_done:
             ldn     rf
             plo     rb                  ; RB = fcb slot base
 
-            mov     rf, rb
-            add16   rf, FCB_FSIZE
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_FSIZE
+            plo     rf
             ldi     0
             str     rf
             inc     rf
@@ -818,8 +865,11 @@ fopen_check_append:
 
             ; --- load the full 32-bit FSIZE (2026-07-26, >64K support
             ; -- was low-word-only). RD:R8 = FSIZE (RD=high, R8=low). ---
-            mov     rf, rb
-            add16   rf, FCB_FSIZE
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_FSIZE
+            plo     rf
             lda     rf
             phi     rd
             lda     rf
@@ -868,10 +918,16 @@ fopen_append_have_size:
             ldn     rf
             plo     rb                  ; RB = fcb slot base (reload)
 
-            mov     rf, rb
-            add16   rf, FCB_FSIZE       ; RF = source (FSIZE)
-            mov     r8, rb
-            add16   r8, FCB_FPOS        ; R8 = dest (FPOS)
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_FSIZE
+            plo     rf  ; RF = source (FSIZE)
+            ghi     rb
+            phi     r8
+            glo     rb
+            adi     FCB_FPOS
+            plo     r8  ; R8 = dest (FPOS)
             lda     rf
             str     r8
             inc     r8
@@ -1498,8 +1554,11 @@ gsn_build_ext_done:
 ; ----------------------------------------------------------------
             proc    _fcb_load_boff
 
-            mov     rf, rb
-            add16   rf, FCB_BOFF
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_BOFF
+            plo     rf
             lda     rf
             phi     r8
             ldn     rf
@@ -1510,8 +1569,11 @@ gsn_build_ext_done:
 
             proc    _fcb_load_cclust
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CCLUST
+            plo     rf
             lda     rf
             phi     rd
             ldn     rf
@@ -1522,8 +1584,11 @@ gsn_build_ext_done:
 
             proc    _fcb_load_iobuf
 
-            mov     rf, rb
-            add16   rf, FCB_IOBUF
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_IOBUF
+            plo     rf
             lda     rf
             phi     r9
             ldn     rf
@@ -1534,8 +1599,11 @@ gsn_build_ext_done:
 
             proc    _fcb_store_cclust
 
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CCLUST
+            plo     rf
             ghi     rd
             str     rf
             inc     rf
@@ -1547,8 +1615,11 @@ gsn_build_ext_done:
 
             proc    _fcb_store_boff
 
-            mov     rf, rb
-            add16   rf, FCB_BOFF
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_BOFF
+            plo     rf
             ghi     r8
             str     rf
             inc     rf
@@ -1574,8 +1645,11 @@ gsn_build_ext_done:
 ; ----------------------------------------------------------------
             proc    _fcb_load_fsize32
 
-            mov     rf, rb
-            add16   rf, FCB_FSIZE
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_FSIZE
+            plo     rf
             lda     rf
             phi     r9
             lda     rf
@@ -1590,8 +1664,11 @@ gsn_build_ext_done:
 
             proc    _fcb_load_fpos32
 
-            mov     rf, rb
-            add16   rf, FCB_FPOS
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_FPOS
+            plo     rf
             lda     rf
             phi     r9
             lda     rf
@@ -1606,8 +1683,11 @@ gsn_build_ext_done:
 
             proc    _fcb_store_fpos32
 
-            mov     rf, rb
-            add16   rf, FCB_FPOS
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_FPOS
+            plo     rf
             ghi     r9
             str     rf
             inc     rf
@@ -1716,8 +1796,11 @@ gsn_build_ext_done:
             proc    _fcb_sector_lba_and_iobuf
 
             ; ---- is FCB_CSECT already out of range for this cluster? ----
-            mov     rf, rb
-            add16   rf, FCB_CSECT
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CSECT
+            plo     rf
             ldn     rf                  ; D = FCB_CSECT
             str     r2
             mov     rf, bpb_spc
@@ -1734,8 +1817,11 @@ gsn_build_ext_done:
 
             call    _fcb_store_cclust
 
-            mov     rf, rb
-            add16   rf, FCB_CSECT
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CSECT
+            plo     rf
             ldi     0
             str     rf                  ; FCB_CSECT = 0
 
@@ -1744,8 +1830,11 @@ fslai_no_resolve:
             call    _cluster_to_lba     ; R7/R8 = LBA of first sector
                                         ; of cluster
 
-            mov     rf, rb
-            add16   rf, FCB_CSECT
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CSECT
+            plo     rf
             ldn     rf                  ; D = FCB_CSECT
             str     r2
             glo     r7
@@ -2519,6 +2608,13 @@ fc_use_current:
             glo     rd
             str     rf
 
+            ; Shared tail: two other paths through _file_create reach
+            ; exactly this point -- copy the located sector's LBA into
+            ; fc_target_lba and go write the entries -- so they branch
+            ; here rather than repeating it. A tail merge, not a call:
+            ; every one of them ended with the same lbr anyway, and the
+            ; block loads RF and RB itself, so nothing is inherited.
+fc_copy_lba_write:
             mov     rf, dir_cur_lba
             mov     rb, fc_target_lba
             lda     rf
@@ -2773,24 +2869,7 @@ fc_grow:
                                         ; starting point to walk
                                         ; forward from)
 
-            mov     rf, dir_buf
-            ldi     2
-            phi     rc
-            ldi     0
-            plo     rc
-fc_grow_zero_fill:
-            ldi     0
-            str     rf
-            inc     rf
-            dec     rc                  ; DEC not SUB16 (matches this
-                                        ; file's own 2026-07-30 sweep
-                                        ; convention) -- the
-                                        ; immediately following ghi rc
-                                        ; reloads D fresh regardless
-            ghi     rc
-            lbnz    fc_grow_zero_fill
-            glo     rc
-            lbnz    fc_grow_zero_fill
+            call    _zero_dir_buf
 
 fc_grow_zero_loop:
             ; advance to the next sector -- byte2 (fc_grow_lba+2, bits
@@ -2837,18 +2916,7 @@ fc_zero_loop:
             inc     rf
             str     rf
 
-            mov     rf, dir_cur_lba
-            mov     rb, fc_target_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
-
-            lbr     fc_write_entries
+            lbr     fc_copy_lba_write
 
 fc_next_ok:
             mov     rf, fc_target_off
@@ -2857,18 +2925,7 @@ fc_next_ok:
             inc     rf
             str     rf
 
-            mov     rf, dir_cur_lba
-            mov     rb, fc_target_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
-
-            lbr     fc_write_entries
+            lbr     fc_copy_lba_write
 
 fc_full:
             stc                         ; DF = 1, directory full / error
@@ -3201,8 +3258,11 @@ fc_no_term:
             ; rewrite below). RD must survive -- _switch_drive's own
             ; header documents it as clobbered.
             push    rd
-            mov     rf, rd
-            add16   rf, FCB_DRIVE
+            ghi     rd
+            phi     rf
+            glo     rd
+            adi     FCB_DRIVE
+            plo     rf
             ldn     rf
             call    _switch_drive
             pop     rd
@@ -3265,8 +3325,11 @@ fclose_no_rewrite:
             ; of a dedicated scratch buffer -- see fcrw_iobuf's own
             ; comment for why this is safe. RD is still the fresh
             ; incoming FCB base here, untouched since entry.
-            mov     rf, rd
-            add16   rf, FCB_IOBUF
+            ghi     rd
+            phi     rf
+            glo     rd
+            adi     FCB_IOBUF
+            plo     rf
             lda     rf
             phi     r9
             ldn     rf
@@ -3280,8 +3343,11 @@ fclose_no_rewrite:
             str     rf                  ; fcrw_iobuf = FCB's iobuf address
 
             ; load FCB_ELBA into R7/R8 for f_ideread
-            mov     rf, rd
-            add16   rf, FCB_ELBA
+            ghi     rd
+            phi     rf
+            glo     rd
+            adi     FCB_ELBA
+            plo     rf
             call    _load_lba24        ; R7:R8 = LBA
 
             mov     r9, fcrw_iobuf
@@ -3301,8 +3367,11 @@ fclose_no_rewrite:
             plo     rd                  ; RD = FCB slot base
 
             ; RF = FCB's iobuf + FCB_EOFF + DE_SIZE
-            mov     rf, rd
-            add16   rf, FCB_EOFF
+            ghi     rd
+            phi     rf
+            glo     rd
+            adi     FCB_EOFF
+            plo     rf
             lda     rf                  ; D = eoff high byte
             phi     r9
             ldn     rf                  ; D = eoff low byte
@@ -3318,8 +3387,11 @@ fclose_no_rewrite:
 
             ; copy FCB_FSIZE (4 bytes, big-endian) to DE_SIZE (4
             ; bytes, little-endian on disk) -- byte order reverses
-            mov     r9, rd
-            add16   r9, FCB_FSIZE       ; R9 -> FCB_FSIZE (big-endian, MSB first)
+            ghi     rd
+            phi     r9
+            glo     rd
+            adi     FCB_FSIZE
+            plo     r9  ; R9 -> FCB_FSIZE (big-endian, MSB first)
 
             lda     r9                  ; D = FSIZE byte 0 (MSB)
             plo     rc
@@ -3351,8 +3423,11 @@ fclose_no_rewrite:
             ldn     rf
             plo     rd                  ; RD = FCB slot base
 
-            mov     r9, rd
-            add16   r9, FCB_EOFF
+            ghi     rd
+            phi     r9
+            glo     rd
+            adi     FCB_EOFF
+            plo     r9
             lda     r9
             phi     r8
             ldn     r9
@@ -3366,8 +3441,11 @@ fclose_no_rewrite:
             add16   rf, r8
             add16   rf, DE_CLUSTER      ; RF -> entry's 2-byte cluster field
 
-            mov     r9, rd
-            add16   r9, FCB_SCLUST      ; R9 -> FCB_SCLUST (big-endian)
+            ghi     rd
+            phi     r9
+            glo     rd
+            adi     FCB_SCLUST
+            plo     r9  ; R9 -> FCB_SCLUST (big-endian)
             lda     r9                  ; D = SCLUST high byte, R9 -> low byte
             plo     rc                  ; RC.0 = SCLUST high byte (stash)
             ldn     r9                  ; D = SCLUST low byte
@@ -3391,8 +3469,11 @@ fclose_no_rewrite:
             ldn     rf
             plo     rb                  ; RB = FCB slot base
 
-            mov     rf, rb
-            add16   rf, FCB_EOFF
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_EOFF
+            plo     rf
             lda     rf
             phi     rd
             ldn     rf
@@ -3426,8 +3507,11 @@ fclose_no_rewrite:
             phi     rd
             ldn     rf
             plo     rd                  ; RD = FCB slot base
-            mov     rf, rd
-            add16   rf, FCB_ELBA
+            ghi     rd
+            phi     rf
+            glo     rd
+            adi     FCB_ELBA
+            plo     rf
             call    _load_lba24
 
             mov     r9, fcrw_iobuf
@@ -4087,23 +4171,7 @@ dcr_notfound:
             ; zero. dir_buf is borrowed as scratch here -- nothing else
             ; needs its CURRENT content until it's restored below, right
             ; before _file_create needs it back. ---
-            mov     rf, dir_buf
-            ldi     2
-            phi     rc
-            ldi     0
-            plo     rc                  ; RC = 512 (byte count)
-dcr_zero1:
-            ldi     0
-            str     rf
-            inc     rf
-            dec     rc                  ; DEC not SUB16 (2026-07-30
-                                        ; sweep) -- the immediately
-                                        ; following ghi rc reloads D
-                                        ; fresh regardless
-            ghi     rc
-            lbnz    dcr_zero1
-            glo     rc
-            lbnz    dcr_zero1
+            call    _zero_dir_buf
 
             ; '.' entry at dir_buf+0 -- DE_NAME is 11 bytes total:
             ; 1 dot + 10 trailing spaces
@@ -4243,23 +4311,7 @@ dcr_dotdot_pad:
 
             plo     r9                  ; R9.0 = remaining sector count
 
-            mov     rf, dir_buf
-            ldi     2
-            phi     rc
-            ldi     0
-            plo     rc
-dcr_zero2:
-            ldi     0
-            str     rf
-            inc     rf
-            dec     rc                  ; DEC not SUB16 (2026-07-30
-                                        ; sweep) -- the immediately
-                                        ; following ghi rc reloads D
-                                        ; fresh regardless
-            ghi     rc
-            lbnz    dcr_zero2
-            glo     rc
-            lbnz    dcr_zero2
+            call    _zero_dir_buf
 
 dcr_zero_loop:
             ; byte2 (offset dcr_sect_lba+2) is bits 7-0 -- incrementing
@@ -5123,15 +5175,21 @@ ftc_err:
             lbnz    fac_done
 
             ; FCB_BOFF == 512 exactly: wrap to the next sector
-            mov     rf, rb
-            add16   rf, FCB_BOFF
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_BOFF
+            plo     rf
             ldi     0
             str     rf
             inc     rf
             str     rf                  ; FCB_BOFF = 0
 
-            mov     rf, rb
-            add16   rf, FCB_CSECT
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CSECT
+            plo     rf
             ldn     rf
             adi     1
             str     rf                  ; FCB_CSECT++ (2026-09-02: no
@@ -5156,6 +5214,49 @@ ftc_err:
             str     rf
 
 fac_done:
+            rtn
+            endp
+
+;------------------------------------------------------------------
+; _zero_dir_buf: fill dir_buf's whole 512-byte sector with zeros.
+;
+; Was three byte-for-byte identical copies -- _file_create's fc_grow
+; (zeroing a freshly allocated directory cluster) and dir_create's two
+; (dcr_zero1/dcr_zero2) -- differing only in the name of their own loop
+; label. Fully self-contained: it loads RF and RC itself, so a caller
+; has nothing to set up.
+;
+; Args:    none
+; Returns: nothing (dir_buf zeroed)
+; Modifies: RF, RC, D, DF. Every existing caller reloads RF immediately
+;           afterwards and none reads RC -- checked site by site before
+;           extracting.
+;------------------------------------------------------------------
+            proc    _zero_dir_buf
+            mov     rf, dir_buf
+            ldi     2
+            phi     rc
+            ldi     0
+            plo     rc                  ; RC = 512
+zdb_loop:
+            ldi     0
+            str     rf
+            inc     rf
+            dec     rc
+            ghi     rc
+            lbnz    zdb_loop
+            glo     rc
+            lbnz    zdb_loop
+            rtn
+            endp
+
+;------------------------------------------------------------------
+; fopen_badfcb: the caller's FCB straddles a page boundary. Its own
+; proc so file_open can branch here before any of its own state has
+; been set up.
+;------------------------------------------------------------------
+            proc    fopen_badfcb
+            stc                         ; DF = 1, open failed
             rtn
             endp
 
@@ -5224,8 +5325,11 @@ fac_done:
             push    rc
             push    rb
             push    ra
-            mov     rf, rb
-            add16   rf, FCB_DRIVE
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_DRIVE
+            plo     rf
             ldn     rf
             call    _switch_drive
             pop     ra
@@ -5250,8 +5354,11 @@ fread_check_eof:
             ; past this block except as already planned below.
             call    _fcb_load_fsize32
 
-            mov     rf, rb
-            add16   rf, FCB_FPOS
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_FPOS
+            plo     rf
             lda     rf
             phi     r7                  ; R7 = FPOS high word
             lda     rf
@@ -5547,8 +5654,11 @@ fread_ioerr:
             push    rc
             push    rb
             push    ra
-            mov     rf, rb
-            add16   rf, FCB_DRIVE
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_DRIVE
+            plo     rf
             ldn     rf
             call    _switch_drive
             pop     ra
@@ -5561,8 +5671,11 @@ fread_ioerr:
             ; this case -- a real chain never contains cluster 0
             ; (that means "free" in the FAT table), so this check
             ; only ever fires once per file, on its first-ever write. ----
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CCLUST
+            plo     rf
             lda     rf                  ; D = FCB_CCLUST high byte
             lbnz    fwrite_have_cluster
             ldn     rf                  ; D = FCB_CCLUST low byte
@@ -5580,8 +5693,11 @@ fread_ioerr:
             lbdf    fwrite_ioerr        ; disk full or I/O error
 
             ; FCB_SCLUST = FCB_CCLUST = new cluster
-            mov     rf, rb
-            add16   rf, FCB_SCLUST
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_SCLUST
+            plo     rf
             ghi     rd
             str     rf
             inc     rf
@@ -5816,15 +5932,21 @@ fwrite_copy_done:
             ; to its first (offset+0) -- R8/R9 here are POINTERS, not
             ; the 32-bit values themselves (their earlier FPOS-value
             ; use above is long done by this point).
-            mov     r8, rb
-            add16   r8, FCB_FPOS
+            ghi     rb
+            phi     r8
+            glo     rb
+            adi     FCB_FPOS
+            plo     r8
             inc     r8                  ; R8 -> FPOS's LSB (INC x3, not
             inc     r8                  ; ADD16 -- 2026-07-30 sweep;
             inc     r8                  ; the very next real instruction
                                         ; is a mov, which clobbers D
                                         ; anyway regardless)
-            mov     r9, rb
-            add16   r9, FCB_FSIZE
+            ghi     rb
+            phi     r9
+            glo     rb
+            adi     FCB_FSIZE
+            plo     r9
             inc     r9                  ; R9 -> FSIZE's LSB (INC x3;
             inc     r9                  ; the very next instruction,
             inc     r9                  ; ldn r9, reloads D fresh)
@@ -5858,10 +5980,16 @@ fwrite_copy_done:
 
             ; FCB_FSIZE = FCB_FPOS, straight 4-byte copy (both fields
             ; share the same MSB-first layout, so no reversal needed)
-            mov     rf, rb
-            add16   rf, FCB_FPOS        ; RF = source (FPOS)
-            mov     r8, rb
-            add16   r8, FCB_FSIZE       ; R8 = dest (FSIZE)
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_FPOS
+            plo     rf  ; RF = source (FPOS)
+            ghi     rb
+            phi     r8
+            glo     rb
+            adi     FCB_FSIZE
+            plo     r8  ; R8 = dest (FSIZE)
             lda     rf
             str     r8
             inc     r8
@@ -5989,8 +6117,11 @@ fwrite_resolve_err:
 ; ----------------------------------------------------------------
             proc    fwrite_resolve_cluster
 
-            mov     rf, rb
-            add16   rf, FCB_CSECT
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CSECT
+            plo     rf
             ldn     rf                  ; D = FCB_CSECT
             str     r2
             mov     rf, bpb_spc
@@ -6089,8 +6220,11 @@ fwrite_resolve_err:
             lbdf    fwrc_err
 
             ; switch to the new cluster: FCB_CCLUST = new cluster (R8)
-            mov     rf, rb
-            add16   rf, FCB_CCLUST
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CCLUST
+            plo     rf
             ghi     r8
             str     rf
             inc     rf
@@ -6130,8 +6264,11 @@ fwrc_commit_csect:
             ; above that) -- has fully, successfully completed. See
             ; the BUG FIX note earlier in this proc for why this can't
             ; be committed any earlier.
-            mov     rf, rb
-            add16   rf, FCB_CSECT
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CSECT
+            plo     rf
             ldi     0
             str     rf                  ; FCB_CSECT = 0
             clc
@@ -6209,8 +6346,11 @@ fwrc_err:
             str     rf                  ; fsk_whence = whence
 
             ; switch the active BPB/FAT-cache to this FCB's own drive
-            mov     rf, rd
-            add16   rf, FCB_DRIVE
+            ghi     rd
+            phi     rf
+            glo     rd
+            adi     FCB_DRIVE
+            plo     rf
             ldn     rf
             call    _switch_drive       ; clobbers R7/R8/R9/RA/RC/RD/RF
                                         ; per its own header -- nothing
@@ -6424,8 +6564,11 @@ fsk_rewind:
             ldn     rf
             plo     rb                  ; RB = FCB base
 
-            mov     rf, rb
-            add16   rf, FCB_SCLUST
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_SCLUST
+            plo     rf
             lda     rf
             phi     rd
             ldn     rf
@@ -6433,13 +6576,19 @@ fsk_rewind:
 
             call    _fcb_store_cclust        ; FCB_CCLUST = FCB_SCLUST
 
-            mov     rf, rb
-            add16   rf, FCB_CSECT
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_CSECT
+            plo     rf
             ldi     0
             str     rf                  ; FCB_CSECT = 0
 
-            mov     rf, rb
-            add16   rf, FCB_BOFF
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_BOFF
+            plo     rf
             ldi     0
             str     rf
             inc     rf
@@ -6502,8 +6651,11 @@ fsk_set_fpos:
             ; value itself would be a separate, bigger ABI decision,
             ; out of scope for this pass.
             mov     rf, fsk_target      ; RF = source (target)
-            mov     r8, rb
-            add16   r8, FCB_FPOS        ; R8 = dest (FCB_FPOS)
+            ghi     rb
+            phi     r8
+            glo     rb
+            adi     FCB_FPOS
+            plo     r8  ; R8 = dest (FCB_FPOS)
             lda     rf
             str     r8
             inc     r8

@@ -47,8 +47,7 @@ start:
             lbnf    usage               ; argc < 2: no path given
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb

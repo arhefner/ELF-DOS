@@ -756,7 +756,7 @@ yrd_read_block:
             phi     rc
             ldn     rd
             plo     rc                  ; RC = block_len
-            dec     rc          ; RC = block_len-1 (ym_recv_
+            sub16   rc, 1               ; RC = block_len-1 (ym_recv_
                                         ; block's pre-decremented
                                         ; convention)
             call    ym_recv_block
@@ -1052,7 +1052,12 @@ yr_recv_blockno_c:   db   0
 yr_real_bytes:       dw   0
 
 yr_filename:    ds      128
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 yr_fcb:         ds      FCB_LEN
+#if (yr_fcb & $FF) > (256 - FCB_LEN)
+#error yr_fcb crosses a page boundary
+#endif
 yr_iobuf:       ds      FCB_IOBUF_LEN
 yr_statbuf:     ds      DIRENT_LEN
 yr_block_buf:   ds      1024

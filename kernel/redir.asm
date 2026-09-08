@@ -702,6 +702,11 @@ rs_in_dual:
                                         ; reflects the reservation
                                         ; just made)
             mov     rd, r9              ; RD = dynamic FCB
+            ; NOT a field offset -- this steps a pointer PAST a whole
+            ; FCB to the iobuf that follows it, on a base only known at
+            ; run time (the himem reservation). It can carry out of the
+            ; low byte, so it needs the full 16-bit add; the 8-bit form
+            ; used for FCB field access would be wrong here.
             mov     ra, r9
             add16   ra, FCB_LEN         ; RA = dynamic iobuf, right
                                         ; after the FCB

@@ -1130,11 +1130,23 @@ ue_close_out:
 ; ----------------------------------------------------------------
             proc    _env_data
 
+            ; 32-aligned so no FCB can straddle a page boundary --
+            ; file_open rejects one that does, and the kernel's own FCB
+            ; field access relies on the property (see kernel/file.asm).
+            ; Must stay the FIRST thing in the proc: .link .align moves
+            ; the proc's BASE, which only aligns the label while nothing
+            ; has been emitted yet. Link/02 now refuses it anywhere else.
+            .link   .align 32
+
+            ; The two FCBs are deliberately FIRST and adjacent: with the
+            ; proc 32-aligned they land at offsets 0 and 32, so both are
+            ; 32-aligned and neither can straddle a page. Do not insert
+            ; anything above or between them.
+env_in_fcb:         ds      FCB_LEN
+env_out_fcb:        ds      FCB_LEN
 env_line_buf:       ds      ENV_LINE_MAX
 env_namebuf:        ds      ENV_LINE_MAX
-env_in_fcb:         ds      FCB_LEN
 env_in_iobuf:       ds      FCB_IOBUF_LEN
-env_out_fcb:        ds      FCB_LEN
 env_out_iobuf:      ds      FCB_IOBUF_LEN
 env_name:           dw      0
 env_value:          dw      0

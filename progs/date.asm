@@ -50,8 +50,7 @@ start:
                                         ; display the current date
 
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -245,8 +244,7 @@ print_date:
             db      "/",0
 
             mov     rf, dt_buf
-            inc     rf
-            inc     rf
+            add16   rf, 2
             ldn     rf
             plo     rd
             ldi     0

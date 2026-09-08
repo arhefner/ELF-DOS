@@ -409,6 +409,14 @@ bg_notfound:
 ;------------------------------------------------------------------
             proc    _batchmod_data
 
+            ; 32-aligned so no FCB can straddle a page boundary --
+            ; file_open rejects one that does, and the kernel's own FCB
+            ; field access relies on the property (see kernel/file.asm).
+            ; Must stay the FIRST thing in the proc: .link .align moves
+            ; the proc's BASE, which only aligns the label while nothing
+            ; has been emitted yet. Link/02 now refuses it anywhere else.
+            .link   .align 32
+
 batch_fcb:      ds      FCB_LEN
 batch_iobuf:    ds      FCB_IOBUF_LEN
 batch_scratch:  db      0           ; 1-byte read scratch for

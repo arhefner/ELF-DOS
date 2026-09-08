@@ -78,8 +78,7 @@ start:
 
 dgt_have_arg:
             mov     rb, ra
-            inc     rb
-            inc     rb          ; RB = &argv[1]
+            add16   rb, 2               ; RB = &argv[1]
             lda     rb
             phi     rf
             ldn     rb
@@ -360,7 +359,12 @@ dgt_pattern:        db      "test"          ; exactly 4 bytes, no NUL
                                             ; needed (K_FILE_WRITE
                                             ; writes exactly RC bytes)
 
+.align  32                  ; FCB must not straddle a page --
+                            ; file_open rejects one that does
 dgt_fcb:            ds      FCB_LEN
+#if (dgt_fcb & $FF) > (256 - FCB_LEN)
+#error dgt_fcb crosses a page boundary
+#endif
 dgt_iobuf:          ds      FCB_IOBUF_LEN
 dgt_num_buf:        ds      6               ; decimal scratch for
                                             ; f_uintout (max "65535"+0)
