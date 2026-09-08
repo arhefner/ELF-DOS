@@ -214,8 +214,51 @@ boot_ram_found:
 ; same image to the same address from disk -- so one disk image boots
 ; both. R7 already points at the first non-volatile sector.
 ;--------------------------------------------------------------
+            ; Is NVK_BASE writable? That, not the signature, is the
+            ; question that matters.
+            ;
+            ; A signature only proves SOME non-volatile kernel is here,
+            ; never that it is THIS one. RAM survives a warm reset, so
+            ; after any reset the previous build's image is still sitting
+            ; at NVK_BASE with a perfectly valid 'NVK' and version --
+            ; and krnboot would skip the disk load and run it, while the
+            ; VOLATILE half (jump table included) had just been reloaded
+            ; fresh from disk. New table, old code, different layout:
+            ; the first jump through the table lands in the middle of
+            ; some unrelated routine. That is a wild jump, and on this
+            ; hardware a wild jump writes to arbitrary LBAs and destroys
+            ; the disk. It cost three cards before Tony spotted it.
+            ;
+            ; So: if the region is RAM its contents cannot be trusted,
+            ; whatever they say, and we always load from disk. Only a
+            ; genuinely unwritable region (ROM) can vouch for itself,
+            ; and there the signature is meaningful. Two complementary
+            ; patterns, since one could match a ROM byte by chance; the
+            ; original byte is restored either way.
+            mov         rf,NVK_BASE
+            ldn         rf
+            plo         r9                  ; save whatever is there
+            ldi         $A5
+            str         rf
+            ldn         rf
+            xri         $A5
+            lbnz        boot_nv_is_rom      ; write did not take -> ROM
+            ldi         $5A
+            str         rf
+            ldn         rf
+            xri         $5A
+            lbnz        boot_nv_is_rom
+            glo         r9
+            str         rf                  ; RAM: put the byte back and
+            lbr         boot_load_nv        ; load unconditionally
+
+boot_nv_is_rom:
+            glo         r9
+            str         rf                  ; harmless on ROM; correct if
+                                            ; the first pattern did take
             call        check_nvk_sig
-            lbz         boot_init0      ; present and current -- done
+            lbz         boot_init0          ; genuine ROM copy, right version
+            lbr         load_err            ; ROM present but not ours
 
 boot_load_nv:
             mov         rf,NV_CNT_ADDR
