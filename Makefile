@@ -11,10 +11,10 @@
 #   test       build every test/*.asm into test/bin/<name> -- diagnostic/
 #              subsystem-exercising programs, kept out of bin/ entirely
 #              so a normal install's /bin never includes them
-#   everything all + progs + test. Use this after "make clean" -- a bare
-#              "make" rebuilds only the kernel and leaves bin/ missing.
-#              Does not build "sdk" (a release package, not a build
-#              output)
+#   everything all + mbr + progs + test. Use this after "make clean" --
+#              a bare "make" rebuilds only the kernel, leaving bin/ and
+#              mbr.bin missing. Does not build "sdk" (a release package,
+#              not a build output)
 #   sdk        package the external-developer SDK (headers, lib/
 #              modules, Developer's Guide) into elfdos-sdk.tar.gz --
 #              a self-contained download, no repo clone needed
@@ -496,12 +496,19 @@ test: $(TEST_EXES)
 # cases with nothing obviously wrong to see; use this instead of "all"
 # after any clean.
 #
+# Includes "mbr" as well: mbr.bin is an ordinary build output, not a
+# packaging step, and a tree without it is incomplete in a way that
+# bites immediately -- "install" needs it, and so does the emulator's
+# mkdisk.sh, which reads $(MBR_BIN) straight out of this directory.
+# Leaving it out meant "make clean; make everything" produced a tree
+# you could not actually install or emulate from.
+#
 # Deliberately does NOT build "sdk": that packages a release tarball
 # (elfdos-sdk.tar.gz) for external developers, which is a publishing
 # step rather than part of building the system, and dropping a stale
 # archive in the tree on every rebuild would be noise. Run "make sdk"
 # when you actually want to cut one.
-everything: all progs test
+everything: all mbr progs test
 
 #------------------------------------------------------------------
 # SDK package -- a single self-contained elfdos-sdk.tar.gz a developer

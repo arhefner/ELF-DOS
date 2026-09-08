@@ -513,7 +513,10 @@ test: test\bin $(TEST_SPECIAL_BINS)
 # a bare "clean" then "all" leaves a tree with no programs at all.
 # Deliberately excludes "sdk", which packages a release archive rather
 # than building the system.
-everything: all progs test
+# Includes "mbr": mbr.bin is a build output, not a packaging step, and
+# both "install" and the emulator's mkdisk.sh read it straight out of
+# this directory.
+everything: all mbr progs test
 
 # sys\elfdos-sys.exe: the host-side installer, compiled from sys\sys.c
 # with MSVC (see this file's own header comment). cd's into sys\ to
