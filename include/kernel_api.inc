@@ -222,10 +222,14 @@ FCB_IOBUF_LEN:  equ     512
 ;               ~32MB in practice -- see kernel/file.asm's own
 ;               fopen_check_append/fsk_general comments -- but is
 ;               correct for any position that fits in 32 bits).
-;               Returns: DF = 0 on success (RD = the resulting
-;               absolute position, low word only -- a caller needing
-;               the high word has no way to retrieve it from this call
-;               today), DF = 1 on error (bad whence, offset would
+;               Returns: DF = 0 on success (RA:RD = the resulting
+;               absolute 32-bit position; RA = high word, RD = low
+;               word. Widened 2026-09-08 -- RD alone used to be the
+;               whole answer, which left the size of any file over 64K
+;               unobtainable from a SEEK_END. Additive and safe: RA is
+;               an argument in, and was already documented as
+;               destroyed, so no existing caller could rely on it),
+;               DF = 1 on error (bad whence, offset would
 ;               place the position outside [0, filesize], or an I/O
 ;               error occurred walking the cluster chain); on any
 ;               error the file position is left unchanged.

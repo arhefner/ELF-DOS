@@ -6300,15 +6300,25 @@ fwrc_err:
 ;                 FCB_FSIZE/FCB_FPOS hold are likewise supported,
 ;                 matching this file's own widened append-mode
 ;                 positioning in fopen_check_append.
-; Returns: DF = 0 on success (RD = the resulting absolute position,
-;          low word only), DF = 1 on error (bad whence, offset out of
+; Returns: DF = 0 on success (RA:RD = the resulting absolute 32-bit
+;          position -- RA = high word, RD = low word. RD alone was the
+;          whole answer until 2026-09-08; the high word was left
+;          unreachable when 32-bit positions landed (2026-07-26),
+;          which meant no caller could learn the size of a file over
+;          64K from a SEEK_END, and lib/src_file.asm hit exactly that
+;          wall. Widening it was safe precisely BECAUSE this routine's
+;          own Modifies list below already declared RA destroyed, so
+;          no existing caller could have been relying on it: the
+;          change is purely additive and every RD-only caller is
+;          unaffected), DF = 1 on error (bad whence, offset out of
 ;          the supported range, or the resulting position would fall
 ;          outside [0, FCB_FSIZE]) -- on any error the FCB is left
 ;          completely untouched (no field is written until the new
 ;          position is fully validated and, for a forward/backward
 ;          move, the target cluster has already been found).
-; Modifies: R7, R8, R9, RA, RB, RC, RF (all used as internal scratch
-;          -- nothing but RD-in/DF-out/RD-out survives a call to this
+; Modifies: R7, R8, R9, RB, RC, RF (all used as internal scratch; RA
+;          is an argument in and, since 2026-09-08, half the result
+;          out) -- nothing but RD-in/DF-out/RA:RD-out survives a call to this
 ;          routine; a caller needing anything else alive across it
 ;          must stash to memory first, per this file's own standing
 ;          register-survival discipline).
@@ -6657,15 +6667,18 @@ fsk_set_fpos:
             adi     FCB_FPOS
             plo     r8  ; R8 = dest (FCB_FPOS)
             lda     rf
+            phi     ra                  ; RA.hi = target's high word's
+                                        ; high byte (see below)
             str     r8
             inc     r8
             lda     rf
+            plo     ra                  ; RA.lo -- RA:RD now carries the
+                                        ; full 32-bit result out
             str     r8
             inc     r8
             lda     rf
             phi     rd                  ; RD.hi = target's low word's
-                                        ; high byte (for the return
-                                        ; value below)
+                                        ; high byte
             str     r8
             inc     r8
             ldn     rf
@@ -6679,8 +6692,8 @@ fsk_set_fpos:
             ani     $EF
             str     rf
 
-            clc                         ; DF = 0, success; RD (target)
-            rtn                         ; still holds the new position
+            clc                         ; DF = 0, success; RA:RD hold
+            rtn                         ; the new 32-bit position
 
 fseek_bad_whence:
             stc

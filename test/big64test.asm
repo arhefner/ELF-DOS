@@ -954,6 +954,42 @@ brv_pass:
 ; Modifies: everything
 ;------------------------------------------------------------------
 bt_seek_verify_tail:
+            ; First, check what the SEEK ITSELF reported. RA:RD still
+            ; hold K_FILE_SEEK's own returned position here -- SCRT
+            ; preserves them across the call into this routine, and
+            ; nothing above touches either. Until 2026-09-08 only RD
+            ; (the low word) carried a result at all, so this test
+            ; deliberately verified position by READING rather than by
+            ; trusting the return; now the full 32 bits come back and
+            ; this checks them against the same expected bt_pos the
+            ; read-back check uses.
+            mov     r8, bt_seek_ret
+            ghi     ra
+            str     r8
+            inc     r8
+            glo     ra
+            str     r8
+            inc     r8
+            ghi     rd
+            str     r8
+            inc     r8
+            glo     rd
+            str     r8
+
+            mov     rf, bt_seek_ret
+            mov     rd, bt_pos
+            ldi     4
+            plo     r7
+bsvt_cmp:
+            lda     rd
+            str     r2
+            lda     rf
+            sm
+            lbnz    bsvt_badret
+            dec     r7
+            glo     r7
+            lbnz    bsvt_cmp
+
             mov     rf, bt_chunk
             ldi     0
             phi     rc
@@ -979,6 +1015,15 @@ bt_seek_verify_tail:
             plo     rc
             call    bt_verify_n
             call    bt_report_verify
+            rtn
+
+bsvt_badret:
+            call    K_INMSG
+            db      "FAIL (K_FILE_SEEK returned the wrong position)",13,10,0
+            mov     rf, bt_fail_count
+            ldn     rf
+            adi     1
+            str     rf
             rtn
 
 bsvt_readerr:
@@ -1457,6 +1502,7 @@ bt_fcb:                 ds      FCB_LEN
 #endif
 bt_iobuf:               ds      FCB_IOBUF_LEN
 bt_pos:                 ds      4
+bt_seek_ret:            ds      4       ; K_FILE_SEEK's returned RA:RD
 bt_chunk:               ds      CHUNK_LEN
 bt_mismatch_count:      ds      4
 bt_mismatch_found:      db      0

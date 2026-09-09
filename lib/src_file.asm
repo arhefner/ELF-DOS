@@ -900,10 +900,13 @@ ss_bump:
 ; not a file open. RF is therefore "whatever identifies the data" --
 ; a path here, a drive spec elsewhere.
 ;
-; The size is captured here, once, via K_STAT: K_FILE_SEEK cannot
-; report it, since its own documented return carries only the low word
-; of the resulting position (kernel_api.inc says so explicitly), which
-; is not enough for a file over 64K.
+; The size is captured here, once, via K_STAT. This is also what turned
+; up the K_FILE_SEEK gap fixed the same day: its return used to carry
+; only the low word of the resulting position, so a SEEK_END could not
+; report the size of a file over 64K at all. That is fixed (RA:RD now
+; carry the full 32 bits), so a SEEK_END would work here too -- K_STAT
+; is kept because it answers exactly and without moving the file
+; position, which a SEEK_END would.
 ;
 ; Args:    RF = pointer to a NUL-terminated path
 ; Returns: DF=0 opened, src_size holds the byte count;  DF=1 failed
