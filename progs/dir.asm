@@ -406,6 +406,27 @@ dir_print_volume_header:
 dpvh_have_path:
             call    K_PATH_RESOLVE      ; side effect + RC.0 = resolved
                                         ; drive index
+            lbdf    dpvh_skip           ; BUG FIX (2026-09-09): RC.0 is
+                                        ; only meaningful when
+                                        ; path_resolve SUCCEEDS. Its own
+                                        ; header lists "an explicit X:
+                                        ; prefix named a drive with no
+                                        ; mounted partition" as a DF=1
+                                        ; case, and this used the result
+                                        ; unconditionally -- printing a
+                                        ; garbage drive letter ('C' plus
+                                        ; whatever RC.0 held) followed by
+                                        ; the label of whatever volume
+                                        ; happened to still be active.
+                                        ; Print no header at all instead;
+                                        ; the caller's own "Directory not
+                                        ; found." is the whole story.
+                                        ;
+                                        ; Reachable before MOUNT existed
+                                        ; too -- "dir f:" on a card with
+                                        ; fewer than four partitions --
+                                        ; just far easier to hit now that
+                                        ; a drive can be unmounted.
             glo     rc
             adi     'C'                 ; D = 'C' + resolved drive index
             plo     r9                  ; R9.0 = the letter to print
@@ -436,6 +457,9 @@ dpvh_letter_ready:
             call    K_MSG
             call    K_INMSG
             db      13,10,0
+            rtn
+
+dpvh_skip:
             rtn
 
 dpvh_none:
