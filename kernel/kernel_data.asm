@@ -55,6 +55,20 @@ bpb_max_clust:  dw      0               ; highest valid cluster number
                                         ; known simplification -- see
                                         ; bpb.asm)
 
+bpb_dev:        db      0               ; block device unit number (0-7)
+                                        ; this drive's partition lives on.
+                                        ; Copied in from drive_bpb_table by
+                                        ; _switch_drive like every other BPB
+                                        ; field, and read by _set_lba_dev
+                                        ; (fat.asm) on every disk access.
+                                        ; Declared here, AFTER bpb_max_clust
+                                        ; and BEFORE fat_csec, because the
+                                        ; block's byte order is its wire
+                                        ; format: _switch_drive memcpy's
+                                        ; BPBBLK_LEN bytes onto it, so a
+                                        ; field's position here IS its
+                                        ; BPBBLK_* offset.
+
                 public  part1_lba
                 public  bpb_fat_lba
                 public  bpb_root_lba
@@ -66,9 +80,19 @@ bpb_max_clust:  dw      0               ; highest valid cluster number
                 public  bpb_num_fats
                 public  bpb_spf
                 public  bpb_max_clust
+                public  bpb_dev
 
 ; ----------------------------------------------------------------
 ; FAT sector cache -- one 512-byte FAT sector held in RAM
+;
+; fat_csec/fat_dirty/fat_cache are NOT part of the BPB block that
+; _switch_drive copies (BPBBLK_LEN stops just past bpb_dev above).
+; fat_csec used to be inside it purely for layout uniformity, and
+; _switch_drive always overwrote the copied value immediately because it
+; is never trustworthy -- one drive's FAT sector is all that is ever
+; cached. Leaving it out saves 2 bytes per drive in drive_bpb_table and
+; removes a pointless per-switch copy; _switch_drive still sets
+; fat_csec = $FFFF explicitly, exactly as before.
 ;
 ; fat_csec: which sector within the FAT is cached ($FFFF = none)
 ; fat_dirty: non-zero means cache must be written back before eviction

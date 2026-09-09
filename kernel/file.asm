@@ -82,6 +82,7 @@
 
 ; cross-file references
             extrn   _switch_drive
+            extrn   _set_lba_dev
             extrn   fat_get
             extrn   fat_set
             extrn   fat_alloc
@@ -1483,8 +1484,7 @@ gsn_build_ext_done:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            call    _set_lba_dev      ; R8.1 = block device unit
             rtn
 
             endp

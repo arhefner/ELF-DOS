@@ -37,6 +37,7 @@
 #include    include/kernel.inc
 
             extrn   file_open
+            extrn   _set_lba_dev
             extrn   file_close
             extrn   file_read
             extrn   mem_base
@@ -371,8 +372,7 @@ prun_err:
             phi     r7
             ldn     rf                  ; D = LBA bits 7-0
             plo     r7
-            ldi     0
-            phi     r8                  ; R8.1 = 0 (drive/head)
+            call    _set_lba_dev      ; R8.1 = block device unit
             mov     rf, prog_iobuf
             call    f_ideread
             lbdf    prsh_fallback

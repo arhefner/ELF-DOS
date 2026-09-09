@@ -505,9 +505,12 @@ BPBBLK_SPC_SHIFT:   equ     13          ; 1 byte
 BPBBLK_ROOT_ENTS:   equ     14          ; 2 bytes
 BPBBLK_NUM_FATS:    equ     16          ; 1 byte
 BPBBLK_SPF:         equ     17          ; 2 bytes
-BPBBLK_MAX_CLUST:   equ     19          ; 2 bytes
-BPBBLK_FAT_CSEC:    equ     21          ; 2 bytes
-BPBBLK_LEN:         equ     23          ; total block size
+BPBBLK_MAX_CLUST:      equ     19             ; 2 bytes
+BPBBLK_DEV:            equ     21             ; 1 byte -- block device UNIT number
+                    ; (0-7) this partition lives on, passed to
+                    ; the BIOS in R8.1 on every f_ideread /
+                    ; f_idewrite. See _set_lba_dev (fat.asm).
+BPBBLK_LEN:            equ     22             ; total block size
 
 ; DRIVE_COUNT: number of possible drives (C:/D:/E:/F:), i.e. the size
 ; of drive_present/drive_bpb_table/drive_cur_dir in kernel.asm and the

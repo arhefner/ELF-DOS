@@ -644,10 +644,11 @@ boot_bpb_off_done:
             str         rf                  ; drive_present[idx] = 0
 
             mov         rf,boot_fat_lba
-            ldi         20                  ; boot_fat_lba..boot_fat_csec,
-                                            ; contiguous, 20 bytes (see
+            ldi         18                  ; boot_fat_lba..boot_max_clust,
+                                            ; contiguous, 18 bytes (see
                                             ; the scratch declarations
-                                            ; below)
+                                            ; below). Was 20 while
+                                            ; boot_fat_csec still existed.
             plo         rc
 boot_absent_zero:
             ldi         0
@@ -872,13 +873,6 @@ boot_spc_done:
             glo         r7
             str         rf
 
-; ---- Phase 1, Step 8: fat_csec = $FFFF (invalidate) ----
-            mov         rf,boot_fat_csec
-            ldi         $ff
-            str         rf
-            inc         rf
-            str         rf
-
 ;--------------------------------------------------------------
 ; Phase 2: copy every field computed above into drive_bpb_table[idx]
 ; -- boot_bpb_base was already set to that entry's real address by
@@ -1033,18 +1027,25 @@ boot_drive_copy:
             ldn         ra
             str         rf
 
-            ; fat_csec (2 bytes)
+            ; bpb_dev (1 byte) -- the block device this partition lives
+            ; on. Always 0 here: every BIOS this runs on boots from unit
+            ; 0 (MiniROM's own anyboot zeroes R7/R8.0 and never touches
+            ; R8.1), and krnboot only ever scans the device it was
+            ; itself loaded from. MOUNT is what sets a nonzero unit.
+            ;
+            ; Written explicitly rather than left to the zero-filled
+            ; image: _switch_drive copies this into the active block and
+            ; _set_lba_dev feeds it to the BIOS on EVERY disk access, so
+            ; a garbage value here would misdirect every read and write
+            ; on the system. Too load-bearing to rest on the linker's
+            ; gap-fill behaviour.
             mov         rd,boot_bpb_base
             lda         rd
             phi         rf
             ldn         rd
             plo         rf
-            add16       rf,BPBBLK_FAT_CSEC
-            mov         ra,boot_fat_csec
-            lda         ra
-            str         rf
-            inc         rf
-            ldn         ra
+            add16       rf,BPBBLK_DEV
+            ldi         0
             str         rf
 
 ; ---- advance to the next drive; loop while idx < DRIVE_COUNT ----
@@ -1300,7 +1301,6 @@ boot_root_ents:     dw      0
 boot_num_fats:      db      0
 boot_spf:           dw      0
 boot_max_clust:     dw      0
-boot_fat_csec:      dw      0
 boot_bpb_base:      dw      0
 boot_drive_idx:     db      0           ; loop counter, 0..DRIVE_COUNT-1
 boot_drive_base:    dw      0           ; DRIVE_DATA_PTR's resolved

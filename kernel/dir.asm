@@ -42,6 +42,7 @@
 
 ; cross-file references
             extrn   dir_buf
+            extrn   _set_lba_dev
             extrn   fat_get
             extrn   bpb_spc
             extrn   bpb_spc_shift
@@ -258,8 +259,7 @@
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            call    _set_lba_dev      ; R8.1 = block device unit
 
             mov     rf, dir_buf
             call    f_ideread           ; DF = 0/1
@@ -619,8 +619,7 @@ dns_root_ok:
             phi     r7
             lda     rf                  ; D = bits  7-0
             plo     r7
-            ldi     0
-            phi     r8                  ; R8.1 = 0
+            call    _set_lba_dev      ; R8.1 = block device unit
 
             ; add dir_sect (single byte, carry into R7.1 and R8.0)
             glo     rc                  ; D = dir_sect
@@ -856,8 +855,7 @@ clba_done:
             adc                         ; R8.0 += bpb_data_lba.hi + DF
             plo     r8
 
-            ldi     0
-            phi     r8                  ; R8.1 = 0 (drive/head)
+            call    _set_lba_dev      ; R8.1 = block device unit
             rtn
 
 ;==================================================================

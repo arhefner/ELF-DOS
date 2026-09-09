@@ -1,8 +1,15 @@
 ;
 ; mount.asm - attach an MBR partition to a drive letter at runtime
 ;
-; MOUNT                       list the current drive-letter mapping
-; MOUNT <partition> <letter>  mount MBR partition 1-4 as C:/D:/E:/F:
+; MOUNT                              list the current drive mapping
+; MOUNT <partition> <letter>         mount MBR partition 1-4 as C:-F:
+; MOUNT <unit> <partition> <letter>  ... from a specific block device
+;
+; The unit is a BIOS block-device number, 0-7. It is recorded in the
+; drive's BPB (BPBBLK_DEV) at mount time and used for every subsequent
+; access to that drive -- see _set_lba_dev in kernel/fat.asm. Omitting
+; it means unit 0, which is the boot device and the only one a
+; single-device BIOS has.
 ;
 ; Replaces (at runtime) the fixed mapping boot/krnboot.asm's own
 ; partition-scan loop sets up at boot, where MBR entries 0-3 always
@@ -93,17 +100,57 @@ start:
             smi     2
             lbnf    mnt_do_list
 
-            ; argc must be exactly 3 for a mount
+            ; Two accepted forms, distinguished by argc:
+            ;   MOUNT <partition> <letter>          (argc 3) unit 0
+            ;   MOUNT <unit> <partition> <letter>   (argc 4)
+            ; The short form is the common case on a single-device
+            ; machine and is the syntax that shipped first; the long
+            ; form names a block device explicitly.
             mov     rf, mnt_argc
             ldn     rf
             smi     3
+            lbz     mnt_form_short
+            mov     rf, mnt_argc
+            ldn     rf
+            smi     4
             lbnz    mnt_usage
 
+            ; long form: argv[1] = unit, so the partition and letter
+            ; shift one place right
+            ldi     1
+            call    mnt_argv_at             ; RF = argv[1]
+            lda     rf
+            smi     '0'
+            lbnf    mnt_bad_unit
+            plo     r9                      ; R9.0 = unit
+            ldn     rf
+            lbnz    mnt_bad_unit            ; more than one character
+            glo     r9
+            smi     8
+            lbdf    mnt_bad_unit            ; only units 0-7 exist: the
+                                            ; BIOS masks R8.1 and rejects
+                                            ; anything >= 8
+
+            mov     rf, mnt_unit
+            glo     r9
+            str     rf
+            mov     rf, mnt_argbase
+            ldi     2
+            str     rf                      ; partition is argv[2]
+            lbr     mnt_do_mount
+
+mnt_form_short:
+            mov     rf, mnt_unit
+            ldi     0
+            str     rf                      ; default device
+            mov     rf, mnt_argbase
+            ldi     1
+            str     rf                      ; partition is argv[1]
             lbr     mnt_do_mount
 
 mnt_usage:
             call    K_INMSG
-            db      "Usage: MOUNT [<partition 1-4> <drive letter>]",13,10,0
+            db      "Usage: MOUNT [[<unit 0-7>] <partition 1-4> <drive letter>]",13,10,0
             ldi     1
             rtn
 
@@ -112,7 +159,7 @@ mnt_usage:
 ;==================================================================
 mnt_do_list:
             call    K_INMSG
-            db      "Drive  Partition start LBA",13,10,0
+            db      "Drive  Unit  Partition start LBA",13,10,0
 
             mov     rf, mnt_i
             ldi     0
@@ -136,10 +183,20 @@ mnt_list_loop:
             ldn     rf
             lbz     mnt_list_absent
 
-            ; --- present: print this drive's part1_lba ---
+            ; --- present: unit, then part1_lba ---
             mov     rf, mnt_i
             ldn     rf
             call    mnt_entry_addr          ; RF = &drive_bpb_table[i]
+            add16   rf, BPBBLK_DEV
+            ldn     rf
+            adi     '0'
+            call    K_TYPE
+            call    K_INMSG
+            db      "     ",0
+
+            mov     rf, mnt_i
+            ldn     rf
+            call    mnt_entry_addr
             add16   rf, BPBBLK_PART1_LBA
             call    mnt_get_lba             ; R7:R8.0 = LBA, R8.1 = 0
 
@@ -163,7 +220,7 @@ mnt_list_loop:
 
 mnt_list_absent:
             call    K_INMSG
-            db      "(not mounted)",13,10,0
+            db      "-     (not mounted)",13,10,0
 
 mnt_list_next:
             mov     rf, mnt_i
@@ -180,9 +237,10 @@ mnt_list_next:
 ; Mount mode -- MOUNT <partition> <letter>
 ;==================================================================
 mnt_do_mount:
-            ; ---- parse argv[1] = partition number 1..DRIVE_COUNT ----
-            ldi     1
-            call    mnt_argv_at             ; RF = argv[1]
+            ; ---- parse the partition number, 1..DRIVE_COUNT ----
+            mov     rf, mnt_argbase
+            ldn     rf
+            call    mnt_argv_at
             lda     rf
             smi     '1'
             lbnf    mnt_bad_part            ; below '1'
@@ -198,9 +256,11 @@ mnt_do_mount:
             glo     r9
             str     rf                      ; mnt_part = MBR entry index 0-3
 
-            ; ---- parse argv[2] = drive letter ----
-            ldi     2
-            call    mnt_argv_at             ; RF = argv[2]
+            ; ---- parse the drive letter (one past the partition) ----
+            mov     rf, mnt_argbase
+            ldn     rf
+            adi     1
+            call    mnt_argv_at
             lda     rf
             ani     $DF                     ; uppercase-fold. Safe for any
                                             ; range inside 'A'-'Z': the only
@@ -238,8 +298,15 @@ mnt_drive_ok:
             ldi     0
             plo     r7
             phi     r7
-            plo     r8
-            phi     r8                      ; LBA 0
+            plo     r8                      ; LBA 0
+            mov     rf, mnt_unit
+            ldn     rf
+            phi     r8                      ; R8.1 = block device unit.
+                                            ; K_SECREAD is a bare
+                                            ; passthrough to f_ideread, so
+                                            ; this reaches the BIOS
+                                            ; verbatim -- no kernel call
+                                            ; is needed to pick a device.
             mov     rf, mnt_sector
             call    K_SECREAD
             lbdf    mnt_mbr_err
@@ -313,7 +380,10 @@ mnt_have_start:
             ; ---- read the partition's VBR (R7:R8 still hold its LBA) ----
             mov     rf, mnt_bpb
             add16   rf, BPBBLK_PART1_LBA
-            call    mnt_get_lba
+            call    mnt_get_lba             ; sets R8.1 = 0 ...
+            mov     rf, mnt_unit
+            ldn     rf
+            phi     r8                      ; ... so override it after
             mov     rf, mnt_sector
             call    K_SECREAD
             lbdf    mnt_vbr_err
@@ -474,16 +544,21 @@ mnt_spc_done:
             add16   rf, BPBBLK_DATA_LBA
             call    mnt_put_lba
 
-            ; ---- Step 8: fat_csec = $FFFF (cache invalid) ----
-            ; _switch_drive overwrites this on every switch anyway and
-            ; documents that it never trusts the copied value, but the
-            ; field is part of the block, so fill it the same way
-            ; krnboot does rather than leaving it undefined.
+            ; ---- Step 8: bpb_dev = the unit this partition is on ----
+            ; This is what makes the drive read and write on the right
+            ; block device: _switch_drive copies it into the active BPB
+            ; and _set_lba_dev (kernel/fat.asm) hands it to the BIOS in
+            ; R8.1 on every access from then on.
+            ;
+            ; krnboot's own scan writes 0 here instead, because it only
+            ; ever sees the device it was booted from. (It used to write
+            ; fat_csec = $FFFF at this offset; that field left the copied
+            ; block when bpb_dev was added, since _switch_drive always
+            ; overwrote the copied value anyway.)
             mov     rf, mnt_bpb
-            add16   rf, BPBBLK_FAT_CSEC
-            ldi     $FF
-            str     rf
-            inc     rf
+            add16   rf, BPBBLK_DEV
+            mov     rd, mnt_unit
+            ldn     rd
             str     rf
 
 ;==================================================================
@@ -568,6 +643,12 @@ mnt_bad_part:
 mnt_bad_drive:
             call    K_INMSG
             db      "Drive must be C, D, E or F.",13,10,0
+            ldi     1
+            rtn
+
+mnt_bad_unit:
+            call    K_INMSG
+            db      "Unit must be 0-7.",13,10,0
             ldi     1
             rtn
 
@@ -767,6 +848,8 @@ mnt_put16:
 ;==================================================================
 mnt_argv:       dw      0           ; caller's argv table pointer
 mnt_argc:       db      0
+mnt_unit:       db      0           ; block device unit 0-7
+mnt_argbase:    db      1           ; argv index of <partition>
 mnt_part:       db      0           ; MBR entry index 0-3
 mnt_drive:      db      0           ; target drive index 0-3
 mnt_i:          db      0           ; listing-mode loop counter

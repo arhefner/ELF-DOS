@@ -36,6 +36,7 @@
 #include    include/kernel.inc
 
             extrn   fat_csec
+            extrn   _set_lba_dev
             extrn   fat_dirty
             extrn   fat_cache
             extrn   bpb_fat_lba
@@ -57,6 +58,7 @@
             extrn   fls_cluster
             extrn   ffl_sector_idx
             extrn   fat_next_free
+            extrn   bpb_dev
 
 ; ----------------------------------------------------------------
 ; fat_init: reset cache state at boot
@@ -78,6 +80,52 @@
             ldi     2
             str     rf                  ; fat_next_free = 2
 
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _set_lba_dev: set R8.1 to the active drive's block-device unit.
+;
+; Every LBA this kernel hands to f_ideread/f_idewrite is 24 bits, in
+; R7.0/R7.1/R8.0. R8.1 is not part of the address: BIOSes that support
+; more than one block device read a unit number out of it (MiniROM
+; masks it with 31 and rejects >= 8, indexing an 8-entry device map),
+; and single-device BIOSes ignore or mask away whatever is there. Every
+; call site used to hardcode "ldi 0 / phi r8" for that reason; this
+; supplies bpb_dev instead, so a partition mounted from a second device
+; reads and writes on that device.
+;
+; On a single-device machine bpb_dev is 0 on every drive, and the bytes
+; sent to the BIOS are identical to what they were before -- so this is
+; a no-op there rather than a compatibility risk.
+;
+; Deliberately a call, not inline: "call _set_lba_dev" is 3 bytes, the
+; same as the "ldi 0 / phi r8" it replaces, so all seven call sites cost
+; nothing and only this body is new.
+;
+; RF is saved and restored rather than used freely. It is dead at all
+; seven current call sites, so 9 bytes could be saved by clobbering it
+; -- but one of them is inside _load_lba24, whose own published contract
+; is "RF advanced by 3", and this project has been bitten more than once
+; by a callee quietly invalidating exactly the register a distant caller
+; was relying on. Being transparent to everything but R8.1 means no call
+; site, now or later, has to reason about it at all.
+;
+; Args:    none (reads the active BPB's bpb_dev)
+; Returns: R8.1 = unit number
+; Modifies: D only. RF is restored; DF is untouched (PUSH/POP expand to
+;           STXD and IRX/LDXA/PLO/LDX/PHI, none of which write DF), which
+;           matters because callers build LBAs with add/adci carry chains
+;           on either side of this call.
+; ----------------------------------------------------------------
+            proc    _set_lba_dev
+
+            push    rf
+            mov     rf, bpb_dev
+            ldn     rf
+            phi     r8
+            pop     rf
             rtn
 
             endp
@@ -169,8 +217,7 @@ fls_no_flush:
             phi     r7
             lda     rf                  ; D = bits  7-0
             plo     r7
-            ldi     0
-            phi     r8                  ; R8.1 = 0 (drive/head)
+            call    _set_lba_dev      ; R8.1 = block device unit
 
             mov     rf, fls_cluster
             ldn     rf                  ; D = sector index
@@ -513,8 +560,7 @@ flush_copy_loop:
             phi     r7
             lda     rf                  ; D = bits 7-0
             plo     r7
-            ldi     0
-            phi     r8                  ; R8.1 = 0 (drive/head)
+            call    _set_lba_dev      ; R8.1 = block device unit
 
             ; add (copy_index * bpb_spf), by adding bpb_spf that many times
             glo     rc
@@ -589,16 +635,19 @@ flush_err:
 ; switch design was chosen over indexing drive_bpb_table directly:
 ; keeps ~110 existing BPB-field call sites completely untouched.
 ;
-; The FAT cache (fat_cache/fat_csec/fat_dirty) is NOT meaningfully
-; tracked per-drive in drive_bpb_table -- only one drive's FAT sector
-; is ever cached in RAM at a time, so a real switch always flushes
-; the OUTGOING drive's dirty cache first (if any, since it depends on
-; the BPB fields this routine is about to overwrite) and forces the
-; incoming drive to start with an empty cache (fat_csec = $FFFF),
-; regardless of whatever stale bytes happen to sit in that drive's own
-; drive_bpb_table entry's BPBBLK_FAT_CSEC field (copied along with the
-; rest of the 23-byte block for layout uniformity, then immediately
-; overwritten here -- never trusted).
+; The FAT cache (fat_cache/fat_csec/fat_dirty) is NOT tracked per-drive
+; at all -- only one drive's FAT sector is ever cached in RAM, so a real
+; switch always flushes the OUTGOING drive's dirty cache first (if any,
+; since it depends on the BPB fields this routine is about to overwrite)
+; and forces the incoming drive to start with an empty cache
+; (fat_csec = $FFFF).
+;
+; fat_csec used to sit inside the copied block, at what is now
+; bpb_dev's offset, purely for layout uniformity -- and was overwritten
+; here immediately every time, because a stored value was never
+; trustworthy. It was moved out of the block entirely (BPBBLK_LEN 23 ->
+; 22) when bpb_dev was added: 2 bytes saved per drive, one pointless
+; copy removed, and the explicit $FFFF store below is unchanged.
 ;
 ; Args:    D = target drive index (0-3, 0=C..3=F)
 ; Returns: DF = 0 on success (drive now active, or already was);
@@ -652,7 +701,7 @@ swd_have_offset:
 
             mov     rb, part1_lba       ; RB = active BPB block start
             ldi     BPBBLK_LEN
-            plo     rc                  ; RC.0 = 23 bytes to copy
+            plo     rc                  ; RC.0 = BPBBLK_LEN bytes to copy
 swd_copy_loop:
             lda     rf
             str     rb
