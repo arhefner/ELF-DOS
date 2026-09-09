@@ -1685,6 +1685,15 @@ ls_trycols_loop:
             add16   rd, rc
             dec     rd                  ; RD = ls_count+candidate-1
             call    ls_div              ; RD = RD / RC (RC preserved)
+
+            ; num_rows also stays in RA, and ls_count goes into RC, for
+            ; the whole column scan below: ls_colrow_loop makes NO CALLS
+            ; (verified), so registers are safe there and every value it
+            ; needs can live in one instead of being re-fetched from
+            ; memory on every single entry. RC's previous contents (the
+            ; ls_div divisor) are dead here -- ls_trycol_loop reloads the
+            ; candidate from ls_trycols itself.
+            mov     ra, rd              ; RA = num_rows (scan bound)
             mov     rb, ls_numrows
             ghi     rd
             str     rb
@@ -1705,6 +1714,12 @@ ls_trycols_loop:
             inc     rb
             ldi     0
             str     rb                  ; ls_colbase_i = 0 (column idx)
+
+            mov     rf, ls_count
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = ls_count (scan bound)
 
             ldi     0
             phi     r8
@@ -1744,39 +1759,41 @@ ls_trycol_loop:
             glo     r8
             str     rf                  ; ls_colbase[colbase_i] = R8
 
-            mov     rb, ls_colmax
             ldi     0
-            str     rb                  ; ls_colmax = 0
-
-            mov     rb, ls_colrow
-            ldi     0
-            str     rb
-            inc     rb
-            ldi     0
-            str     rb                  ; ls_colrow = 0
+            plo     rb                  ; RB.0 = colmax = 0 (a register
+                                        ; now, not ls_colmax in memory)
+            plo     rd
+            phi     rd                  ; RD = colrow = 0 (likewise --
+                                        ; ls_colrow was only ever read
+                                        ; by this one loop)
 
 ls_colrow_loop:
-            mov     rf, ls_colrow
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = colrow
-            mov     rf, ls_numrows
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = num_rows
+            ; Registers held across this loop, all established by the
+            ; two loops above: RA = num_rows, RC = ls_count, R8 = this
+            ; column's base index, RD = colrow, RB.0 = colmax. R7/R9/RF
+            ; are scratch. Nothing here calls anything, so none of that
+            ; can be clobbered behind our backs -- the same reasoning
+            ; progs/shell.asm's own tokenizer relies on.
+            ;
+            ; This loop runs once per entry per candidate column count,
+            ; which a run02 instruction profile (2026-09-08) measured as
+            ; the single hottest thing ls does. It used to re-fetch
+            ; colrow, num_rows, ls_count and colmax from memory on every
+            ; iteration -- about 30 instructions of pure bookkeeping per
+            ; entry examined.
 
-            glo     r9
+            ; colrow >= num_rows?  (RD vs RA)
+            glo     ra
             str     r2
             glo     rd
             sm
-            ghi     r9
+            ghi     ra
             str     r2
             ghi     rd
             smb
-            lbdf    ls_colrow_done      ; DF=1: colrow >= num_rows
+            lbdf    ls_colrow_done
 
+            ; idx = column base + colrow  -> R9
             glo     r8
             str     r2
             glo     rd
@@ -1786,65 +1803,47 @@ ls_colrow_loop:
             str     r2
             ghi     rd
             adc
-            phi     r9                  ; R9 = idx (col base + colrow)
+            phi     r9
 
-            mov     rf, ls_count
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = ls_count
-            glo     rd
+            ; idx >= ls_count?  (R9 vs RC) -- a short final column
+            glo     rc
             str     r2
             glo     r9
             sm
-            ghi     rd
+            ghi     rc
             str     r2
             ghi     r9
             smb
-            lbdf    ls_colrow_next      ; DF=1: idx >= ls_count --
-                                        ; short last column, skip
+            lbdf    ls_colrow_next
 
             shl16   r9                  ; R9 = idx * 2
             mov     rf, ls_ptrs
             add16   rf, r9              ; RF = &ls_ptrs[idx]
             lda     rf
-            phi     rd
+            phi     r7
             ldn     rf
-            plo     rd                  ; RD = entry struct address
-            add16   rd, LSENT_NAMELEN
-            mov     rf, rd
-            ldn     rf                  ; D = this entry's namelen
-            plo     r9                  ; stash it (R9 free -- idx no
-                                        ; longer needed)
+            plo     r7                  ; R7 = entry struct address
+                                        ; (R7, not RD -- RD is colrow now)
+            mov     rf, r7
+            add16   rf, LSENT_NAMELEN
+            ldn     rf                  ; D = this entry's display length
+            plo     r9                  ; stash it
 
-            mov     rb, ls_colmax
-            ldn     rb
-            str     r2                  ; M(R2) = colmax
+            glo     rb                  ; D = colmax
+            str     r2
             glo     r9                  ; D = namelen
             sm                          ; DF=1 iff namelen >= colmax
             lbnf    ls_colrow_next      ; smaller: leave colmax alone
-            mov     rb, ls_colmax
             glo     r9
-            str     rb                  ; colmax = namelen
+            plo     rb                  ; colmax = namelen
 
 ls_colrow_next:
-            mov     rf, ls_colrow
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            inc     rd                  ; +1 (2026-08-01 size-reduction pass: INC is 1 byte, no D-clobber, vs ADD16's 8-byte macro -- DF not needed here)
-            mov     rf, ls_colrow
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf                  ; colrow++
+            inc     rd                  ; colrow++ (no D clobber, and
+                                        ; DF is not wanted here)
             lbr     ls_colrow_loop
 
 ls_colrow_done:
-            mov     rf, ls_colmax
-            ldn     rf
+            glo     rb                  ; D = colmax (register, not memory)
             adi     2
             plo     r9                  ; R9.0 = col_width (colmax is
                                         ; at most LS_NAME_CAP=127, +2
@@ -3544,9 +3543,9 @@ ls_totalwidth:  dw      0           ; running summed column width for
                                     ; the current candidate
 ls_min_dlen:            db      LS_MIN_DLEN_NONE  ; smallest display
                                     ; length seen (see ls_col0_ok)
-ls_colmax:      db      0           ; running max namelen for the
-                                    ; column currently being scanned
-ls_colrow:      dw      0           ; row index within that column scan
+; (ls_colmax and ls_colrow used to live here. Both are now held in
+;  registers for the whole of ls_colrow_loop -- see its header -- and
+;  neither was ever read anywhere else, so the memory is gone.)
 
 ls_curentry:    dw      0
 ls_sizebuf:     ds      6           ; human-readable size scratch
