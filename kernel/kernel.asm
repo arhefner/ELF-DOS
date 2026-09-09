@@ -80,6 +80,7 @@
             extrn   kernel_setdrive
             extrn   kernel_getshelldrive
             extrn   kernel_get_errorlevel
+            extrn   kernel_drive_invalidate
             extrn   kernel_shell_init
 
 ; Kernel version -- single source of truth for the header bytes below,
@@ -322,7 +323,14 @@ k_file_touch:   lbr     file_touch          ; $0185
 ; the full design. First real consumer: lib/modload.asm.
 k_himem_reserve: lbr    kernel_himem_reserve ; $0188
 k_himem_release: lbr    kernel_himem_release ; $018B
-                ; next free jump-table address: $018E
+
+; K_DRIVE_INVALIDATE: drop cached kernel state for one drive so its
+; drive_bpb_table entry can be replaced (MOUNT) or its presence flag
+; cleared (UMOUNT). Callers MUST invoke this BEFORE making that change
+; -- see kernel_drive_invalidate's own header comment in kinit.asm for
+; the ordering contract and why getting it backwards corrupts data.
+k_drive_invalidate: lbr kernel_drive_invalidate ; $018E
+                ; next free jump-table address: $0191
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

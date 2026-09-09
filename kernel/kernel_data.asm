@@ -123,7 +123,9 @@ mem_base:       dw      0
 ; cluster, independent of which drive is active -- classic DOS
 ; semantics (kernel_setcurdir above never touches cur_drive). Zeroed
 ; (root) at boot by kernel_init, not by krnboot -- this is session
-; state, not disk geometry.
+; state, not disk geometry. Also written from userland by
+; progs/mount.asm (a freshly mounted drive starts at its own root) via
+; DRIVE_CUR_DIR_OFF -- see kernel_api.inc.
 ;
 ; cur_drive: which drive a path with no "X:" prefix resolves against,
 ; and what the shell prompt/PWD show. Only ever changed by
@@ -131,7 +133,10 @@ mem_base:       dw      0
 ;
 ; active_bpb_drive: _switch_drive's own bookkeeping (which drive's
 ; block is currently copied into the active BPB fields) -- not meant
-; to be read by anything else. $FF = none yet, forcing a real switch
+; to be read by anything else, and deliberately NOT reachable from
+; userland: progs/mount.asm and progs/umount.asm go through
+; K_DRIVE_INVALIDATE instead, which resets this AND performs the FAT
+; flush that resetting it alone would skip. $FF = none yet, forcing a real switch
 ; on the first path_resolve call of the session; relies on the static
 ; kernel image itself encoding $FF here (same convention fat_csec's
 ; own "dw $FFFF" already uses), not on kernel_init.

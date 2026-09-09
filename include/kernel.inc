@@ -513,6 +513,14 @@ BPBBLK_LEN:         equ     23          ; total block size
 ; of drive_present/drive_bpb_table/drive_cur_dir in kernel.asm and the
 ; bound of boot/krnboot.asm's own partition-scan loop (see
 ; kernel_api.inc's DRIVE_DATA_PTR comment for the boot-time mechanism).
+;
+; As of 2026-09-09 those tables are also written from USERLAND, by
+; progs/mount.asm and progs/umount.asm, through the same
+; DRIVE_DATA_PTR + published-offset mechanism -- so the contiguity
+; requirement documented in kernel_data.asm now has consumers outside
+; the kernel and krnboot. Any change to the order or size of
+; drive_present/drive_bpb_table/shell_*/drive_cur_dir/cur_drive
+; requires rebuilding and redeploying bin/ as well as the kernel.
 DRIVE_COUNT:        equ     4
 
 ; ----------------------------------------------------------------

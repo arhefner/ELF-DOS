@@ -563,10 +563,21 @@ BPB_DATA_PTR:      equ  $0166      ; 2-byte pointer to the block's
 ; contiguous) to shell_drive/shell_elba/shell_eoff -- boot-discovered
 ; facts in the same spirit as drive_present, populated once by
 ; K_SHELL_INIT (see below) rather than the partition-scan loop itself,
-; but reusing this same pointer rather than adding a second one. Does
-; NOT reach drive_cur_dir/cur_drive/active_bpb_drive -- those are
-; session state, not boot-time facts, and are initialized by
-; kernel_init instead (see kernel.asm).
+; but reusing this same pointer rather than adding a second one.
+;
+; The reach was extended again (2026-09-09, multi-drive MOUNT/UMOUNT)
+; over drive_cur_dir and cur_drive, which are contiguous right after
+; shell_eoff. These are session state rather than boot-time facts --
+; kernel_init initializes them, not the partition scan -- but MOUNT has
+; to reset a freshly-mounted drive's current directory to its root, and
+; UMOUNT has to move cur_drive off a drive it is about to remove, so
+; both need reaching from userland. See DRIVE_CUR_DIR_OFF/CUR_DRIVE_OFF
+; below.
+;
+; active_bpb_drive sits one byte past cur_drive and is deliberately NOT
+; published. Userland must go through K_DRIVE_INVALIDATE instead:
+; poking active_bpb_drive directly would skip the FAT-cache flush that
+; call exists to perform, silently losing a dirty FAT sector.
 DRIVE_COUNT:       equ  4          ; C:, D:, E:, F:
 DRIVE_DATA_PTR:    equ  $0168      ; 2-byte pointer to drive_present's
                                     ; real address
@@ -580,6 +591,19 @@ SHELL_DATA_OFF: equ     DRIVE_COUNT + DRIVE_COUNT*BPBBLK_LEN
                                                 ; shell_eoff) starts
                                                 ; this many bytes after
                                                 ; DRIVE_DATA_PTR's target
+
+; DRIVE_CUR_DIR_OFF/CUR_DRIVE_OFF: two more DRIVE_DATA_PTR-relative
+; offsets, for MOUNT/UMOUNT (see the note above). drive_cur_dir is
+; DRIVE_COUNT 2-byte big-endian cluster numbers, one per drive, 0
+; meaning that drive's root; cur_drive is a single byte naming the
+; drive an unprefixed path resolves against.
+;
+; Prefer K_SETDRIVE over writing cur_drive directly -- it validates
+; drive_present first. Writing it raw is only appropriate when the
+; validation would be wrong for the caller's purpose, and no current
+; caller needs that.
+DRIVE_CUR_DIR_OFF: equ  SHELL_DATA_OFF + 6      ; DRIVE_COUNT*2 bytes
+CUR_DRIVE_OFF:     equ  DRIVE_CUR_DIR_OFF + DRIVE_COUNT*2   ; 1 byte
 
 ; K_BATCH_START/K_BATCH_READLINE: minimal flat (non-nested) batch
 ; script execution (2026-07-14). The shell (progs/shell.asm) is
@@ -681,6 +705,26 @@ K_HIMEM_RESERVE:    equ     $0188       ; -> kernel_himem_reserve
 ;   Returns: nothing
 K_HIMEM_RELEASE:    equ     $018B       ; -> kernel_himem_release
 
+; K_DRIVE_INVALIDATE: drop cached kernel state for one drive, so its
+; drive_bpb_table entry can be replaced (MOUNT) or its drive_present
+; flag cleared (UMOUNT), added 2026-09-09 for multi-drive support.
+;
+; Does exactly two things, both of which userland cannot: flushes the
+; FAT cache if the named drive is the currently active one, and forces
+; the next _switch_drive to reload from drive_bpb_table rather than
+; taking its already-active no-op path.
+;
+; *** ORDERING CONTRACT ***  Call this BEFORE you overwrite
+; drive_bpb_table[i] or clear drive_present[i], never after. The flush
+; derives its LBAs from the active BPB fields, so running it against a
+; table entry that has already been replaced writes a cached FAT sector
+; to an address computed from the NEW partition's geometry -- silent
+; cross-partition corruption rather than a reported error.
+;
+;   Args:    D = drive index (0..DRIVE_COUNT-1)
+;   Returns: DF = 0 always
+K_DRIVE_INVALIDATE: equ     $018E       ; -> kernel_drive_invalidate
+
 ; GLOB_BUF_LEN REMOVED along with K_GLOB_RESERVE above (dead code,
 ; 2026-08-26) -- its only use was sizing that reservation.
 
@@ -752,7 +796,10 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $0197 (this comment was stale at
-; $0179 before 2026-07-27 -- several entries had been appended above
-; without updating it; kernel/kernel.asm's own trailing comment, right
-; after the jump table itself, is the actual source of truth)
+; next free jump-table slot address: $0191
+;
+; This comment has been stale in BOTH directions before ($0179 until
+; 2026-07-27, then $0197 until 2026-09-09) while kernel.asm was right
+; each time. kernel/kernel.asm's own trailing comment, immediately
+; after the jump table itself, is the actual source of truth -- check
+; there, not here, and update this one when you append a slot.

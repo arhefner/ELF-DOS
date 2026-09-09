@@ -34,6 +34,8 @@
             extrn   cur_drive
             extrn   autoexec_path
             extrn   _switch_drive
+            extrn   fat_flush
+            extrn   active_bpb_drive
             extrn   shell_drive
             extrn   shell_elba
             extrn   shell_eoff
@@ -520,6 +522,73 @@ ksd_absent:
             proc    kernel_get_errorlevel
             mov     rf, RUN_ERRORLEVEL
             ldn     rf
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; kernel_drive_invalidate: drop any cached kernel state that refers to
+; a given drive, so its drive_bpb_table entry can be safely replaced
+; (MOUNT) or its drive_present flag cleared (UMOUNT).
+;
+; Two jobs, and only these two -- everything else MOUNT/UMOUNT need
+; they can already do for themselves through DRIVE_DATA_PTR:
+;   1. If the drive is the currently ACTIVE one, flush its dirty FAT
+;      sector to disk. This must happen while the active BPB block
+;      still describes the OLD partition, because fat_flush derives
+;      its LBAs from bpb_fat_lba/bpb_spf/bpb_num_fats.
+;   2. Force active_bpb_drive to $FF, so the next _switch_drive does a
+;      real reload from drive_bpb_table instead of its no-op fast path.
+;      Without this a MOUNT onto the active drive would be invisible.
+;
+; *** ORDERING CONTRACT -- READ BEFORE CHANGING A CALLER ***
+; Call this BEFORE overwriting drive_bpb_table[i] or clearing
+; drive_present[i]. Calling it afterwards would flush the cached FAT
+; sector to an LBA computed from the NEW partition's geometry, which is
+; silent cross-partition corruption, not a recoverable error.
+;
+; A drive that is not currently active has nothing cached (the FAT
+; cache only ever holds one drive's sector, and _switch_drive already
+; flushed the outgoing drive on its way out), so the whole routine is
+; a cheap no-op in that case.
+;
+; Args:    D = drive index (0..DRIVE_COUNT-1)
+; Returns: DF = 0 always (a flush failure is not reported -- see below)
+; Modifies: D, R7, R8, RB, RC, RD, RF -- the union of this routine's
+;           own scratch (RC, RF) and fat_flush's documented clobber
+;           list (R7, R8, RB, RC, RD, RF). Spelled out rather than
+;           deferred to fat_flush, so a caller does not have to chase
+;           it (gotcha #10).
+;------------------------------------------------------------------
+            endp
+
+            proc    kernel_drive_invalidate
+            plo     rc                  ; stash the index before any mov
+                                        ; can clobber D (gotcha #4)
+            mov     rf, active_bpb_drive
+            ldn     rf
+            str     r2                  ; M(X) = currently active drive
+            glo     rc
+            sm                          ; D = target - active
+            lbnz    kdi_done            ; not the active drive: nothing
+                                        ; of this drive's is cached
+
+            call    fat_flush           ; uses the OLD (still correct)
+                                        ; active BPB fields -- see the
+                                        ; ordering contract above. Its
+                                        ; DF is deliberately ignored:
+                                        ; there is nothing useful a
+                                        ; caller could do about a failed
+                                        ; flush at this point, and
+                                        ; reporting it would leave the
+                                        ; stale active_bpb_drive in
+                                        ; place, which is worse.
+
+            mov     rf, active_bpb_drive
+            ldi     $FF
+            str     rf                  ; force a real reload on the
+                                        ; next _switch_drive
+
+kdi_done:
             clc
             rtn
 
