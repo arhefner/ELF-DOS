@@ -59,6 +59,7 @@ for %%f in (progs\*.asm) do (
     if /I "!name!"=="attrib"     set "skip=1"
     if /I "!name!"=="stat"       set "skip=1"
     if /I "!name!"=="chkdsk"     set "skip=1"
+    if /I "!name!"=="mount"      set "skip=1"
 
     if not defined skip (
         echo Building !name!...
