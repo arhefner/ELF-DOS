@@ -6651,15 +6651,14 @@ fsk_set_fpos:
 
             ; FCB_FPOS = fsk_target, straight 4-byte copy (2026-07-26,
             ; >64K support -- was low-word-only; both fields share the
-            ; same MSB-first layout, so no reversal needed). RD still
-            ; ends up holding target's low word for the return value
-            ; below, matching this routine's own long-established,
-            ; still-unchanged "RD = low word only" return convention
-            ; (K_FILE_SEEK's own documented contract) -- a caller
-            ; wanting the full 32-bit result has no way to get the high
-            ; word back from this call today; widening the RETURN
-            ; value itself would be a separate, bigger ABI decision,
-            ; out of scope for this pass.
+            ; same MSB-first layout, so no reversal needed). The same
+            ; walk also loads the target into RA:RD for the return
+            ; value: RA takes the high word, RD the low. RD alone was
+            ; the whole answer until 2026-09-08, which left the high
+            ; word unreachable and made a SEEK_END useless for sizing
+            ; a file over 64K -- see this routine's own header for why
+            ; widening it was safe (RA was already declared clobbered,
+            ; so no caller could have depended on it).
             mov     rf, fsk_target      ; RF = source (target)
             ghi     rb
             phi     r8

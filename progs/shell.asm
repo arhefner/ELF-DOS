@@ -2825,8 +2825,8 @@ HISTORY_MAX_LINES:   equ 50
 ; just the tail hist_load would read anyway -- recall never looks
 ; further back than HISTORY_LOAD_BUDGET bytes from the end, so keeping
 ; more than that provides zero recall value, only unbounded growth
-; (and, past ~32KB, silently breaks recall entirely -- see
-; K_FILE_SEEK's own documented range limit in hist_load's comment).
+; (and an unboundedly large file makes every append slower for no
+; benefit).
 ; Deliberately well above HISTORY_LOAD_BUDGET (same ~4x margin as
 ; before the 2026-07-25 budget raise) so compaction doesn't run on
 ; nearly every append.
@@ -3910,22 +3910,17 @@ hl_have_start:
             glo     rd
             str     rf
 
-            ; SEEK_SET(start_offset). KNOWN LIMITATION: K_FILE_SEEK's
-            ; documented offset convention only supports a value that's
-            ; a valid sign-extension of 16 bits (RA=$0000 with bit 15
-            ; clear -- i.e. 0-32767; RA=$FFFF with bit 15 set covers
-            ; negative offsets, not used here). start_offset is always
-            ; a non-negative 16-bit quantity, but once the history file
-            ; grows past ~32KB it can itself exceed 32767, at which
-            ; point this SEEK_SET starts failing K_FILE_SEEK's own
-            ; range check -- lbdf hl_close below treats that exactly
-            ; like "no history this session" (graceful, not a crash),
-            ; so the practical effect is just that recall quietly stops
-            ; working once the file crosses that size, not a bug this
-            ; shell-side code can work around without a kernel change
-            ; to K_FILE_SEEK's own offset convention. Not expected to
-            ; matter for a long time at realistic usage (roughly
-            ; 1500-3000+ typical command lines), but worth knowing.
+            ; SEEK_SET(start_offset), as a 32-bit offset with a zero
+            ; high word. This used to carry a KNOWN LIMITATION note:
+            ; K_FILE_SEEK once accepted only a 16-bit sign-extended
+            ; offset (0-32767), so recall silently stopped working
+            ; once history.dat grew past ~32KB. That limit was removed
+            ; on 2026-07-26 when file positions went fully 32-bit, and
+            ; hist_compact (2026-07-25) caps the file at
+            ; HISTORY_COMPACT_THRESHOLD bytes regardless, so neither
+            ; half of the old concern survives. A failure here is still
+            ; handled gracefully -- lbdf hl_close treats it exactly
+            ; like "no history this session".
             mov     rf, hist_start_offset
             lda     rf
             phi     r9

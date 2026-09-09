@@ -169,6 +169,10 @@ LS_NAME_CAP:    equ     127         ; matches K_DIR_READ's own DIRENT_NAME
 ; worst-case per-slot reservation.
 LS_MAX_ENTRIES: equ     255
 LS_MAX_COLS:    equ     32
+LS_COL_GAP:     equ     2           ; blank columns between columns
+LS_MIN_DLEN_NONE: equ   255         ; ls_min_dlen's "nothing seen yet"
+                                    ; sentinel (no real display length
+                                    ; can reach it: LS_NAME_CAP is 127)
 LS_SCREEN_COLS: equ     80
 
             org     PROG_BASE
@@ -953,6 +957,24 @@ ladd_dlen_nof:
             str     rf                  ; entry->namelen = display len
             inc     rf                  ; RF now at LSENT_QUOTE in dest
 
+            ; Keep the SMALLEST display length seen. ls_print_columnar
+            ; uses it to bound the column-count search from above (see
+            ; its own header): every column costs at least
+            ; min_dlen+LS_COL_GAP, so a candidate above
+            ; screen_cols/(min_dlen+GAP) cannot possibly fit. Costs one
+            ; compare per entry here and saves scanning every entry
+            ; over and over for candidates that were never feasible.
+            mov     rd, ls_min_dlen
+            ldn     rd
+            str     r2
+            glo     r9
+            sm                          ; DF=0 iff dlen < min so far
+            lbdf    ladd_dlen_nomin
+            mov     rd, ls_min_dlen
+            glo     r9
+            str     rd
+ladd_dlen_nomin:
+
             mov     rd, ls_hasquote
             ldn     rd
             str     rf                  ; entry->quote = ls_hasquote
@@ -1567,10 +1589,74 @@ ls_col0_clamp:
             ldi     0
             phi     rd
 ls_col0_ok:
+            ; RD = candidate so far = min(ls_count, LS_MAX_COLS).
+            ;
+            ; Clamp it further to the widest layout that could POSSIBLY
+            ; fit: every column costs at least (smallest display length
+            ; + LS_COL_GAP) and the widths are summed against
+            ; ls_screen_cols, so no candidate above
+            ;     screen_cols / (min_dlen + LS_COL_GAP)
+            ; can ever fit. This can never rule out a feasible layout,
+            ; only ones the search below would have rejected anyway --
+            ; one entry at a time, re-scanning EVERY entry per rejected
+            ; candidate. Measured with a run02 instruction profile
+            ; (2026-09-08): that search was ~63% of ls's entire run
+            ; time on a 60-entry directory, and almost all of it went
+            ; on candidates this one division rules out immediately.
+            ;
+            ; RB carries the candidate across ls_div, whose own header
+            ; documents only RD/R9/D/DF as modified.
+            mov     rf, ls_min_dlen
+            ldn     rf
+            smi     LS_MIN_DLEN_NONE
+            lbz     ls_col0_have        ; still the sentinel: no entries
+                                        ; were added, so there is
+                                        ; nothing to bound. RD stands.
+
+            mov     rb, rd              ; RB = candidate
+
+            mov     rf, ls_min_dlen
+            ldn     rf
+            adi     LS_COL_GAP
+            plo     rc
+            ldi     0
+            phi     rc                  ; RC = min_dlen + gap (nonzero,
+                                        ; and no byte overflow: a real
+                                        ; display length is <=
+                                        ; LS_NAME_CAP+3, well under 253)
+
+            mov     rf, ls_screen_cols
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = screen_cols (dividend)
+            call    ls_div              ; RD = bound
+
+            ghi     rd
+            lbnz    ls_col0_restore     ; bound >= 256: no real constraint
+            glo     rd
+            lbnz    ls_col0_cmp
+            ldi     1
+            plo     rd                  ; a bound of 0 still means 1 column
+            lbr     ls_col0_have
+
+ls_col0_cmp:
+            glo     rd
+            str     r2
+            glo     rb
+            sm                          ; DF=1 iff candidate >= bound
+            lbdf    ls_col0_have        ; take the (smaller) bound in RD
+
+ls_col0_restore:
+            mov     rd, rb              ; candidate was already smaller
+
+ls_col0_have:
             glo     rd
             lbnz    ls_trycols_init
             ldi     1
             plo     rd                  ; candidate == 0: force to 1
+            ldi     0
+            phi     rd
 
 ls_trycols_init:
             mov     rb, ls_trycols
@@ -3456,6 +3542,8 @@ ls_curname:     dw      0
 ls_trycols:     dw      0           ; candidate column count being tried
 ls_totalwidth:  dw      0           ; running summed column width for
                                     ; the current candidate
+ls_min_dlen:            db      LS_MIN_DLEN_NONE  ; smallest display
+                                    ; length seen (see ls_col0_ok)
 ls_colmax:      db      0           ; running max namelen for the
                                     ; column currently being scanned
 ls_colrow:      dw      0           ; row index within that column scan

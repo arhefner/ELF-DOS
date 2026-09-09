@@ -234,9 +234,9 @@ File positions, offsets, and sizes are tracked as full 32-bit values.
   start of the file, 1 = relative to the current position, 2 = relative
   to the end of the file), `RA:R9` = signed 32-bit offset (`RA` = high
   word, `R9` = low word).
-- **Returns:** `DF` = 0 on success, `RD` = the resulting position (low
-  16 bits only - there is no way to retrieve the high 16 bits from this
-  call). `DF` = 1 if the whence value is invalid, the resulting position
+- **Returns:** `DF` = 0 on success, `RA:RD` = the resulting absolute
+  32-bit position (`RA` = high word, `RD` = low word). `DF` = 1 if the
+  whence value is invalid, the resulting position
   would fall outside the file, or an I/O error occurred; the file's
   position is left unchanged in that case.
 
