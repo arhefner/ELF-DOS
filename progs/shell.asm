@@ -21,8 +21,8 @@
 ; fixed RUN_PATH/RUN_ARGC/RUN_ARGV_TABLE addresses, and return -- the
 ; kernel's own run_loop does the actual loading and running, safely,
 ; from kernel memory. A command that doesn't exist anywhere is
-; reported ("File not found.") entirely here, without ever involving
-; run_loop. See kernel.inc's own comment on RUN_PATH/RUN_ARGC/
+; reported ("Bad command or file name") entirely here, without ever
+; involving run_loop. See kernel.inc's own comment on RUN_PATH/RUN_ARGC/
 ; RUN_ARGV_TABLE for the full hand-off protocol.
 ;
 ; No built-in commands, with one narrow exception: a bare drive letter
@@ -187,7 +187,7 @@ start_have_line:
             ; before the pipe scanner/tokenizer so "REM foo | bar" is
             ; correctly treated as pure comment text, not a pipe. Skips
             ; the whole line entirely -- no argv resolution attempted,
-            ; no "File not found." risk from a nonexistent "REM"
+            ; no "Bad command or file name" risk from a nonexistent "REM"
             ; program. Works for both batch and interactive lines,
             ; matching real DOS where a bare typed "REM ..." is also a
             ; legal no-op, not an error. Case-insensitive, and must be
@@ -1999,7 +1999,7 @@ sh_have_sep:
 
 not_found:
             call    K_INMSG
-            db      "File not found.",13,10,0
+            db      "Bad command or file name",13,10,0
             lbr     start
 
 resolved:
