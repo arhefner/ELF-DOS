@@ -154,41 +154,6 @@ umt_cur_ok:
             mov     rf, umt_drive
             ldn     rf
             call    umt_letter_addr         ; RF = &drive_letter[slot]
-
-            ; TEMPORARY DIAGNOSTIC
-            call    K_INMSG
-            db      " [slot=",0
-            mov     rf, umt_drive
-            ldn     rf
-            call    umt_hex2
-            call    K_INMSG
-            db      " L=",0
-            mov     rf, umt_drive
-            ldn     rf
-            call    umt_letter_addr
-            ghi     rf
-            call    umt_hex2
-            mov     rf, umt_drive
-            ldn     rf
-            call    umt_letter_addr
-            glo     rf
-            call    umt_hex2
-            call    K_INMSG
-            db      " P=",0
-            call    umt_present_addr
-            ghi     rf
-            call    umt_hex2
-            call    umt_present_addr
-            glo     rf
-            call    umt_hex2
-            call    K_INMSG
-            db      "] ",0
-            mov     rf, umt_drive
-            ldn     rf
-            call    umt_letter_addr         ; recompute: the prints above
-                                            ; clobbered RF
-            ; END TEMPORARY DIAGNOSTIC
-
             ldi     0
             str     rf
 
@@ -243,43 +208,6 @@ umt_cant_move:
 ;==================================================================
 ; Helpers (leaf routines, no kernel/BIOS calls of their own)
 ;==================================================================
-
-;------------------------------------------------------------------
-; TEMPORARY DIAGNOSTIC: print D as two hex digits.
-; Uses memory, not a register, to hold the byte: K_TYPE has no proven
-; contract for R8/RB in this codebase.
-;------------------------------------------------------------------
-umt_hex2:
-            plo     r8
-            mov     rf, umt_hbyte
-            glo     r8
-            str     rf
-            ldn     rf
-            shr
-            shr
-            shr
-            shr
-            call    umt_nib
-            mov     rf, umt_hbyte
-            ldn     rf
-            ani     $0F
-            call    umt_nib
-            rtn
-umt_nib:
-            plo     r8
-            smi     10
-            lbdf    umt_alpha
-            glo     r8
-            adi     '0'
-            lbr     umt_emit
-umt_alpha:
-            glo     r8
-            adi     'A' - 10
-umt_emit:
-            call    K_TYPE
-            rtn
-umt_hbyte:  db      0
-; END TEMPORARY DIAGNOSTIC
 
 ;------------------------------------------------------------------
 ; umt_letter_addr: RF = &drive_letter[D]
