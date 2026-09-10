@@ -1802,11 +1802,31 @@ check_path:
             lbr     not_found
 
 no_slash:
-            ; bare name -- stash it in memory first (not just RA):
-            ; check_exists below calls K_STAT, which clobbers RA (see
-            ; _find_dirent's own documented clobber list), and this
-            ; name is needed again for the shell_drive fallback
-            ; candidate after that first call returns
+            ; ---- bare name: system bin first, then PATH ----
+            ;
+            ; Until 2026-09-09 this searched the ACTIVE drive's /bin and
+            ; only then the shell's own. That let a stale or foreign
+            ; /bin on any mounted drive silently shadow a system
+            ; command -- the same typed name running a different binary
+            ; depending on which drive you happened to be standing on.
+            ; It cost real debugging time twice (a leftover D:/bin/dir
+            ; in July, E:/bin/umount in September), and MOUNT made it
+            ; worse by allowing arbitrary, possibly foreign partitions.
+            ;
+            ; Now <shell_drive>:/bin answers first, playing exactly the
+            ; role DOS's internal commands play: nothing can shadow a
+            ; system command, and PATH is purely additive. That also
+            ; keeps the common case cheap -- a system command never
+            ; opens env.dat at all, and this is one K_STAT rather than
+            ; the two the old two-drive search cost.
+            ;
+            ; An explicit path still bypasses all of it: "./dir" and
+            ; "../bin/dir" go through have_slash above, since '.' and
+            ; '..' are real directory entries path_resolve walks.
+
+            ; stash the name in memory -- check_exists calls K_STAT,
+            ; which clobbers RA (see _find_dirent's clobber list), and
+            ; every candidate below needs the name again
             mov     rb, sh_name
             ghi     ra
             str     rb
@@ -1814,32 +1834,13 @@ no_slash:
             glo     ra
             str     rb                  ; sh_name = RA
 
-            mov     rf, RUN_PATH
-            ldi     RUN_PATH_LEN - 1
-            plo     rc
-            call    write_bin_name      ; RUN_PATH = "/bin/" + name
-            call    check_exists
-            lbnf    resolved            ; found on the active drive
-
-            ; not found there -- try shell_drive's own /bin, but only
-            ; if that's actually a DIFFERENT drive (no point retrying
-            ; the identical path)
+            ; ---- candidate 1: <shell_drive>:/bin/<name> ----
             call    K_GETSHELLDRIVE     ; D = shell_drive
-            plo     rb                  ; RB.0 = shell_drive (stashed
-                                        ; -- mov below clobbers D)
-            call    K_GETCURDIR         ; D = cur_drive (RD, the
-                                        ; cluster, unused here)
-            str     r2
-            glo     rb
-            sm                          ; D = shell_drive - cur_drive
-            lbz     not_found           ; same drive: no new candidate
-
-            glo     rb
-            call    drive_letter_of     ; D = slot in, letter out. Done
-                                        ; BEFORE RF is loaded below --
+            call    drive_letter_of     ; D = slot in, letter out.
+                                        ; Before RF is set up below --
                                         ; drive_letter_of clobbers RF.
-            plo     rb                  ; RB.0 = the letter now; the slot
-                                        ; is not needed again
+            plo     rb                  ; RB.0 = the letter
+
             mov     rf, RUN_PATH
             glo     rb
             str     rf
@@ -1847,11 +1848,154 @@ no_slash:
             ldi     ':'
             str     rf
             inc     rf
-            ldi     RUN_PATH_LEN - 3
+            ldi     RUN_PATH_LEN - 3    ; "X:" already written
             plo     rc
-            call    write_bin_name      ; RUN_PATH = "<letter>:/bin/" + name
+            call    write_bin_name      ; RUN_PATH = "X:/bin/" + name
+            call    check_exists
+            lbnf    resolved            ; a system command: done, and
+                                        ; env.dat was never opened
+
+            ; ---- candidate 2..n: each PATH entry, left to right ----
+            mov     rf, sh_pathvar
+            call    env_getenv          ; RF = value, or 0 if unset
+            ghi     rf
+            lbnz    sh_path_copy
+            glo     rf
+            lbz     not_found           ; PATH unset: nothing else to try
+
+sh_path_copy:
+            ; Copy the value into our own buffer. env_getenv's own
+            ; contract says its buffer is only valid "until the next
+            ; env_getenv/env_setenv/env_unsetenv call" -- nothing below
+            ; makes one today, but owning the bytes costs 128 bytes of
+            ; program RAM and removes the question entirely.
+            mov     rd, sh_pathbuf
+            ldi     SH_PATH_MAX - 1
+            plo     rc
+sh_pc_loop:
+            glo     rc
+            lbz     sh_pc_term
+            lda     rf
+            str     rd
+            lbz     sh_pc_done
+            inc     rd
+            dec     rc
+            lbr     sh_pc_loop
+sh_pc_term:
+            ldi     0
+            str     rd
+sh_pc_done:
+
+            ; cursor = start of the copy
+            mov     rf, sh_path_cur
+            mov     rd, sh_pathbuf
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+sh_path_loop:
+            ; RD = cursor (always reloaded: check_exists clobbers
+            ; broadly, so nothing survives an iteration in a register)
+            mov     rf, sh_path_cur
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+
+            ldn     rd
+            lbz     not_found           ; end of PATH, nothing matched
+            xri     ';'
+            lbnz    sh_entry
+            inc     rd                  ; empty entry (";;" or a leading
+            lbr     sh_save_cursor      ; or trailing ';'): skip it
+
+sh_entry:
+            ; Copy this entry into RUN_PATH, stopping at ';' or NUL.
+            ; An entry that would overflow is SKIPPED rather than
+            ; truncated -- a truncated directory name could name a real
+            ; but wrong directory, which is worse than not looking.
+            mov     rf, sh_ovf
+            ldi     0
+            str     rf                  ; no overflow yet
+
+            mov     rf, RUN_PATH
+            ldi     RUN_PATH_LEN - 1
+            plo     rc
+sh_ent_copy:
+            ldn     rd
+            lbz     sh_ent_end
+            xri     ';'
+            lbz     sh_ent_end
+            glo     rc
+            lbnz    sh_ent_room
+            mov     rb, sh_ovf          ; out of room: keep scanning to
+            ldi     1                   ; find this entry's end so the
+            str     rb                  ; cursor still advances properly
+            inc     rd
+            lbr     sh_ent_copy
+sh_ent_room:
+            ldn     rd
+            str     rf
+            inc     rf
+            inc     rd
+            dec     rc
+            lbr     sh_ent_copy
+
+sh_ent_end:
+            ; Stash the RUN_PATH write position first: saving the cursor
+            ; below needs RF, and the separator/name append afterwards
+            ; needs it back. RC survives (nothing between touches it).
+            mov     rb, sh_wpos
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb
+
+            ; RD is at the ';' or NUL that ended the entry. Remember
+            ; where to resume BEFORE building the candidate, since
+            ; check_exists will clobber everything.
+            ldn     rd
+            lbz     sh_save_cursor      ; NUL: leave the cursor on it,
+            inc     rd                  ; so the next pass ends the walk
+sh_save_cursor:
+            mov     rf, sh_path_cur
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            ; overflowed? skip this entry entirely
+            mov     rf, sh_ovf
+            ldn     rf
+            lbnz    sh_path_loop
+
+            ; append "/" unless the entry already ended with one, then
+            ; the name
+            mov     rb, sh_wpos
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = just past the entry
+            glo     rc
+            lbz     sh_path_loop        ; no room for even the separator
+            dec     rf
+            ldn     rf
+            inc     rf
+            xri     '/'
+            lbz     sh_have_sep
+            ldi     '/'
+            str     rf
+            inc     rf
+            dec     rc
+sh_have_sep:
+            call    sh_append_name      ; RUN_PATH = "<entry>/" + name
             call    check_exists
             lbnf    resolved
+            lbr     sh_path_loop
 
 not_found:
             call    K_INMSG
@@ -2350,6 +2494,26 @@ pipe_del_line:  db      "del /PIPETMP.DAT",10,0    ; lowercase -- filename
 ; Args:    RF = write position within RUN_PATH, RC.0 = remaining bytes
 ; Returns: RUN_PATH null-terminated
 ;------------------------------------------------------------------
+; sh_append_name: append the command name (sh_name) at RF, bounded by
+; RC.0, force-terminating on overflow. write_bin_name's name half,
+; split out so the PATH walk can append a name to a directory it built
+; itself rather than to the fixed "/bin/".
+; Args:    RF = write position, RC.0 = remaining bytes
+; Returns: RUN_PATH null-terminated
+;------------------------------------------------------------------
+sh_append_name:
+            mov     rb, sh_name
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd                  ; RD = sh_name
+            lbr     wbn_name_loop       ; tail into write_bin_name's own
+                                        ; loop, which does exactly this
+                                        ; and already terminates on
+                                        ; either overflow or the name's
+                                        ; own NUL
+
+;------------------------------------------------------------------
 write_bin_name:
             mov     rd, bin_prefix
 wbn_prefix_loop:
@@ -2545,6 +2709,19 @@ cbe_no:
 
 bin_prefix: db      "/bin/",0
 sh_name:    dw      0
+
+; PATH support (2026-09-09). SH_PATH_MAX mirrors lib/env.asm's
+; own ENV_LINE_MAX -- restated rather than shared, the same way
+; every other constant crossing a link-unit boundary in this
+; project is. It only needs to be >= the longest value env can
+; hand back; a smaller value would truncate silently.
+SH_PATH_MAX:  equ     128
+sh_pathvar: db      "PATH",0
+sh_path_cur: dw     0           ; walk position within sh_pathbuf
+sh_ovf:     db      0           ; this entry overflowed RUN_PATH
+sh_wpos:    dw      0           ; RUN_PATH write position, across
+                                ; the cursor save
+sh_pathbuf: ds      SH_PATH_MAX
 stat_result: ds     DIRENT_LEN
 
 ;------------------------------------------------------------------

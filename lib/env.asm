@@ -69,8 +69,36 @@
 
             extrn   drive_letter_of
 
-ENV_LINE_MAX:   equ     64          ; bounds NAME=VALUE\0, matching
-                                    ; the C reference's own constant
+ENV_LINE_MAX:   equ     128         ; bounds NAME=VALUE\0. Was 64, the C
+                                    ; reference's own constant, until
+                                    ; 2026-09-09: PATH wants more room
+                                    ; than 58 characters of value, and
+                                    ; other variables may too.
+                                    ;
+                                    ; Costs 2 bytes of PROGRAM RAM per
+                                    ; byte (it sizes env_line_buf and
+                                    ; env_namebuf, nothing else), which
+                                    ; is noise beside the two 512-byte
+                                    ; iobufs this library already
+                                    ; carries. The on-disk store is
+                                    ; unaffected -- env.dat is
+                                    ; newline-terminated text, not
+                                    ; fixed-width records, so files
+                                    ; written at either size stay
+                                    ; readable.
+                                    ;
+                                    ; CEILING IS 255: env_read_line
+                                    ; takes its maxlen in RC.0, one
+                                    ; byte. Going past that means
+                                    ; widening that argument.
+                                    ;
+                                    ; A program still built with 64
+                                    ; silently TRUNCATES a longer line
+                                    ; to 63 characters rather than
+                                    ; reporting anything (see
+                                    ; env_read_line's own header), so
+                                    ; everything linking this library
+                                    ; needs rebuilding together.
 
             extrn   env_line_buf
             extrn   env_namebuf
