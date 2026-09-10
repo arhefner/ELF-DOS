@@ -441,13 +441,27 @@ def main():
     # Flat sources assert this themselves with a "#if"/"#error" pair next
     # to the declaration. That is not available for an FCB inside a proc,
     # whose final address is not known until link time -- hence this.
+    # Match on what a symbol IS, not what it is called. Several *_fcb
+    # names are 2-byte POINTERS to a caller's FCB (fo_fcb, fsk_fcb --
+    # "dw 0"), not FCB storage, and page alignment is meaningless for
+    # them. Selecting by name flagged those as failures, and the
+    # suggested fix -- aligning them -- would have done nothing at all
+    # while hiding the check's real purpose. Require an actual
+    # "label: ds <FCB_LEN>" declaration instead.
     fcb_len = equs.get("FCB_LEN")
     fcb_len = eval_expr(fcb_len, equs) if fcb_len is not None else 32
+    fcb_storage = set()
+    for name, size_text, _source in buffers:
+        try:
+            if eval_expr(size_text, equs) == fcb_len:
+                fcb_storage.add(name)
+        except Exception:
+            pass
     straddlers = [
         (name, addr) for name, addr in symbols.items()
-        if name.endswith("_fcb") and (addr & 0xFF) > 256 - fcb_len
+        if name in fcb_storage and (addr & 0xFF) > 256 - fcb_len
     ]
-    checked = [n for n in symbols if n.endswith("_fcb")]
+    checked = [n for n in symbols if n in fcb_storage]
     if straddlers:
         failed = True
         for name, addr in straddlers:
