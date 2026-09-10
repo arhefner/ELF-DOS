@@ -499,8 +499,18 @@ K_SHELL_INIT:   equ     $015A       ; -> kernel_shell_init
 ; the FAT16 filesystem entirely -- direct passthroughs to the same BIOS
 ; routines this project's own fat.asm uses for FAT/directory sector I/O.
 ; Args: R7/R8 = 24-bit LBA (R8.0 = bits 23-16, R7.1 = bits 15-8, R7.0 =
-; bits 7-0, R8.1 = 0, the drive/head byte), RF = pointer to a 512-byte
-; buffer (source for K_SECWRITE, destination for K_SECREAD). Returns:
+; bits 7-0), R8.1 = the block device UNIT number 0-7 (0 = the boot
+; device; a BIOS supporting only one device ignores it), RF = pointer to
+; a 512-byte buffer (source for K_SECWRITE, destination for K_SECREAD).
+;
+; R8.1 used to be documented as "0, the drive/head byte" and every
+; caller set it to 0. It became a real unit number in 2026-09-09's
+; multi-drive work -- a BIOS with more than one device reads it there
+; (MiniROM masks it to 5 bits and rejects >= 8), and the LBA is only 24
+; bits, so the byte was free. Existing callers that still write 0 are
+; correct and unchanged: 0 is the boot device.
+;
+; Returns:
 ; DF = 0/1 (success/error); R7/R8 are clobbered by the call. DANGEROUS
 ; if misused -- a wrong LBA can silently corrupt the running filesystem
 ; or the boot sectors themselves. Added specifically for progs/sys.asm

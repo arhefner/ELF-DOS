@@ -81,10 +81,18 @@ Unmounted W:
 If you unmount the drive you are currently on, you are moved back to the
 drive ELF-DOS booted from.
 
-**Other devices.** Some machines have more than one storage device. `MOUNT`
-takes an optional unit number in front of the partition to say which one:
-`MOUNT 1 2 W:` means "unit 1, partition 2, as `W:`". Left out, the unit is
-0 - the device ELF-DOS booted from, and the only one on most machines.
+**Other devices.** Some machines have more than one storage device.
+`MOUNT` takes an optional unit number in front of the partition to say
+which one: `MOUNT 1 2 W:` means "unit 1, partition 2, as `W:`". Left out,
+the unit is 0 - the device ELF-DOS booted from, and the only one on most
+machines.
+
+Units run from 0 to 7, so up to eight devices can be attached to the
+machine. That is a separate limit from the six drive letters: the six is
+how many partitions may be *in use at once*, drawn from any of the eight
+devices in any combination. Which units exist depends on the machine's
+ROM - a ROM that supports only one device ignores the number, so on those
+machines only unit 0 is meaningful.
 
 **Whole devices.** A floppy disk has no partition table; the file system
 starts at the very beginning. Use partition number `0` for that:
