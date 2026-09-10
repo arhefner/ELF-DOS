@@ -91,7 +91,7 @@
 ; banner string below, which is a separate literal for simplicity (not
 ; worth generating dynamically at boot).
 KERNEL_VER_MAJOR:   equ     1
-KERNEL_VER_MINOR:   equ     0
+KERNEL_VER_MINOR:   equ     1
 
             org     $0100
 
