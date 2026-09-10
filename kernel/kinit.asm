@@ -369,7 +369,11 @@ kern_halt:  lbr     kern_halt
 ;
 ; Args:    none
 ; Returns: RD = drive_cur_dir[cur_drive] (0 = that drive's root)
-;          D  = cur_drive (0-3, 0=C..3=F)
+;          D  = cur_drive
+;
+;          If cur_drive names a drive that is no longer mounted, it is
+;          reset to shell_drive first and THAT is what comes back -- see
+;          the 2026-09-09 fix below. The pair returned is always usable.
 ; Modifies: R8, R9, RD, RF only (RA/RB/RC/R7 explicitly protected, same
 ;          footprint as before this whole fix)
 ;------------------------------------------------------------------
@@ -387,17 +391,55 @@ kern_halt:  lbr     kern_halt
                                         ; actually match cur_drive
                                         ; before handing back a cluster
                                         ; number that's only meaningful
-                                        ; relative to it. DF ignored --
-                                        ; cur_drive is only ever set to
-                                        ; an already-present drive (see
-                                        ; kernel_setdrive's own
-                                        ; drive_present check), so this
-                                        ; should never fail in practice.
-                                        ; Cheap when already active (a
-                                        ; documented no-op check in
-                                        ; _switch_drive itself), so this
-                                        ; costs nothing in the common
-                                        ; case.
+                                        ; relative to it. Cheap when
+                                        ; already active (a documented
+                                        ; no-op check inside
+                                        ; _switch_drive itself).
+            lbnf    kgcd_active         ; DF=0: cur_drive is live
+
+            ; BUG FIX (2026-09-09): this used to ignore DF, on the
+            ; grounds that cur_drive is only ever SET to a present drive
+            ; (kernel_setdrive checks drive_present). True, and not
+            ; enough: a drive can go absent AFTER cur_drive was pointed
+            ; at it, which is exactly what UMOUNT does. UMOUNT moves
+            ; cur_drive away first to avoid it -- but that is userland
+            ; upholding a kernel invariant, and a stale or simply
+            ; different UMOUNT does not.
+            ;
+            ; Ignoring the failure was not harmless. The active BPB
+            ; stayed whatever it happened to be, so the caller got a
+            ; cluster number belonging to one drive and then read it
+            ; against another's geometry: "dir" listed C:'s root while
+            ; the prompt and header both said E:. Path-based access has
+            ; always failed safely here (path_resolve checks this same
+            ; DF), so the hole was exactly the K_GETCURDIR +
+            ; K_DIR_OPEN/K_DIR_READ callers -- the prompt, PWD, and a
+            ; bare DIR.
+            ;
+            ; Repair it rather than report it. Every caller wants a
+            ; USABLE (drive, cluster) pair, none of them check DF today,
+            ; and shell_drive is the one slot guaranteed live: it is set
+            ; at boot from a shell that actually loaded, and MOUNT and
+            ; UMOUNT both refuse to touch it. The user sees the prompt
+            ; change to that drive, which is the correct and honest
+            ; outcome for "the drive you were on is gone".
+            mov     rf, shell_drive
+            ldn     rf
+            call    _switch_drive
+            lbdf    kgcd_active         ; even that failed: nothing sane
+                                        ; is left to do, so fall through
+                                        ; with whatever is active rather
+                                        ; than loop
+
+            ; Re-read shell_drive from memory rather than carrying it in
+            ; a register across the call above: _switch_drive's clobber
+            ; list covers every register this routine could have used.
+            mov     rf, cur_drive
+            mov     rd, shell_drive
+            ldn     rd
+            str     rf                  ; cur_drive = shell_drive
+
+kgcd_active:
 
             pop     r7
             pop     rc
