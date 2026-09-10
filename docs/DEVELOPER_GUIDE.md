@@ -364,22 +364,46 @@ MS-DOS uses. Changing a drive's remembered directory does not switch to
 that drive.
 - **`K_GETCURDIR`** - **Args:** none. **Returns:** `RD` = the active
   drive's current directory cluster (0 = root), `D` = the active drive
-  index (0-3).
-- **`K_SETCURDIR`** - **Args:** `D` = drive index (0-3), `RD` = new
+  index (0 to `DRIVE_COUNT`-1).
+- **`K_SETCURDIR`** - **Args:** `D` = drive index (0 to `DRIVE_COUNT`-1), `RD` = new
   current-directory cluster for that drive. **Returns:** nothing.
+
+`K_GETCURDIR` always hands back a usable pair. If the active drive has
+been unmounted since it was selected, it moves the active drive to the
+one the shell was loaded from and returns that instead - otherwise the
+cluster it returned would belong to one drive while the geometry a
+caller reads it against belonged to another, which showed up as `DIR`
+listing one drive's contents under another drive's letter.
 
 **`K_SETDRIVE`**
 Switches which drive is active.
-- **Args:** `D` = drive index (0-3) to make active.
+- **Args:** `D` = drive index (0 to `DRIVE_COUNT`-1) to make active.
 - **Returns:** `DF` = 0 on success, `DF` = 1 if that drive has nothing
   mounted (nothing changes in that case).
 
 **`K_GETSHELLDRIVE`**
 Reports which drive the command shell itself was found on at boot -
-almost always drive 0 (`C:`) - for use as a fallback location when
-looking for a command.
+almost always drive 0. This is the drive the system's own commands live
+on, and the one guaranteed to stay mounted.
 - **Args:** none.
-- **Returns:** `D` = that drive's index (0-3).
+- **Returns:** `D` = that drive's index.
+
+**`K_DRIVE_INVALIDATE`**
+Drops the cached state belonging to one drive, so its entry in the drive
+table can be replaced or cleared. Flushes the FAT cache if that drive is
+the active one, and forces the next drive switch to reload the table
+rather than assume it is already current. Used by `MOUNT` and `UMOUNT`.
+- **Args:** `D` = drive index.
+- **Returns:** `DF` = 0 always.
+- **Call this *before* changing the drive's table entry, never after.**
+  The flush works out where to write from the *currently active* geometry,
+  so running it against an entry that has already been replaced would
+  write a cached sector to an address computed for the new partition.
+
+> **A drive index is not a letter.** Since drive letters became
+> assignable, index and letter are separate: any of the `DRIVE_COUNT`
+> slots may carry any letter from `A:` to `Z:`. Everything in this API
+> takes an index. Use `lib/drives.asm` to convert either way.
 
 ### Console input and output
 
@@ -593,6 +617,8 @@ Reads back the exit code of the last command that ran.
 | `DIR_STATE_LEN` | 9 | Size of the snapshot buffer `K_DIR_SAVE_STATE`/`K_DIR_RESTORE_STATE` use. |
 | `IO_TYPE_TARGET` | `PROG_BASE - 114` | Word naming the current console output routine. The kernel restores `K_TYPE` from it after every command, so a console hook must update it too; comparing it against `K_TYPE`'s address field also tells a hook whether output is redirected. |
 | `IO_READ_TARGET` | `PROG_BASE - 112` | The same, for console input and `K_READ`. |
+| `DRIVE_COUNT` | 6 | How many drives can be mounted at once. A drive index runs from 0 to `DRIVE_COUNT`-1 and says nothing about the drive's letter. |
+| `MBR_PART_COUNT` | 4 | Primary partitions in an MBR partition table. Deliberately separate from `DRIVE_COUNT`; a partition number is 1 to 4 however many drives exist. |
 | `ATTR_DIR` | `$10` | `DIRENT_ATTR` bit for a subdirectory. |
 | `ATTR_HIDDEN` | `$02` | `DIRENT_ATTR` bit for a hidden entry. |
 
@@ -606,7 +632,8 @@ them.
 
 | Module | What it provides |
 |---|---|
-| `env.asm` | Reading, setting, and removing environment variables. |
+| `drives.asm` | Converting between a drive index and its letter, either way. |
+| `env.asm` | Reading, setting, and removing environment variables. A whole `NAME=VALUE` line is limited to `ENV_LINE_MAX` (128) bytes. |
 | `file_glob.asm` | Wildcard (`*`/`?`) matching that can be paused and resumed one match at a time. |
 | `fmt32.asm` | Formatting a large (32-bit) number with comma grouping. |
 | `heap_bump.asm` | A simple, fast memory allocator with no per-item `free`. |

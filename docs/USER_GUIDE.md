@@ -18,12 +18,15 @@ a prompt, such as:
 C:/>
 ```
 
-The letter before the colon is the current drive. ELF-DOS suuports up to
-four primary partitions on the drive. Each partition appears as a separate
-drive, lettered `C:` through `F:`. The text after the colon is the current
-directory on that drive. If your current directory is more than one level
-deep from the root, the first part of the path will be replace by '...'.
-Use the `PWD` command to see the full path.
+The letter before the colon is the current drive. At start-up ELF-DOS reads
+the partition table of the drive it booted from and makes each of its
+partitions available, lettered `C:` through `F:` in order. The text after
+the colon is the current directory on that drive. If your current directory
+is more than one level deep from the root, the first part of the path is
+replaced by `...`; use the `PWD` command to see the full path.
+
+Those four are only a starting point. Six drives can be in use at once, and
+a drive can carry any letter from `A:` to `Z:` - see "Drives" below.
 
 To switch to a different drive, type its letter followed by a colon, and
 press Enter:
@@ -41,6 +44,59 @@ If a file named `autoexec.bat` exists in the root directory of the boot
 drive, ELF-DOS runs it automatically, before showing you the first prompt.
 See "Writing Batch Files" below for what a batch file is and how to write
 one.
+
+## Drives
+
+The four drives set up at start-up are not fixed. The `MOUNT` command
+attaches any partition to any letter, and `UMOUNT` detaches one. Typing
+`MOUNT` on its own lists what is currently in use:
+
+```
+C:/> MOUNT
+Drive  Unit  Partition start LBA
+C:     0     2,048
+D:     0     1,955,840
+E:     0     4,052,992
+F:     0     6,150,144
+4 of 6 drives mounted.
+```
+
+Six drives can be mounted at once, and a letter is just a name: nothing
+stops you from calling a partition `W:` because it holds your work, or
+`M:` for music. To attach the second partition as `W:`:
+
+```
+C:/> MOUNT 2 W:
+Mounted partition 2 as W:
+```
+
+Mounting a letter that is already in use simply re-points it. To free a
+slot, unmount it:
+
+```
+C:/> UMOUNT W:
+Unmounted W:
+```
+
+If you unmount the drive you are currently on, you are moved back to the
+drive ELF-DOS booted from.
+
+**Other devices.** Some machines have more than one storage device. `MOUNT`
+takes an optional unit number in front of the partition to say which one:
+`MOUNT 1 2 W:` means "unit 1, partition 2, as `W:`". Left out, the unit is
+0 - the device ELF-DOS booted from, and the only one on most machines.
+
+**Whole devices.** A floppy disk has no partition table; the file system
+starts at the very beginning. Use partition number `0` for that:
+`MOUNT 1 0 A:` mounts all of unit 1 as `A:`. (`A:` and `B:` are free to use
+for this, exactly as you would expect, though nothing forces it.)
+
+One drive cannot be unmounted: the one ELF-DOS booted from, because the
+commands themselves live there. `MOUNT` and `UMOUNT` both refuse.
+
+ELF-DOS reads FAT16 volumes only. `MOUNT` checks before attaching anything
+and will tell you if a disk is FAT12 - common on floppies - rather than
+attaching it and misreading it.
 
 ## Typing Commands
 
@@ -80,6 +136,40 @@ characters; `?` matches any one character. Wildcards are understood by
 `DIR`, `LS`, `COPY`, `MOVE`, `DEL`, `ATTRIB`, `XCOPY`, and `YS`. If a
 wildcard does not match anything, the command is given the text exactly as
 typed instead.
+
+**How ELF-DOS finds a command.** When you type a name on its own, ELF-DOS
+looks for it in `/bin` on the drive it booted from. Those are the system
+commands, and nothing can displace them - a `/bin` on some other disk you
+have mounted cannot quietly replace `COPY` or `DEL` with its own version.
+
+If the name is not a system command, ELF-DOS then looks in each directory
+listed in the `PATH` environment variable, in order, and runs the first
+match:
+
+```
+C:/> EXPORT PATH=D:/tools;E:/games
+```
+
+Separate directories with a semicolon. `PATH` starts out unset, which
+simply means only the system commands are found. Because the system
+commands are searched first, a mistake in `PATH` can never leave you
+unable to type `EXPORT` to fix it.
+
+To run a program in the current directory, put `./` in front of its name:
+
+```
+C:/> ./mygame
+```
+
+That skips the search entirely and runs exactly the file you named, which
+is also how you run something whose name happens to match a system command.
+Any name containing a `/` works this way - `../tools/build` runs that file
+and nothing else.
+
+If a command name is not found anywhere, ELF-DOS says `Bad command or file
+name`. That message is about the command itself; a message like `File not
+found.` comes from a command that ran and could not find one of *its*
+arguments.
 
 **Substitutions.** A few special sequences are replaced with a value before
 a command line runs:
@@ -149,6 +239,8 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | `STAT` | `STAT <path>` | Shows a file or directory's type, size, first cluster, and the date and time it was last written. |
 | `ATTRIB` | `ATTRIB [+H\|-H] <path...>` | Shows or changes a file's hidden attribute. With no `+H`/`-H`, shows whether each file is hidden. `+H` hides it; `-H` unhides it. |
 | `LABEL` | `LABEL [drive:] [text \| -d]` | Shows, sets, or removes a drive's volume label. `-d` deletes the label. |
+| `MOUNT` | `MOUNT [[unit] partition] [letter:]` | With no arguments, lists the drives in use. Otherwise attaches a partition to a drive letter. Partition `0` means "the whole device, no partition table," for floppies. See "Drives" above. |
+| `UMOUNT` | `UMOUNT <letter:>` | Detaches a drive letter. The boot drive cannot be detached. |
 | `CHKDSK` | `CHKDSK [X:]` | Checks a drive for file system problems - lost clusters, files whose size does not match their data, and damaged directory entries - and prints a summary. This is a check only; it does not repair anything. |
 
 ### Working with files

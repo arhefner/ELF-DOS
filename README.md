@@ -2,10 +2,10 @@
 
 A FAT16, DOS-like operating system for the RCA CDP1802 processor, targeting
 Elf/OS-compatible hardware. It boots from an SD card via an MBR partition
-table (up to 4 FAT16 partitions, addressable as drive letters `C:`-`F:`),
-brings up a small resident kernel, and hands off to a command shell where
-every command - `DIR`, `CD`, `TYPE`, `COPY`, ... - is an ordinary loadable
-executable, not a built-in.
+table (four primary FAT16 partitions, mountable as up to six drives under
+any letters `A:`-`Z:`), brings up a small resident kernel, and hands off to
+a command shell where every command - `DIR`, `CD`, `TYPE`, `COPY`, ... - is
+an ordinary loadable executable, not a built-in.
 
 ## Status
 
@@ -18,11 +18,13 @@ behind everything summarized here.
 
 ### Boot and filesystem
 
-- Boot chain: MBR -> `krnboot` -> kernel init, scanning up to 4 FAT16
-  partitions on the boot device and making each one addressable as a drive
-  letter (`C:`-`F:`). Current-directory state is tracked per drive (classic
-  DOS semantics - `CD D:\games` while `C:` is active updates `D:`'s own
-  remembered directory without switching to it).
+- Boot chain: MBR -> `krnboot` -> kernel init, scanning the boot device's
+  four primary FAT16 partitions and lettering them `C:`-`F:`. That is only
+  the starting arrangement: `MOUNT`/`UMOUNT` reassign any partition to any
+  letter `A:`-`Z:` at runtime, six at a time, on any of up to eight block
+  devices where the BIOS supports more than one. Current-directory state is
+  tracked per drive (classic DOS semantics - `CD D:\games` while `C:` is
+  active updates `D:`'s own remembered directory without switching to it).
 - FAT16 directory listing, including long file names (LFN) and Windows'
   own NTRes-hint case-folding convention for clean 8.3 names.
 - File open/read/close/write/seek, including creating a brand-new file
@@ -52,10 +54,12 @@ behind everything summarized here.
   just runs a small, permanently-resident loop that alternately loads and
   runs the shell (which reads one command line, resolves it, and returns)
   and whatever it resolved.
-- **Executable search**: a bare command name is looked up in the active
-  drive's own `/bin`, falling back to the boot drive's `/bin` if not found
-  there (so other drives don't each need their own copy of every command);
-  a name containing `/` is loaded directly as a full path.
+- **Executable search**: a bare command name is looked up in the boot
+  drive's `/bin` first - those are the system commands, and nothing can
+  shadow them, the role DOS's internal commands play - then in each
+  directory on the `PATH` environment variable, in order. A name containing
+  `/` skips the search entirely and is loaded as a path, so `./name` runs a
+  local copy explicitly.
 - **Command-line editing**: arrow keys (Up/Down for command history, Left/
   Right to move within the current line), Emacs/readline-style Ctrl
   shortcuts (Ctrl-A/E home/end, Ctrl-B/F left/right, Ctrl-D/H delete), and
@@ -104,6 +108,8 @@ behind everything summarized here.
 | `REN <path> <newname>` | Rename a file or directory |
 | `MD <path>` / `RD <path>` | Create / remove an empty subdirectory |
 | `STAT <path>` | Show a file or directory's metadata |
+| `MOUNT [[unit] part] [letter:]` | List mounted drives, or attach a partition to a letter |
+| `UMOUNT <letter:>` | Detach a drive letter |
 | `TOUCH <file...>` | Update a file's last-write time to now |
 | `ATTRIB [+H\|-H] <path...>` | Show or set the hidden attribute |
 | `LABEL [drive:] [text\|-d]` | Show, set, or clear a volume label |
