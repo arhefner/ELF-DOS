@@ -524,7 +524,19 @@ BPBBLK_LEN:            equ     22             ; total block size
 ; the kernel and krnboot. Any change to the order or size of
 ; drive_present/drive_bpb_table/shell_*/drive_cur_dir/cur_drive
 ; requires rebuilding and redeploying bin/ as well as the kernel.
-DRIVE_COUNT:        equ     4
+DRIVE_COUNT:        equ     6
+
+; MBR_PART_COUNT: primary partitions in an MBR partition table. Bounds
+; boot/krnboot.asm's own scan, and MOUNT's partition argument -- both of
+; which used DRIVE_COUNT for this before the two numbers diverged
+; (2026-09-09, when DRIVE_COUNT went to 6).
+;
+; krnboot's scan MUST use this, not DRIVE_COUNT: it computes each
+; entry's offset as idx*16 + $C6 and relies on the result staying in one
+; byte. At idx 4 that is $106 -- already carrying. Four is also simply
+; the truth: an MBR has four primary entries and nothing this project
+; reads extended partitions.
+MBR_PART_COUNT:     equ     4
 
 ; ----------------------------------------------------------------
 ; FCB (File Control Block) structure offsets
@@ -605,7 +617,12 @@ FCB_F_IOVALID:  equ     $10         ; this FCB's own IOBUF currently holds
 ; Path and drive conventions
 ; ----------------------------------------------------------------
 PATH_SEP:       equ     '/'         ; directory separator character
-DRIVE_FIRST:    equ     'C'         ; first hard-disk drive letter
+; Drive letters. DRIVE_LETTER_MIN/MAX bound what a user may ASK for;
+; BOOT_DRIVE_FIRST is only what krnboot assigns to slot 0 onward, and
+; must stay 'C' because kinit.asm's kshell_path hardcodes "C:/bin/shell".
+DRIVE_LETTER_MIN: equ   'A'
+DRIVE_LETTER_MAX: equ   'Z'
+BOOT_DRIVE_FIRST: equ   'C'
 
 ; path_resolve's own scratch buffer size. Lives here (not in path.asm)
 ; because the buffer's storage is in path_data.asm while its bounds

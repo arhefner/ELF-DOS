@@ -185,6 +185,23 @@ shell_eoff:         dw      0                       ; 2 bytes
 drive_cur_dir:      ds      DRIVE_COUNT*2           ; 8 bytes
 cur_drive:          db      0
 active_bpb_drive:   db      $FF
+
+; drive_letter: which letter each slot answers to, one byte per slot,
+; 0 = the slot is free. Added 2026-09-09, when letters stopped being
+; derivable from the slot index (they used to be exactly 'C' + index).
+;
+; INVARIANT, and the reason two apparently redundant tables are kept:
+; drive_letter[i] != 0 exactly when drive_present[i] != 0. Only MOUNT
+; and UMOUNT write either, and each writes both together in one block.
+; drive_present is kept rather than derived because _switch_drive and
+; kernel_setdrive read it on the hot path and would otherwise need
+; changing -- they contain no drive-letter arithmetic at all today, and
+; this keeps it that way.
+;
+; Placed here, after active_bpb_drive, because it is the end of the
+; contiguous drive block: appending disturbs none of the offsets
+; already published through DRIVE_DATA_PTR.
+drive_letter:       ds      DRIVE_COUNT
                                         ; (line_buf moved to the fixed
                                         ; address LINE_BUF in kernel.inc,
                                         ; reusing the dead ROM boot stack
@@ -205,6 +222,7 @@ autoexec_path:      db      "/autoexec.bat",0
                 public  drive_cur_dir
                 public  cur_drive
                 public  active_bpb_drive
+                public  drive_letter
                 public  autoexec_path
 
                 endp

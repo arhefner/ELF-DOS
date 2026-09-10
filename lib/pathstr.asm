@@ -35,6 +35,8 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
+            extrn   drive_letter_of
+
 PATH_BUF_LEN:   equ     128
 PS_MAX_DEPTH:   equ     16
 
@@ -292,17 +294,20 @@ ps_err:
             rtn
 
 ;------------------------------------------------------------------
-; print_drive_letter: print 'C'+drive (a single character) via a
+; print_drive_letter: print drive's letter (a single character) via a
 ; bare, one-shot K_TTY call -- same proven-safe pattern progs/pwd.asm's
 ; own original copy of this routine already used (gotcha #14 -- a
 ; single call, unlike a large buffer loop, is safe here).
 ; Args:    none (reads drive)
 ; Returns: nothing
+; Modifies: D, R8, R9, RF -- drive_letter_of's clobber list. Both call
+;           sites follow with K_INMSG and reload from memory, so none of
+;           it is live across them.
 ;------------------------------------------------------------------
 print_drive_letter:
             mov     rf, drive
             ldn     rf
-            adi     'C'
+            call    drive_letter_of     ; D = slot in, letter out
             call    K_TTY
             rtn
 

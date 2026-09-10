@@ -37,6 +37,9 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
+            extrn   drive_letter_of
+            extrn   drive_index_of
+
             org     PROG_BASE
 
 ;------------------------------------------------------------------
@@ -70,24 +73,36 @@ start:
             ani     $DF                     ; uppercase-fold (see
                                             ; mount.asm's note on why
                                             ; this is safe for A-Z)
-            smi     'C'
-            lbnf    umt_bad_drive
-            plo     r9                      ; R9.0 = drive index
-            glo     r9
-            smi     DRIVE_COUNT
-            lbdf    umt_bad_drive
+            plo     rb                      ; RB.0 = folded letter. NOT
+                                            ; R9: drive_index_of uses it.
 
-            ; a trailing ':' is optional ("D" or "D:")
-            lda     rf
-            lbz     umt_drive_ok
+            ; Finish reading the argument BEFORE the lookup: RF is the
+            ; text cursor and drive_index_of clobbers it. Doing the
+            ; lookup first read garbage here and rejected every letter
+            ; as unmounted.
+            lda     rf                      ; a trailing ':' is optional
+            lbz     umt_letter_ok           ; ("D" or "D:")
             xri     ':'
             lbnz    umt_bad_drive
             ldn     rf
             lbnz    umt_bad_drive
-umt_drive_ok:
+
+umt_letter_ok:
+            ; Keep the letter itself: step 4 clears drive_letter[slot],
+            ; so by the time the closing message runs the table can no
+            ; longer answer "what letter was that?".
+            mov     rf, umt_letter
+            glo     rb
+            str     rf
+
+            glo     rb
+            call    drive_index_of          ; DF=1 -> nothing is mounted
+            lbdf    umt_not_mounted         ;         under that letter
+            plo     r9                      ; R9.0 = slot
+
             mov     rf, umt_drive
             glo     r9
-            str     rf                      ; umt_drive = 0-3
+            str     rf                      ; umt_drive = slot
 
             ; ---- step 1: never the shell's own drive ----
             call    K_GETSHELLDRIVE         ; D = shell_drive
@@ -100,10 +115,8 @@ umt_drive_ok:
             sm                              ; D = target - shell_drive
             lbz     umt_is_shell
 
-            ; ---- must actually be mounted ----
-            call    umt_present_addr        ; RF = &drive_present[target]
-            ldn     rf
-            lbz     umt_not_mounted
+            ; (no separate "is it mounted?" check: drive_index_of
+            ; above only returns a slot for a letter that IS mounted.)
 
             ; ---- step 2: move cur_drive off the target if needed ----
             call    umt_base                ; R9 = drive_present's address
@@ -132,16 +145,26 @@ umt_cur_ok:
             ldn     rf
             call    K_DRIVE_INVALIDATE
 
-            ; ---- step 4: clear the presence flag ----
+            ; ---- step 4: clear both halves of "this slot is live" ----
+            ; drive_letter and drive_present must go together -- see
+            ; kernel_data.asm's note on the invariant. The BPB block
+            ; itself is deliberately left alone: nothing reads it while
+            ; the slot is free, and leaving it means remounting the same
+            ; partition writes over identical values.
+            mov     rf, umt_drive
+            ldn     rf
+            call    umt_letter_addr         ; RF = &drive_letter[slot]
+            ldi     0
+            str     rf
+
             call    umt_present_addr
             ldi     0
             str     rf
 
             call    K_INMSG
             db      "Unmounted ",0
-            mov     rf, umt_drive
+            mov     rf, umt_letter
             ldn     rf
-            adi     'C'
             call    K_TYPE
             call    K_INMSG
             db      ":",13,10,0
@@ -160,7 +183,7 @@ umt_usage:
 
 umt_bad_drive:
             call    K_INMSG
-            db      "Drive must be C, D, E or F.",13,10,0
+            db      "No drive is mounted under that letter.",13,10,0
             ldi     1
             rtn
 
@@ -185,6 +208,21 @@ umt_cant_move:
 ;==================================================================
 ; Helpers (leaf routines, no kernel/BIOS calls of their own)
 ;==================================================================
+
+;------------------------------------------------------------------
+; umt_letter_addr: RF = &drive_letter[D]
+; Args:    D = slot
+; Modifies: R9, RD, RF, D
+;------------------------------------------------------------------
+umt_letter_addr:
+            plo     rd
+            ldi     0
+            phi     rd
+            call    umt_base                ; (leaves RD alone)
+            mov     rf, r9
+            add16   rf, DRIVE_LETTER_OFF
+            add16   rf, rd
+            rtn
 
 ;------------------------------------------------------------------
 ; umt_base: R9 = drive_present's real address
@@ -217,4 +255,6 @@ umt_present_addr:
 ; Data
 ;==================================================================
 umt_drive:      db      0           ; target drive index 0-3
-umt_shell:      db      0           ; shell_drive, cached at step 1
+umt_shell:      db      0
+umt_letter:     db      0           ; the letter, saved before it is
+                                    ; cleared from the table           ; shell_drive, cached at step 1

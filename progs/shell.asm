@@ -38,6 +38,9 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
+            extrn   drive_letter_of
+            extrn   drive_index_of
+
 ; lib/env.asm's env_getenv, for $FOO/${FOO} expansion (shell_expand_line,
 ; below) -- linked in via a new multi-file Makefile rule for bin/shell,
 ; matching the existing bin/ls/bin/more/bin/edlin pattern for the same
@@ -270,14 +273,16 @@ start_not_rem:
             ; ONLY place the active drive ever changes (classic DOS
             ; semantics, see kernel.asm's kernel_setdrive comment).
             ldn     rf
-            ani     $DF                 ; uppercase-fold (safe: see
-                                        ; path.asm's identical check
-                                        ; for why no other byte value
-                                        ; aliases into 'C'-'F')
-            smi     'C'
-            lbnf    not_drive_cmd       ; < 'C': not a drive letter
-            smi     4
-            lbdf    not_drive_cmd       ; >= 'G': not a drive letter
+            ani     $DF                 ; uppercase-fold. Safe across the
+                                        ; whole A-Z range: the only bytes
+                                        ; aliasing into $41-$5A under this
+                                        ; mask are $41-$5A and $61-$7A.
+            smi     DRIVE_LETTER_MIN
+            lbnf    not_drive_cmd       ; below 'A'
+            ldn     rf                  ; reload: the smi destroyed D
+            ani     $DF
+            smi     DRIVE_LETTER_MAX+1
+            lbdf    not_drive_cmd       ; above 'Z'
 
             mov     rb, rf
             inc     rb
@@ -291,11 +296,14 @@ start_not_rem:
                                         ; drive command -- fall through
                                         ; to normal name resolution
 
-            ; valid bare drive command -- recompute the index (0-3)
-            ; fresh (the smi chain above destroyed D) and switch
+            ; A well-formed "X:". From here an unknown letter is a real
+            ; error rather than a fallthrough to name resolution -- "Q:"
+            ; is never a filename ( ':' is invalid in 8.3 and long names
+            ; alike), so reporting it beats searching /bin for it.
             ldn     rf
             ani     $DF
-            smi     'C'
+            call    drive_index_of      ; DF=1 -> no drive has that letter
+            lbdf    bad_drive
             call    K_SETDRIVE
             lbdf    bad_drive
 
@@ -1826,9 +1834,14 @@ no_slash:
             sm                          ; D = shell_drive - cur_drive
             lbz     not_found           ; same drive: no new candidate
 
+            glo     rb
+            call    drive_letter_of     ; D = slot in, letter out. Done
+                                        ; BEFORE RF is loaded below --
+                                        ; drive_letter_of clobbers RF.
+            plo     rb                  ; RB.0 = the letter now; the slot
+                                        ; is not needed again
             mov     rf, RUN_PATH
             glo     rb
-            adi     'C'
             str     rf
             inc     rf
             ldi     ':'
@@ -2698,7 +2711,7 @@ pp_ioerr:
 print_drive_letter:
             mov     rf, pp_drive
             ldn     rf
-            adi     'C'
+            call    drive_letter_of     ; D = slot in, letter out
             call    K_TTY
             rtn
 
@@ -3840,10 +3853,12 @@ hist_load:
                                         ; body uses RF as scratch, so RF
                                         ; can't be set before this call
                                         ; either -- must come after
-            adi     'C'
-            plo     r8                  ; stash the drive letter (R8
-                                        ; survives the mov below; gotcha
-                                        ; #4 -- mov itself clobbers D)
+            call    drive_letter_of     ; D = slot in, letter out
+            plo     r8                  ; stash the drive letter. R8 is
+                                        ; written AFTER the call, so
+                                        ; drive_letter_of clobbering it
+                                        ; does not matter; the mov below
+                                        ; still clobbers D (gotcha #4).
             mov     rf, hist_path
             glo     r8
             str     rf
@@ -4186,10 +4201,12 @@ hist_append:
                                         ; body uses RF as scratch, so RF
                                         ; can't be set before this call
                                         ; either -- must come after
-            adi     'C'
-            plo     r8                  ; stash the drive letter (R8
-                                        ; survives the mov below; gotcha
-                                        ; #4 -- mov itself clobbers D)
+            call    drive_letter_of     ; D = slot in, letter out
+            plo     r8                  ; stash the drive letter. R8 is
+                                        ; written AFTER the call, so
+                                        ; drive_letter_of clobbering it
+                                        ; does not matter; the mov below
+                                        ; still clobbers D (gotcha #4).
             mov     rf, hist_path
             glo     r8
             str     rf

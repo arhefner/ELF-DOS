@@ -457,10 +457,10 @@ boot_init2:
 
 ;--------------------------------------------------------------
 ; Inlined, multi-partition bpb_init (relocated from kernel/bpb.asm,
-; then extended 2026-07-13 for up to DRIVE_COUNT=4 partitions -- see
+; then extended 2026-07-13 for up to MBR_PART_COUNT partitions -- see
 ; this file's own header comment for the original single-partition
 ; reasoning, still valid for why this lives here at all). Now a real
-; LOOP over partition-table entries 0..DRIVE_COUNT-1 (drives C..F),
+; LOOP over partition-table entries 0..MBR_PART_COUNT-1 (drives C..F),
 ; not unrolled -- four copies of the original ~700-byte Phase 1/
 ; Phase 2 body would never fit in this bootstrap's own sector budget.
 ; Three phases per iteration:
@@ -1048,13 +1048,48 @@ boot_drive_copy:
             ldi         0
             str         rf
 
-; ---- advance to the next drive; loop while idx < DRIVE_COUNT ----
+            ; drive_letter[idx] = BOOT_DRIVE_FIRST + idx, giving C:, D:,
+            ; E:, F: exactly as before letters became assignable. Slots
+            ; past MBR_PART_COUNT keep the image's zero (= free) and are
+            ; MOUNT's to hand out.
+            ;
+            ; C: must land on slot 0: kinit.asm's kshell_path is the
+            ; literal "C:/bin/shell", and K_SHELL_INIT resolves it a few
+            ; instructions after this loop finishes.
+            ;
+            ; drive_letter is NOT inside drive_bpb_table, so this walks
+            ; from boot_drive_base (drive_present[0]) instead of
+            ; boot_bpb_base: DRIVE_LETTER_OFF is relative to the former.
+            mov         rf,boot_drive_idx
+            ldn         rf
+            plo         r9
+            ldi         0
+            phi         r9                  ; R9 = idx, zero-extended
+
+            mov         rf,boot_drive_base
+            lda         rf
+            phi         rd
+            ldn         rf
+            plo         rd                  ; RD = drive_present's address
+            add16       rd,DRIVE_LETTER_OFF
+            add16       rd,r9               ; RD = &drive_letter[idx]
+
+            glo         r9
+            adi         BOOT_DRIVE_FIRST
+            str         rd
+
+; ---- advance to the next drive; loop while idx < MBR_PART_COUNT ----
             mov         rf,boot_drive_idx
             ldn         rf
             adi         1
             str         rf
-            smi         DRIVE_COUNT
-            lbnf        boot_drive_loop     ; DF=0: still < DRIVE_COUNT
+            smi         MBR_PART_COUNT
+            lbnf        boot_drive_loop     ; DF=0: still < MBR_PART_COUNT
+                                            ; NOT DRIVE_COUNT: this loop
+                                            ; walks the MBR's four primary
+                                            ; entries, and its own offset
+                                            ; arithmetic (idx*16 + $C6)
+                                            ; only survives idx 0-3.
 
 ;--------------------------------------------------------------
 ; end of inlined, multi-partition bpb_init
@@ -1302,7 +1337,7 @@ boot_num_fats:      db      0
 boot_spf:           dw      0
 boot_max_clust:     dw      0
 boot_bpb_base:      dw      0
-boot_drive_idx:     db      0           ; loop counter, 0..DRIVE_COUNT-1
+boot_drive_idx:     db      0           ; loop counter, 0..MBR_PART_COUNT-1
 boot_drive_base:    dw      0           ; DRIVE_DATA_PTR's resolved
                                         ; address (drive_present[0]),
                                         ; read once before the loop

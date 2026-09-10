@@ -6,7 +6,7 @@
 ;   path_resolve -- resolve a path string to (parent directory
 ;                   cluster, final path component, resolved drive)
 ;
-; A path may start with a 2-character drive prefix ("C:"-"F:", case-
+; A path may start with a 2-character drive prefix ("A:"-"Z:", case-
 ; insensitive); if present, that names the target drive, and it is
 ; skipped for the rest of parsing. If absent, the target drive is
 ; cur_drive (the shell's currently active drive -- see kernel.asm).
@@ -59,6 +59,7 @@
             extrn   _switch_drive
             extrn   cur_drive
             extrn   drive_cur_dir
+            extrn   drive_letter
 
 ; same-file data references (required even within the same file)
             extrn   path_buf
@@ -110,41 +111,68 @@ presolve_copy:
 
 presolve_copy_done:
 
-            ; --- check for a 2-char drive prefix ("C:"-"F:", case-
-            ; insensitive) at the start of path_buf ---
-            mov     rf, path_buf
-            ldn     rf
-            ani     $DF                 ; uppercase-fold. Safe: the only
-                                        ; byte values that alias into
-                                        ; the 'C'-'F' range checked below
-                                        ; via this mask are 'C'/'c',
-                                        ; 'D'/'d', 'E'/'e', 'F'/'f'
-                                        ; themselves -- no other byte
-                                        ; value collides.
-            smi     'C'
-            lbnf    presolve_no_prefix  ; < 'C': not a drive letter
-            smi     4
-            lbdf    presolve_no_prefix  ; >= 'C'+4 ('G' and up): not
-                                        ; a drive letter
-
+            ; --- check for a 2-char drive prefix ("X:", case-insensitive)
+            ; at the start of path_buf ---
+            ;
+            ; A letter no longer implies a slot (any slot may carry any
+            ; letter A-Z since 2026-09-09), so this scans drive_letter[]
+            ; rather than subtracting a base. The scan also removes the
+            ; old need to compute the index twice -- the previous version
+            ; subtracted 'C' once to range-check and again to keep the
+            ; answer, because the check destroyed D.
+            ;
+            ; The colon is tested first: it is the cheap, unambiguous
+            ; half, and a path whose second character is not ':' cannot
+            ; be a drive prefix whatever the first one is.
             mov     rf, path_buf
             inc     rf
             ldn     rf
             xri     ':'
             lbnz    presolve_no_prefix  ; no ':' following: not a prefix
 
-            ; valid prefix -- recompute its drive index (0-3) fresh
-            ; (the smi chain above already destroyed D) and persist
-            ; it, then set presolve_start to skip past the 2-char
-            ; prefix
-            mov     rf, presolve_drive  ; RF -> presolve_drive (mov
-                                        ; first, since it clobbers D --
-                                        ; gotcha #4)
-            mov     ra, path_buf
-            ldn     ra
-            ani     $DF
-            smi     'C'
-            str     rf                  ; presolve_drive = index (0-3)
+            mov     rf, path_buf
+            ldn     rf
+            ani     $DF                 ; uppercase-fold. Safe across the
+                                        ; whole A-Z range: the only bytes
+                                        ; that alias into $41-$5A under
+                                        ; this mask are $41-$5A and
+                                        ; $61-$7A themselves.
+            plo     r9                  ; R9.0 = folded letter
+            smi     DRIVE_LETTER_MIN
+            lbnf    presolve_no_prefix  ; below 'A': not a drive letter
+            glo     r9
+            smi     DRIVE_LETTER_MAX+1
+            lbdf    presolve_no_prefix  ; above 'Z': not a drive letter
+
+            ; From here it IS a drive prefix, so failing to find the
+            ; letter is an error rather than a fallback: "D:/x" with D:
+            ; unmounted must fail, not be re-read as a relative path to
+            ; a file literally named "D:". (A real filename cannot start
+            ; that way -- ':' is invalid in both 8.3 and long names.)
+            mov     rf, drive_letter
+            ldi     0
+            plo     rb                  ; RB.0 = slot under test
+presolve_dscan:
+            lda     rf                  ; D = drive_letter[slot], RF++
+            str     r2
+            glo     r9
+            sm                          ; D = letter - drive_letter[slot]
+            lbz     presolve_found      ; a free slot holds 0, which can
+                                        ; never match a validated A-Z
+                                        ; letter, so free slots are
+                                        ; skipped without a second test
+            glo     rb
+            adi     1
+            plo     rb
+            smi     DRIVE_COUNT
+            lbnf    presolve_dscan
+            lbr     presolve_err        ; no mounted drive has that letter
+
+presolve_found:
+            mov     rf, presolve_drive  ; mov first: it clobbers D
+                                        ; (gotcha #4)
+            glo     rb
+            str     rf                  ; presolve_drive = slot
 
             mov     rf, presolve_start
             mov     ra, path_buf

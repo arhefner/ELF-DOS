@@ -2,8 +2,12 @@
 ; mount.asm - attach an MBR partition to a drive letter at runtime
 ;
 ; MOUNT                              list the current drive mapping
-; MOUNT <partition> <letter>         mount MBR partition 1-4 as C:-F:
+; MOUNT <partition> <letter>         mount MBR partition 1-4
 ; MOUNT <unit> <partition> <letter>  ... from a specific block device
+;
+; Partition 0 means "no partition table -- the volume starts at sector
+; 0", which is how a floppy is laid out: MOUNT 1 0 A: mounts unit 1's
+; whole surface as A:.
 ;
 ; The unit is a BIOS block-device number, 0-7. It is recorded in the
 ; drive's BPB (BPBBLK_DEV) at mount time and used for every subsequent
@@ -65,6 +69,9 @@
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
+
+            extrn   drive_letter_of
+            extrn   drive_index_of
 
             extrn   fmt_size32
 
@@ -158,35 +165,48 @@ mnt_usage:
 ; Listing mode -- no arguments
 ;==================================================================
 mnt_do_list:
+            ; Iterate the LETTER from 'A' to 'Z' and look each one up,
+            ; rather than iterating slots. Three things fall out of that:
+            ; unmounted slots never appear at all (a row of "(not
+            ; mounted)" filler per slot is useless once there are more
+            ; than a handful), the output is alphabetically sorted, and
+            ; no sort code is needed. 26 lookups of at most DRIVE_COUNT
+            ; comparisons each is nothing on this machine.
             call    K_INMSG
             db      "Drive  Unit  Partition start LBA",13,10,0
 
-            mov     rf, mnt_i
+            mov     rf, mnt_shown
             ldi     0
-            str     rf                      ; i = 0
+            str     rf                      ; nothing listed yet
+
+            mov     rf, mnt_i
+            ldi     DRIVE_LETTER_MIN
+            str     rf                      ; start at 'A'
 
 mnt_list_loop:
+            mov     rf, mnt_i
+            ldn     rf
+            call    mnt_slot_of_letter      ; DF=1 -> that letter is not
+            lbdf    mnt_list_next           ;         mounted; skip it
+            plo     rc                      ; stash before the mov below
+                                            ; clobbers D (gotcha #4)
+            mov     rf, mnt_slot
+            glo     rc
+            str     rf                      ; remember which slot
+
             ; --- letter ---
             mov     rf, mnt_i
             ldn     rf
-            adi     'C'
             call    K_TYPE
             ldi     ':'
             call    K_TYPE
             call    K_INMSG
             db      "     ",0
 
-            ; --- present? ---
-            mov     rf, mnt_i
+            ; --- unit ---
+            mov     rf, mnt_slot
             ldn     rf
-            call    mnt_present_addr        ; RF = &drive_present[i]
-            ldn     rf
-            lbz     mnt_list_absent
-
-            ; --- present: unit, then part1_lba ---
-            mov     rf, mnt_i
-            ldn     rf
-            call    mnt_entry_addr          ; RF = &drive_bpb_table[i]
+            call    mnt_entry_addr          ; RF = &drive_bpb_table[slot]
             add16   rf, BPBBLK_DEV
             ldn     rf
             adi     '0'
@@ -194,7 +214,8 @@ mnt_list_loop:
             call    K_INMSG
             db      "     ",0
 
-            mov     rf, mnt_i
+            ; --- partition start LBA ---
+            mov     rf, mnt_slot
             ldn     rf
             call    mnt_entry_addr
             add16   rf, BPBBLK_PART1_LBA
@@ -216,20 +237,51 @@ mnt_list_loop:
             call    K_MSG
             call    K_INMSG
             db      13,10,0
-            lbr     mnt_list_next
 
-mnt_list_absent:
-            call    K_INMSG
-            db      "-     (not mounted)",13,10,0
+            mov     rf, mnt_shown
+            ldn     rf
+            adi     1
+            str     rf
 
 mnt_list_next:
             mov     rf, mnt_i
             ldn     rf
             adi     1
             str     rf
-            smi     DRIVE_COUNT
-            lbnf    mnt_list_loop           ; DF=0: still < DRIVE_COUNT
+            smi     DRIVE_LETTER_MAX + 1
+            lbnf    mnt_list_loop           ; DF=0: still <= 'Z'
 
+            ; --- summary. Also the only way to see how many slots
+            ; exist, now that unmounted ones are not printed. ---
+            mov     rf, mnt_shown
+            ldn     rf
+            lbz     mnt_list_none
+
+            mov     rf, mnt_shown
+            ldn     rf
+            plo     rd
+            ldi     0
+            phi     rd                      ; RD = count
+            mov     rf, mnt_numbuf          ; f_uintout writes at [RF] --
+                                            ; point it at the buffer, not
+                                            ; at mnt_shown itself
+            call    f_uintout               ; ...advancing RF past the
+            ldi     0                       ;    digits, and NOT
+            str     rf                      ;    terminating them
+            mov     rf, mnt_numbuf
+            call    K_MSG
+            call    K_INMSG
+            db      " of ",0
+            ldi     DRIVE_COUNT + '0'
+            call    K_TYPE
+            call    K_INMSG
+            db      " drives mounted.",13,10,0
+            ldi     0
+            rtn
+
+mnt_list_none:
+            call    K_INMSG
+            db      "No drives mounted.",13,10,0
             ldi     0
             rtn
 
@@ -237,24 +289,30 @@ mnt_list_next:
 ; Mount mode -- MOUNT <partition> <letter>
 ;==================================================================
 mnt_do_mount:
-            ; ---- parse the partition number, 1..DRIVE_COUNT ----
+            ; ---- parse the partition number ----
+            ; 1..MBR_PART_COUNT selects an MBR primary partition.
+            ; 0 means "there is no partition table -- the volume starts
+            ; at sector 0", which is how a floppy is laid out.
             mov     rf, mnt_argbase
             ldn     rf
             call    mnt_argv_at
             lda     rf
-            smi     '1'
-            lbnf    mnt_bad_part            ; below '1'
-            plo     r9                      ; R9.0 = partition - 1
+            smi     '0'
+            lbnf    mnt_bad_part            ; below '0'
+            plo     r9                      ; R9.0 = the digit itself
             ldn     rf
             lbnz    mnt_bad_part            ; more than one character
 
             glo     r9
-            smi     DRIVE_COUNT
-            lbdf    mnt_bad_part            ; >= DRIVE_COUNT: no such entry
+            smi     MBR_PART_COUNT+1
+            lbdf    mnt_bad_part            ; an MBR has four primary
+                                            ; entries; this bound is not
+                                            ; DRIVE_COUNT and never was
+                                            ; the same question
 
             mov     rf, mnt_part
             glo     r9
-            str     rf                      ; mnt_part = MBR entry index 0-3
+            str     rf                      ; mnt_part = 0..MBR_PART_COUNT
 
             ; ---- parse the drive letter (one past the partition) ----
             mov     rf, mnt_argbase
@@ -262,17 +320,17 @@ mnt_do_mount:
             adi     1
             call    mnt_argv_at
             lda     rf
-            ani     $DF                     ; uppercase-fold. Safe for any
-                                            ; range inside 'A'-'Z': the only
-                                            ; bytes that alias into $43-$5A
-                                            ; under this mask are $43-$5A and
-                                            ; $63-$7A themselves.
-            smi     'C'
-            lbnf    mnt_bad_drive           ; below 'C'
-            plo     r9                      ; R9.0 = drive index
-            glo     r9
-            smi     DRIVE_COUNT
-            lbdf    mnt_bad_drive           ; past the last drive letter
+            ani     $DF                     ; uppercase-fold. Safe across
+                                            ; the whole A-Z range: the only
+                                            ; bytes aliasing into $41-$5A
+                                            ; under this mask are $41-$5A
+                                            ; and $61-$7A themselves.
+            plo     rb                      ; RB.0 = folded letter
+            smi     DRIVE_LETTER_MIN
+            lbnf    mnt_bad_drive           ; below 'A'
+            glo     rb
+            smi     DRIVE_LETTER_MAX+1
+            lbdf    mnt_bad_drive           ; above 'Z'
 
             ; a trailing ':' is allowed but optional ("D" or "D:")
             lda     rf
@@ -282,9 +340,43 @@ mnt_do_mount:
             ldn     rf
             lbnz    mnt_bad_drive           ; anything after the ':'
 mnt_drive_ok:
+            ; Remember the letter itself; the slot it will occupy is
+            ; decided next.
+            mov     rf, mnt_letter
+            glo     rb
+            str     rf
+
+            ; ---- pick the slot ----
+            ; If this letter is already mounted, reuse ITS slot: that is
+            ; a remount, which is what "mount 3 e:" has always meant.
+            ; Otherwise take the first free slot -- drive_letter[i] == 0.
+            glo     rb
+            call    drive_index_of
+            lbnf    mnt_have_slot           ; DF=0: already mounted here,
+                                            ; D = its slot -- reuse it
+
+            ldi     0
+            plo     rb                      ; RB.0 = candidate slot
+mnt_free_scan:
+            glo     rb
+            call    drive_letter_of         ; D = that slot's letter
+            lbz     mnt_free_found          ; 0 = free
+            glo     rb
+            adi     1
+            plo     rb
+            smi     DRIVE_COUNT
+            lbnf    mnt_free_scan
+            lbr     mnt_no_slots            ; every slot is taken
+
+mnt_free_found:
+            glo     rb                      ; D = the free slot
+
+mnt_have_slot:
+            plo     rb                      ; stash before the mov below
+                                            ; clobbers D (gotcha #4)
             mov     rf, mnt_drive
-            glo     r9
-            str     rf                      ; mnt_drive = 0-3
+            glo     rb
+            str     rf                      ; mnt_drive = slot
 
             ; ---- refuse the shell's own drive (see header) ----
             call    K_GETSHELLDRIVE         ; D = shell_drive
@@ -293,6 +385,11 @@ mnt_drive_ok:
             ldn     rf
             sm                              ; D = target - shell_drive
             lbz     mnt_is_shell
+
+            ; ---- partition 0: no partition table at all ----
+            mov     rf, mnt_part
+            ldn     rf
+            lbz     mnt_whole_device
 
             ; ---- read the MBR ----
             ldi     0
@@ -328,8 +425,9 @@ mnt_drive_ok:
             ; offset = PT_OFFSET + index*PT_ENTRY_LEN
             mov     rf, mnt_part
             ldn     rf
-            shl
-            shl
+            smi     1                       ; number (1-4) -> entry index
+            shl                             ; (0-3); partition 0 never
+            shl                             ; reaches here
             shl
             shl                             ; D = index * 16
             adi     low PT_OFFSET
@@ -376,8 +474,27 @@ mnt_have_start:
             mov     rf, mnt_bpb
             add16   rf, BPBBLK_PART1_LBA
             call    mnt_put_lba             ; part1_lba
+            lbr     mnt_read_vbr
 
-            ; ---- read the partition's VBR (R7:R8 still hold its LBA) ----
+mnt_whole_device:
+            ; No MBR, so no partition entry and no $AA55 check: the
+            ; volume simply starts at sector 0. Worth knowing what that
+            ; costs -- the signature check is also the portable "this
+            ; unit does not exist" guard (see the header), so a
+            ; whole-device mount of a missing device fails later and
+            ; less clearly, at the VBR sanity checks below, rather than
+            ; immediately. Those checks are why they are still there.
+            ldi     0
+            plo     r7
+            phi     r7
+            plo     r8
+            phi     r8                      ; part1_lba = 0
+            mov     rf, mnt_bpb
+            add16   rf, BPBBLK_PART1_LBA
+            call    mnt_put_lba
+
+mnt_read_vbr:
+            ; ---- read the volume's VBR (R7:R8 still hold its LBA) ----
             mov     rf, mnt_bpb
             add16   rf, BPBBLK_PART1_LBA
             call    mnt_get_lba             ; sets R8.1 = 0 ...
@@ -387,6 +504,39 @@ mnt_have_start:
             mov     rf, mnt_sector
             call    K_SECREAD
             lbdf    mnt_vbr_err
+
+            ; ---- is this actually a FAT16 volume? ----
+            ; The 8-byte type string at offset $36 is informational per
+            ; the FAT spec -- the authoritative test is cluster count --
+            ; but as a guard it earns its keep twice over:
+            ;
+            ;   * it rejects mounting a partition TABLE as a volume,
+            ;     which "MOUNT 0" would otherwise do on a partitioned
+            ;     device: an MBR's boot code passes the geometry checks
+            ;     below by accident.
+            ;
+            ;   * it rejects a FAT12 floppy outright. This kernel reads
+            ;     16-bit FAT entries unconditionally and checks the FAT
+            ;     type NOWHERE else, so a FAT12 volume is not refused --
+            ;     it is silently misread. An error beats that, and this
+            ;     is the only place positioned to say so.
+            ;
+            ; The cost is that a genuinely-FAT16 volume whose formatter
+            ; omitted the string would be refused. That is a loud,
+            ; recoverable failure rather than a quiet destructive one,
+            ; and every formatter in practical use writes it.
+            mov     rf, mnt_sector
+            add16   rf, $36
+            mov     rd, mnt_fat16_sig
+mnt_sig_loop:
+            lda     rd                      ; D = expected char
+            lbz     mnt_sig_ok              ; end of "FAT16": matched
+            str     r2
+            lda     rf                      ; D = actual char
+            sm                              ; D = actual - expected
+            lbnz    mnt_not_fat16
+            lbr     mnt_sig_loop
+mnt_sig_ok:
 
 ;------------------------------------------------------------------
 ; From here to mnt_commit is the port of boot/krnboot.asm's Phase 1
@@ -604,8 +754,19 @@ mnt_copy_loop:
             inc     rf
             str     rf
 
-            ; drive_present[i] = 1, last -- so a drive is never
-            ; advertised as present before its BPB is fully written.
+            ; drive_letter[i] and drive_present[i] LAST, and together --
+            ; they are the two halves of "this slot is live" and nothing
+            ; may observe one without the other (see kernel_data.asm's
+            ; note on the invariant). Until both are set the slot is
+            ; still free as far as every other routine is concerned,
+            ; which is what makes a half-written BPB harmless.
+            mov     rf, mnt_drive
+            ldn     rf
+            call    mnt_letter_addr         ; RF = &drive_letter[slot]
+            mov     rd, mnt_letter
+            ldn     rd
+            str     rf
+
             mov     rf, mnt_drive
             ldn     rf
             call    mnt_present_addr
@@ -617,13 +778,13 @@ mnt_copy_loop:
             db      "Mounted partition ",0
             mov     rf, mnt_part
             ldn     rf
-            adi     '1'
+            adi     '0'                     ; mnt_part is the number as
+                                            ; typed (0 = whole device)
             call    K_TYPE
             call    K_INMSG
             db      " as ",0
-            mov     rf, mnt_drive
+            mov     rf, mnt_letter
             ldn     rf
-            adi     'C'
             call    K_TYPE
             call    K_INMSG
             db      ":",13,10,0
@@ -636,13 +797,19 @@ mnt_copy_loop:
 ;==================================================================
 mnt_bad_part:
             call    K_INMSG
-            db      "Partition must be 1-4.",13,10,0
+            db      "Partition must be 0-4 (0 = whole device).",13,10,0
             ldi     1
             rtn
 
 mnt_bad_drive:
             call    K_INMSG
-            db      "Drive must be C, D, E or F.",13,10,0
+            db      "Drive letter must be A-Z.",13,10,0
+            ldi     1
+            rtn
+
+mnt_no_slots:
+            call    K_INMSG
+            db      "All drive slots are in use; unmount one first.",13,10,0
             ldi     1
             rtn
 
@@ -694,6 +861,12 @@ mnt_bad_vbr:
             ldi     1
             rtn
 
+mnt_not_fat16:
+            call    K_INMSG
+            db      "Not a FAT16 volume (ELF-DOS cannot read FAT12).",13,10,0
+            ldi     1
+            rtn
+
 ;==================================================================
 ; Helpers
 ;
@@ -728,6 +901,38 @@ mnt_argv_at:
             phi     rf
             ldn     rb
             plo     rf                      ; RF = argv[index]
+            rtn
+
+;------------------------------------------------------------------
+; mnt_slot_of_letter: which slot, if any, is mounted under this letter.
+;
+; A thin wrapper over lib/drives.asm now that letters are real. Kept as
+; its own name so the listing loop reads clearly, and because it was the
+; single place the listing needed changing when letters stopped being
+; 'C' + slot.
+;
+; Args:    D = letter (caller has already uppercase-folded it)
+; Returns: DF = 0 and D = slot, if that letter names a mounted drive;
+;          DF = 1 otherwise (D undefined)
+; Modifies: R8, R9, RF, D
+;------------------------------------------------------------------
+mnt_slot_of_letter:
+            lbr     drive_index_of      ; tail call -- its contract is
+                                        ; exactly this one's
+
+;------------------------------------------------------------------
+; mnt_letter_addr: RF = &drive_letter[D]
+; Args:    D = slot
+; Modifies: R9, RD, RF, D
+;------------------------------------------------------------------
+mnt_letter_addr:
+            plo     rd
+            ldi     0
+            phi     rd                      ; RD = slot, zero-extended
+            call    mnt_base                ; (leaves RD alone)
+            mov     rf, r9
+            add16   rf, DRIVE_LETTER_OFF
+            add16   rf, rd
             rtn
 
 ;------------------------------------------------------------------
@@ -851,8 +1056,13 @@ mnt_argc:       db      0
 mnt_unit:       db      0           ; block device unit 0-7
 mnt_argbase:    db      1           ; argv index of <partition>
 mnt_part:       db      0           ; MBR entry index 0-3
-mnt_drive:      db      0           ; target drive index 0-3
-mnt_i:          db      0           ; listing-mode loop counter
+mnt_drive:      db      0           ; target slot
+mnt_letter:     db      0           ; the letter it answers to
+mnt_i:          db      0           ; listing-mode loop: the LETTER
+                                    ; being considered, 'A'..'Z'
+mnt_slot:       db      0           ; slot that letter maps to
+mnt_shown:      db      0           ; how many rows printed
+mnt_fat16_sig:  db      "FAT16",0
 mnt_numbuf:     ds      14          ; fmt_size32 destination
 mnt_bpb:        ds      BPBBLK_LEN  ; assembled BPB image, committed
                                     ; to drive_bpb_table only at the end

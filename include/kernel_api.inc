@@ -581,7 +581,17 @@ BPB_DATA_PTR:      equ  $0166      ; 2-byte pointer to the block's
 ; published. Userland must go through K_DRIVE_INVALIDATE instead:
 ; poking active_bpb_drive directly would skip the FAT-cache flush that
 ; call exists to perform, silently losing a dirty FAT sector.
-DRIVE_COUNT:       equ  4          ; C:, D:, E:, F:
+DRIVE_COUNT:       equ  6          ; simultaneously mounted drives
+
+; MBR_PART_COUNT: primary partitions in an MBR. Distinct from
+; DRIVE_COUNT since 2026-09-09 -- see include/kernel.inc for why
+; krnboot's scan in particular must use this one.
+MBR_PART_COUNT:    equ  4
+
+; Drive letters -- see include/kernel.inc for the full note.
+DRIVE_LETTER_MIN:  equ  'A'
+DRIVE_LETTER_MAX:  equ  'Z'
+BOOT_DRIVE_FIRST:  equ  'C'
 DRIVE_DATA_PTR:    equ  $0168      ; 2-byte pointer to drive_present's
                                     ; real address
 DRIVE_PRESENT_LEN: equ  DRIVE_COUNT            ; 4 bytes
@@ -607,6 +617,16 @@ SHELL_DATA_OFF: equ     DRIVE_COUNT + DRIVE_COUNT*BPBBLK_LEN
 ; caller needs that.
 DRIVE_CUR_DIR_OFF: equ  SHELL_DATA_OFF + 6      ; DRIVE_COUNT*2 bytes
 CUR_DRIVE_OFF:     equ  DRIVE_CUR_DIR_OFF + DRIVE_COUNT*2   ; 1 byte
+; DRIVE_LETTER_OFF: which letter each slot answers to, one byte per
+; slot, 0 = free. Since 2026-09-09 a slot's letter is no longer 'C' +
+; its index -- any slot may carry any letter A-Z -- so this table is the
+; only way to convert either direction. lib/drives.asm wraps it; prefer
+; that to reading it directly.
+DRIVE_LETTER_OFF:  equ  CUR_DRIVE_OFF + 2      ; +1 for cur_drive,
+                                                ; +1 for active_bpb_drive
+                                                ; (which is deliberately
+                                                ; NOT published -- see
+                                                ; K_DRIVE_INVALIDATE)
 
 ; K_BATCH_START/K_BATCH_READLINE: minimal flat (non-nested) batch
 ; script execution (2026-07-14). The shell (progs/shell.asm) is

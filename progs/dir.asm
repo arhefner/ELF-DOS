@@ -77,6 +77,9 @@
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
+
+            extrn   drive_letter_of
+            extrn   drive_index_of
 #include    include/file_glob.inc
 #include    include/vollabel.inc
 
@@ -428,13 +431,13 @@ dpvh_have_path:
                                         ; just far easier to hit now that
                                         ; a drive can be unmounted.
             glo     rc
-            adi     'C'                 ; D = 'C' + resolved drive index
+            call    drive_letter_of     ; D = slot in, letter out
             plo     r9                  ; R9.0 = the letter to print
             lbr     dpvh_letter_ready
 
 dpvh_use_curdrive:
             call    K_GETCURDIR
-            adi     'C'                 ; D = 'C'+cur_drive
+            call    drive_letter_of     ; D = slot in, letter out
             plo     r9                  ; R9.0 = the letter to print
 
 dpvh_letter_ready:
@@ -475,9 +478,13 @@ dpvh_none:
 ; dir_check_drive_prefix: does the given path/pattern text start with
 ; a valid drive letter (C-F, either case) followed by ':'? (2026-08-02)
 ; Args:    RF = text pointer
-; Returns: DF = 0, D = drive index (0-3) if a valid prefix is present;
-;          DF = 1 otherwise (relative path, or a letter outside C-F)
-; Modifies: RF (advanced by 1), D
+; Returns: DF = 0, D = the slot, if the text starts with the letter of a
+;          currently MOUNTED drive followed by ':';
+;          DF = 1 otherwise -- relative path, no colon, or a letter that
+;          names no mounted drive.
+; Modifies: D, R8, R9, RF -- drive_index_of's clobber list. Wider than
+;           the old "RF advanced by 1" since 2026-09-09; the sole caller
+;           reloads RF and writes R9 immediately afterwards.
 ;------------------------------------------------------------------
 dir_check_drive_prefix:
             ldn     rf
@@ -494,17 +501,11 @@ dir_check_drive_prefix:
             lbnz    dcp_no              ; no colon right after: no prefix
 
             glo     r9
-            smi     'C'                 ; D = letter - 'C', DF=1 (no
-                                        ; borrow) iff letter >= 'C'
-            lbnf    dcp_no              ; letter < 'C': out of range
-            plo     r9                  ; R9.0 = tentative drive index
-            smi     DRIVE_COUNT         ; DF=1 (no borrow) iff
-                                        ; index >= DRIVE_COUNT
-            lbdf    dcp_no              ; out of range (D/E/F exist,
-                                        ; nothing past F does)
+            call    drive_index_of      ; DF=1 -> no mounted drive
+            lbdf    dcp_no              ;         carries that letter;
+                                        ; DF=0 leaves D = the slot
 
-            glo     r9                  ; D = drive index (return value)
-            clc
+            clc                         ; D is already the slot number
             rtn
 
 dcp_no:

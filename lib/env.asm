@@ -67,6 +67,8 @@
 #include    include/opcodes.def
 #include    include/kernel_api.inc
 
+            extrn   drive_letter_of
+
 ENV_LINE_MAX:   equ     64          ; bounds NAME=VALUE\0, matching
                                     ; the C reference's own constant
 
@@ -346,12 +348,14 @@ es_notequal:
 ;
 ; Args:    none
 ; Returns: nothing (env_file_path/env_tmp_path/env_cfg_path updated)
-; Modifies: R9, RB, RD, RF (and D)
+; Modifies: R8, R9, RB, RD, RF (and D) -- R8 joined the list when
+;           drive_letter_of replaced the old 'adi C' (2026-09-09);
+;           env_getenv/setenv/unsetenv already documented it clobbered.
 ; ----------------------------------------------------------------
             proc    _env_build_paths
 
-            call    K_GETSHELLDRIVE     ; D = shell_drive (0-3)
-            adi     'C'                 ; D = drive letter
+            call    K_GETSHELLDRIVE     ; D = shell_drive
+            call    drive_letter_of     ; D = slot in, letter out
             plo     r9                  ; stash it -- R9 is free here,
                                         ; and the call below clobbers D
 

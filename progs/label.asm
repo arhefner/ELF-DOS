@@ -36,6 +36,8 @@
 
 #include    include/opcodes.def
 #include    include/kernel_api.inc
+
+            extrn   drive_letter_of
 #include    include/vollabel.inc
 
             extrn   vol_label_get
@@ -253,7 +255,7 @@ lbl_use_curdrive:
                                         ; reactivates cur_drive's own
                                         ; BPB as an already-proven side
                                         ; effect
-            adi     'C'                 ; D = 'C'+cur_drive
+            call    drive_letter_of     ; D = slot in, letter out
             plo     r9                  ; stash it -- "mov rf,
                                         ; lbl_drive_letter" right below
                                         ; clobbers D as its own side

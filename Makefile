@@ -282,6 +282,9 @@ lib/move.prg: lib/move.asm include/opcodes.def include/kernel_api.inc
 lib/fmt32.prg: lib/fmt32.asm include/opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) fmt32.asm
 
+lib/drives.prg: lib/drives.asm include/opcodes.def include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) drives.asm
+
 lib/file_glob.prg: lib/file_glob.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/file_glob.inc
 	cd lib && $(ASM) $(ASMFLAGS) file_glob.asm
 
@@ -312,16 +315,16 @@ lib/icall.prg: lib/icall.asm include/opcodes.def
 lib/modload.prg: lib/modload.asm include/opcodes.def include/bios.inc include/kernel_api.inc
 	cd lib && $(ASM) $(ASMFLAGS) modload.asm
 
-bin/dir: progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg | bin
-	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg
+bin/dir: progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/dir progs/dir.prg lib/fmt32.prg lib/file_glob.prg lib/vollabel.prg lib/pathstr.prg lib/drives.prg
 	rm -f bin/dir.lkb
 
-bin/label: progs/label.prg lib/vollabel.prg | bin
-	$(LINK) $(LFLAGS) -o bin/label progs/label.prg lib/vollabel.prg
+bin/label: progs/label.prg lib/vollabel.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/label progs/label.prg lib/vollabel.prg lib/drives.prg
 	rm -f bin/label.lkb
 
-bin/pwd: progs/pwd.prg lib/pathstr.prg | bin
-	$(LINK) $(LFLAGS) -o bin/pwd progs/pwd.prg lib/pathstr.prg
+bin/pwd: progs/pwd.prg lib/pathstr.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/pwd progs/pwd.prg lib/pathstr.prg lib/drives.prg
 	rm -f bin/pwd.lkb
 
 bin/del: progs/del.prg lib/file_glob.prg | bin
@@ -344,32 +347,36 @@ bin/stat: progs/stat.prg lib/fmt32.prg | bin
 	$(LINK) $(LFLAGS) -o bin/stat progs/stat.prg lib/fmt32.prg
 	rm -f bin/stat.lkb
 
-bin/mount: progs/mount.prg lib/fmt32.prg | bin
-	$(LINK) $(LFLAGS) -o bin/mount progs/mount.prg lib/fmt32.prg
+bin/mount: progs/mount.prg lib/fmt32.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/mount progs/mount.prg lib/fmt32.prg lib/drives.prg
 	rm -f bin/mount.lkb
 
-bin/chkdsk: progs/chkdsk.prg lib/fmt32.prg | bin
-	$(LINK) $(LFLAGS) -o bin/chkdsk progs/chkdsk.prg lib/fmt32.prg
+bin/umount: progs/umount.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/umount progs/umount.prg lib/drives.prg
+	rm -f bin/umount.lkb
+
+bin/chkdsk: progs/chkdsk.prg lib/fmt32.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/chkdsk progs/chkdsk.prg lib/fmt32.prg lib/drives.prg
 	rm -f bin/chkdsk.lkb
 
-bin/printenv: progs/printenv.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/printenv progs/printenv.prg lib/env.prg
+bin/printenv: progs/printenv.prg lib/env.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/printenv progs/printenv.prg lib/env.prg lib/drives.prg
 	rm -f bin/printenv.lkb
 
-bin/export: progs/export.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/export progs/export.prg lib/env.prg
+bin/export: progs/export.prg lib/env.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/export progs/export.prg lib/env.prg lib/drives.prg
 	rm -f bin/export.lkb
 
-bin/unset: progs/unset.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/unset progs/unset.prg lib/env.prg
+bin/unset: progs/unset.prg lib/env.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/unset progs/unset.prg lib/env.prg lib/drives.prg
 	rm -f bin/unset.lkb
 
 bin/xcopy: progs/xcopy.prg lib/heap_bump.prg | bin
 	$(LINK) $(LFLAGS) -o bin/xcopy progs/xcopy.prg lib/heap_bump.prg
 	rm -f bin/xcopy.lkb
 
-test/bin/envtest: test/envtest.prg lib/env.prg | test/bin
-	$(LINK) $(LFLAGS) -o test/bin/envtest test/envtest.prg lib/env.prg
+test/bin/envtest: test/envtest.prg lib/env.prg lib/drives.prg | test/bin
+	$(LINK) $(LFLAGS) -o test/bin/envtest test/envtest.prg lib/env.prg lib/drives.prg
 	rm -f test/bin/envtest.lkb
 
 test/bin/bumptest: test/bumptest.prg lib/heap_bump.prg | test/bin
@@ -392,20 +399,20 @@ test/bin/corrupt: test/corrupt.prg lib/ymodem.prg lib/fmt32.prg | test/bin
 	$(LINK) $(LFLAGS) -o test/bin/corrupt test/corrupt.prg lib/ymodem.prg lib/fmt32.prg
 	rm -f test/bin/corrupt.lkb
 
-bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg | bin
-	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg
+bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg lib/drives.prg
 	rm -f bin/ls.lkb
 
-bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg | bin
-	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg
+bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg lib/drives.prg
 	rm -f bin/edlin.lkb
 
-bin/less: progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/env.prg lib/lineedit.prg | bin
-	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/env.prg lib/lineedit.prg
+bin/less: progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/env.prg lib/lineedit.prg lib/drives.prg
 	rm -f bin/less.lkb
 
-bin/shell: progs/shell.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/shell progs/shell.prg lib/env.prg
+bin/shell: progs/shell.prg lib/env.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/shell progs/shell.prg lib/env.prg lib/drives.prg
 	rm -f bin/shell.lkb
 
 bin/move: progs/move.prg lib/move.prg lib/file_glob.prg | bin
@@ -420,8 +427,8 @@ bin/ys: progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg | bin
 	$(LINK) $(LFLAGS) -o bin/ys progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg
 	rm -f bin/ys.lkb
 
-bin/termsize: progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg | bin
-	$(LINK) $(LFLAGS) -o bin/termsize progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg
+bin/termsize: progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/termsize progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg lib/drives.prg
 	rm -f bin/termsize.lkb
 
 bin/mr: progs/mr.prg lib/fmt32.prg | bin

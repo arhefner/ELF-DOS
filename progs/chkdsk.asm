@@ -38,6 +38,8 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
+            extrn   drive_letter_of
+
             extrn   fmt_size32
 
 ; ---- raw on-disk constants (kernel.inc is not includable from progs/) ----
@@ -95,14 +97,23 @@ start:
             plo     rf                  ; RF = argv[1] pointer
 
             ldn     rf
-            ani     $DF                 ; uppercase-fold (same idiom as
-                                        ; progs/shell.asm's bare-drive
-                                        ; check -- safe: no other byte
-                                        ; value aliases into 'C'-'F')
-            smi     'C'
-            lbnf    chk_usage           ; < 'C': not a drive letter
-            smi     4
-            lbdf    chk_usage           ; >= 'G': not a drive letter
+            ani     $DF                 ; uppercase-fold. Safe across the
+                                        ; whole A-Z range: the only bytes
+                                        ; aliasing into $41-$5A under this
+                                        ; mask are $41-$5A and $61-$7A.
+            smi     DRIVE_LETTER_MIN
+            lbnf    chk_usage           ; below 'A'
+            ldn     rf                  ; reload: the smi destroyed D
+            ani     $DF
+            smi     DRIVE_LETTER_MAX+1
+            lbdf    chk_usage           ; above 'Z'
+                                        ;
+                                        ; Only the RANGE is checked here.
+                                        ; This program keeps the letter,
+                                        ; not a slot -- it builds "X:/"
+                                        ; and lets K_PATH_RESOLVE decide
+                                        ; whether that drive exists -- so
+                                        ; it needs no drive_index_of.
 
             mov     rb, rf
             inc     rb
@@ -131,8 +142,8 @@ chk_no_arg:
             ; tells us which one -- no K_PATH_RESOLVE call needed at
             ; all in this branch, since the active drive's BPB is
             ; already the one we want.
-            call    K_GETCURDIR         ; D = cur_drive (0-3)
-            adi     'C'                 ; D = drive letter
+            call    K_GETCURDIR         ; D = cur_drive
+            call    drive_letter_of     ; D = slot in, letter out
             plo     r9                  ; stash D (R9 free here) --
                                         ; K_GETCURDIR's own doc doesn't
                                         ; promise RB survives it, so set
