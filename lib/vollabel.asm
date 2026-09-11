@@ -86,6 +86,7 @@ VOL_FOUND_INSERTPT:  equ 2   ; no label, but a '$00' terminator was
             extrn   vol_found
             extrn   vol_found_off
             extrn   vol_cur_lba
+            extrn   vol_unit
             extrn   vol_sector_buf
             extrn   _vol_scan
             extrn   _vol_classify_char
@@ -366,8 +367,9 @@ vls_write_back:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, vol_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, vol_sector_buf
             call    K_SECWRITE
@@ -445,8 +447,9 @@ vld_delete:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, vol_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, vol_sector_buf
             call    K_SECWRITE
@@ -503,6 +506,18 @@ vld_blank_name: db   ' ',' ',' ',' ',' ',' ',' ',' ',' ',' ',' '
             phi     r9
             ldn     rf
             plo     r9                  ; R9 = BPB block's real address
+
+            ; vol_unit: the drive's block-device unit, for every raw
+            ; sector read/write below. BUG FIX (2026-09-11): this library
+            ; used to hardcode R8.1 = 0 (the boot device), so LABEL on a
+            ; drive MOUNTed from another unit wrote the boot device --
+            ; the boot-sector sync at that drive's part1_lba, which for
+            ; a floppy (part1_lba 0) is the boot card's MBR.
+            mov     rf, r9
+            add16   rf, BPBBLK_DEV
+            mov     rb, vol_unit
+            ldn     rf
+            str     rb
 
             mov     rf, r9
             add16   rf, BPBBLK_ROOT_LBA ; RF -> 3-byte root LBA
@@ -566,8 +581,9 @@ vs_have_sector:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, vol_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, vol_sector_buf
             call    K_SECREAD           ; DF = 0/1 (an I/O error here
@@ -769,6 +785,14 @@ vs_sectors_left: dw   0
             ldn     rf
             plo     r9                  ; R9 = BPB block's real address
 
+            ; vol_unit, captured again here so this routine never depends
+            ; on _vol_scan having run first (see _vol_scan's note)
+            mov     rf, r9
+            add16   rf, BPBBLK_DEV
+            mov     rb, vol_unit
+            ldn     rf
+            str     rb
+
             mov     rf, r9
             add16   rf, BPBBLK_PART1_LBA ; RF -> 3-byte boot sector LBA
             mov     rb, vsb_lba
@@ -788,8 +812,9 @@ vs_sectors_left: dw   0
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, vol_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, vsb_sector_buf
             call    K_SECREAD           ; read the WHOLE sector --
@@ -827,8 +852,9 @@ vsb_write:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, vol_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, vsb_sector_buf
             call    K_SECWRITE
@@ -953,11 +979,13 @@ vcc_ok:
 vol_found:      db      0
 vol_found_off:  dw      0
 vol_cur_lba:    ds      3
+vol_unit:       db      0
 vol_sector_buf: ds      512
 
                 public  vol_found
                 public  vol_found_off
                 public  vol_cur_lba
+                public  vol_unit
                 public  vol_sector_buf
 
             endp

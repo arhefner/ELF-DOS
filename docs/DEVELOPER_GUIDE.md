@@ -583,9 +583,13 @@ Reads or writes one raw 512-byte sector by its logical block address.
   23-16, `R7` high byte = bits 15-8, `R7` low byte = bits 7-0), `R8` high
   byte = the block device *unit* number, 0 to 7, `RF` = pointer to a
   512-byte buffer (the data to write, or where to put what's read).
-- Unit 0 is the device ELF-DOS booted from, and is what you want unless
-  you are deliberately reaching another one. A machine whose ROM supports
-  only one device ignores the number entirely.
+- Unit 0 is the device ELF-DOS booted from. When working on a drive's
+  own sectors (a volume label, a FAT, a directory), use the unit that
+  drive lives on: a drive can be mounted from another device with
+  `MOUNT`, and writing unit 0 at that drive's addresses damages the boot
+  device instead. The unit is byte `BPBBLK_DEV` of the active drive's
+  parameter block (`BPB_DATA_PTR` in `kernel_api.inc`). A machine whose
+  ROM supports only one device ignores the number entirely.
 - **Returns:** `DF` = 0/1. `R7`/`R8` are not preserved across the call.
 
 ### Memory

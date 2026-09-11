@@ -793,6 +793,15 @@ crp_read_bpb:
             ldn     rf
             str     rb
 
+            ; BUG FIX (2026-09-11): crp_unit -- the raw sector I/O below
+            ; used to hardcode R8.1 = 0, so a drive MOUNTed from another
+            ; unit was read (and corrupted!) on the boot device instead.
+            mov     rf, r9
+            add16   rf, BPBBLK_DEV
+            mov     rb, crp_unit
+            ldn     rf
+            str     rb
+
             rtn
 
 ;------------------------------------------------------------------
@@ -867,8 +876,9 @@ crp_fat_read:
             phi     r7
             lda     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, crp_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, crp_fr_cluster
             ldn     rf
@@ -960,8 +970,9 @@ fw_copy_loop:
             phi     r7
             lda     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, crp_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, crp_fw_copy_idx
             ldn     rf
@@ -1030,8 +1041,9 @@ fw_no_copy_off:
             phi     r7
             lda     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, crp_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, crp_fw_copy_idx
             ldn     rf
@@ -1235,8 +1247,9 @@ crp_write_found_sector:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, crp_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
             mov     rf, crp_secbuf
             call    K_SECWRITE
             rtn
@@ -1443,8 +1456,9 @@ crp_read_next_dir_sector:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, crp_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
             mov     rf, crp_secbuf
             call    K_SECREAD
             lbdf    crnds2_eof
@@ -1581,8 +1595,9 @@ crnds2_read:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, crp_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
             mov     rf, crp_secbuf
             call    K_SECREAD
             lbdf    crnds2_eof
@@ -1662,6 +1677,7 @@ crp_mode_ptr:           ds  2       ; argv[1] (mode string) pointer, stashed
                                     ; (kernel/kernel.asm), so a register
                                     ; stash silently fed garbage into every
                                     ; mode-word comparison below it.
+crp_unit:               db  0       ; block-device unit of the target drive
 crp_target:             ds  11
 crp_saved:              ds  11
 crp_found_lba:          ds  3

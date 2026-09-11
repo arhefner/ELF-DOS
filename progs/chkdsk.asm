@@ -430,6 +430,15 @@ chk_read_bpb:
             ldn     rf
             str     rb                  ; chk_max_clust (2B)
 
+            ; BUG FIX (2026-09-11): chk_unit -- every raw sector read below
+            ; used to hardcode R8.1 = 0 (the boot device), so CHKDSK on a
+            ; drive MOUNTed from another unit read the wrong device.
+            mov     rf, r9
+            add16   rf, BPBBLK_DEV
+            mov     rb, chk_unit
+            ldn     rf
+            str     rb                  ; chk_unit (1B)
+
             ; chk_cluster_bytes (32-bit, big-endian, matching
             ; DIRENT_SIZE's own in-memory convention) = chk_spc * 512.
             ; 512 = 2^9: compute temp16 = chk_spc*2 (a plain 16-bit
@@ -569,8 +578,9 @@ chk_fat_read:
             phi     r7
             lda     rf                  ; D = bits 7-0
             plo     r7
-            ldi     0
-            phi     r8                  ; R8.1 = 0 (drive/head)
+            mov     rf, chk_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
 
             mov     rf, chk_fr_cluster
             ldn     rf                  ; D = cluster high byte (sector index)
@@ -1893,8 +1903,9 @@ chk_read_next_dir_sector:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, chk_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
             mov     rf, chk_dpb_secbuf
             call    K_SECREAD
             lbdf    crnds_eof
@@ -1984,8 +1995,9 @@ crnds_subdir_read:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, chk_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
             mov     rf, chk_dpb_secbuf
             call    K_SECREAD
             lbdf    crnds_eof
@@ -2471,8 +2483,9 @@ cfsl_sector_loop:
             phi     r7
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, chk_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's block-device unit
             mov     rf, chk_fr_secbuf
             call    K_SECREAD
             lbdf    cfsl_done
@@ -3058,6 +3071,7 @@ chk_scale_dest:         ds  2
 
 chk_fmt_buf:            ds  14
 chk_total_bytes:        ds  4
+chk_unit:               db  0       ; block-device unit of the checked drive
 chk_free_bytes:         ds  4
 chk_used_bytes:         ds  4
 chk_overflow_flag:      ds  1

@@ -507,8 +507,14 @@ K_SHELL_INIT:   equ     $015A       ; -> kernel_shell_init
 ; caller set it to 0. It became a real unit number in 2026-09-09's
 ; multi-drive work -- a BIOS with more than one device reads it there
 ; (MiniROM masks it to 5 bits and rejects >= 8), and the LBA is only 24
-; bits, so the byte was free. Existing callers that still write 0 are
-; correct and unchanged: 0 is the boot device.
+; bits, so the byte was free.
+;
+; A program working on a DRIVE's own sectors (anything located through
+; BPB_DATA_PTR) must load that drive's BPBBLK_DEV into R8.1, not 0: the
+; drive may have been MOUNTed from another unit. LABEL, CHKDSK and
+; CORRUPT all hardcoded 0 until 2026-09-11, so LABEL on a floppy mounted
+; from unit 1 wrote into the boot device's MBR. 0 is only right for the
+; boot device itself (e.g. SYS installing boot sectors).
 ;
 ; Returns:
 ; DF = 0/1 (success/error); R7/R8 are clobbered by the call. DANGEROUS
