@@ -38,7 +38,7 @@
 ;
 ; The BPB-field arithmetic below (spc_shift, fat_lba, root_lba,
 ; data_lba, max_clust) is a deliberate port of boot/krnboot.asm's own
-; Phase 1 steps 4-8, not an independent re-derivation -- that code is
+; Phase 1 steps 4-8 (and 7b), not an independent re-derivation -- that code is
 ; hardware-proven on every boot, and two implementations of the same
 ; FAT16 geometry that disagree in some corner would be a genuinely
 ; nasty bug to find. Keep them in sync if either changes.
@@ -543,6 +543,17 @@ mnt_sig_ok:
 ; steps 4-8. Keep the two in sync.
 ;------------------------------------------------------------------
 
+            ; ---- bytes per sector must be 512: every LBA and buffer
+            ; in this system assumes it ----
+            mov     rf, mnt_sector
+            add16   rf, $0B
+            call    mnt_get_le16
+            glo     rd
+            lbnz    mnt_bad_vbr
+            ghi     rd
+            xri     2
+            lbnz    mnt_bad_vbr
+
             ; ---- Step 4: sectors-per-cluster and its log2 ----
             mov     rf, mnt_sector
             add16   rf, BPB_SPC
@@ -608,26 +619,8 @@ mnt_spc_done:
             add16   rf, BPBBLK_SPF
             call    mnt_put16
 
-            ; max_clust = ((spf.lo - 1) << 8) | $FF -- a deliberate
-            ; over-estimate derived from the FAT's own size rather than
-            ; the volume's total-sector count. Same simplification as
-            ; krnboot's; see kernel_data.asm's bpb_max_clust comment.
-            mov     rf, mnt_bpb
-            add16   rf, BPBBLK_SPF
-            inc     rf                      ; -> spf's low byte
-            ldn     rf
-            smi     1
-            phi     rb
-            ldi     $FF
-            plo     rb
-
-            mov     rf, mnt_bpb
-            add16   rf, BPBBLK_MAX_CLUST
-            ghi     rb
-            str     rf
-            inc     rf
-            glo     rb
-            str     rf
+            ; (max_clust is computed exactly in Step 7b, once data_lba
+            ; is known -- see the note there)
 
             ; root_lba = fat_lba + num_fats * spf   (f_mul16: RF*RD -> RB)
             mov     rf, mnt_sector
@@ -693,6 +686,105 @@ mnt_spc_done:
             mov     rf, mnt_bpb
             add16   rf, BPBBLK_DATA_LBA
             call    mnt_put_lba
+
+            ; ---- Step 7b: max_clust = cluster count + 1 ----
+            ; count = (total_sectors - (data_lba - part1_lba)) >> spc_shift
+            ;
+            ; BUG FIX (2026-09-11): this used to be the spf*256-1
+            ; estimate, which overshoots real FAT16 volumes -- the FAT is
+            ; sized generously -- and let fat_alloc hand out clusters
+            ; past the end of the partition. Same fix as krnboot's own
+            ; Step 7b; keep the two in sync.
+            ;
+            ; The count is also the authoritative FAT-type test the
+            ; signature check above only approximates: fewer than 4085
+            ; clusters is FAT12, 65525 or more is FAT32.
+            mov     rf, mnt_sector
+            add16   rf, $13
+            call    mnt_get_le16            ; RD = 16-bit total sectors
+            mov     ra, rd
+            ldi     0
+            phi     r9
+            plo     r9                      ; R9:RA = total sectors
+            glo     ra
+            lbnz    mnt_have_total
+            ghi     ra
+            lbnz    mnt_have_total
+            mov     rf, mnt_sector
+            add16   rf, $20
+            call    mnt_get_le16            ; low word (RF left at $21)
+            mov     ra, rd
+            inc     rf
+            call    mnt_get_le16            ; high word
+            mov     r9, rd                  ; R9:RA = 32-bit total sectors
+mnt_have_total:
+            mov     rf, mnt_bpb
+            add16   rf, BPBBLK_DATA_LBA
+            call    mnt_get_lba             ; R7 = data_lba, low 16 bits
+            mov     rd, r7
+            mov     rf, mnt_bpb
+            add16   rf, BPBBLK_PART1_LBA
+            call    mnt_get_lba             ; R7 = part1_lba, low 16 bits
+            sub16   rd, r7                  ; RD = sectors before cluster 2
+            glo     rd
+            str     r2
+            glo     ra
+            sm
+            plo     ra
+            ghi     rd
+            str     r2
+            ghi     ra
+            smb
+            phi     ra
+            glo     r9
+            smbi    0
+            plo     r9
+            ghi     r9
+            smbi    0
+            phi     r9                      ; R9:RA = data-region sectors
+                                            ; (wraps huge if the VBR is
+                                            ; garbage -- rejected below)
+            mov     rf, mnt_bpb
+            add16   rf, BPBBLK_SPC_SHIFT
+            ldn     rf
+            plo     rc
+mnt_count_shift:
+            glo     rc
+            lbz     mnt_count_done
+            ghi     r9
+            shr
+            phi     r9
+            glo     r9
+            shrc
+            plo     r9
+            ghi     ra
+            shrc
+            phi     ra
+            glo     ra
+            shrc
+            plo     ra
+            dec     rc
+            lbr     mnt_count_shift
+mnt_count_done:
+            ghi     r9
+            lbnz    mnt_bad_vbr
+            glo     r9
+            lbnz    mnt_bad_vbr
+            glo     ra
+            smi     $F5
+            ghi     ra
+            smbi    $FF
+            lbdf    mnt_bad_vbr             ; count >= 65525: FAT32
+            glo     ra
+            smi     $F5
+            ghi     ra
+            smbi    $0F
+            lbnf    mnt_not_fat16           ; count < 4085: FAT12
+            inc     ra
+            mov     rd, ra
+            mov     rf, mnt_bpb
+            add16   rf, BPBBLK_MAX_CLUST
+            call    mnt_put16
 
             ; ---- Step 8: bpb_dev = the unit this partition is on ----
             ; This is what makes the drive read and write on the right

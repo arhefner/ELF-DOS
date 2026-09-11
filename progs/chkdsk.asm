@@ -2818,12 +2818,17 @@ chk_print_summary:
             call    K_INMSG
             db      13,10,0
 
-            ; total_bytes = mul16x8(max_clust, spc) * 512
+            ; total_bytes = mul16x8(max_clust - 1, spc) * 512 -- valid
+            ; clusters run 2..max_clust, so there are max_clust - 1 of
+            ; them. BUG FIX (2026-09-11): used max_clust itself, one
+            ; cluster too many (hidden until then by krnboot/MOUNT's much
+            ; larger max_clust over-estimate).
             mov     rf, chk_max_clust
             lda     rf
             phi     rd
             ldn     rf
             plo     rd
+            dec     rd
             mov     rf, chk_spc
             ldn     rf
             plo     rc

@@ -630,6 +630,7 @@ boot_bpb_off_done:
             ldn         rf
             lbnz        boot_drive_present
 
+boot_drive_absent:
 ; ---- absent: drive_present[idx] = 0; zero every OTHER local
 ; scratch field (boot_part1_lba is already 0) so Phase 2 below
 ; writes an all-zero drive_bpb_table entry, then skip straight to
@@ -772,23 +773,6 @@ boot_spc_done:
             glo         rd
             str         rf
 
-            ; max_clust = spf.lo - 1, $FF (re-read spf.lo from memory,
-            ; matching the original bpb_init's own pattern)
-            mov         rf,boot_spf
-            inc         rf
-            ldn         rf
-            smi         1
-            phi         rb
-            ldi         $FF
-            plo         rb
-
-            mov         rf,boot_max_clust
-            ghi         rb
-            str         rf
-            inc         rf
-            glo         rb
-            str         rf
-
             ; f_mul16: RF * RD -> RB
             mov         rf,rd               ; RF = sectors_per_fat
             ldi         0
@@ -872,6 +856,118 @@ boot_spc_done:
             inc         rf
             glo         r7
             str         rf
+
+; ---- Step 7b: max_clust = cluster count + 1, where
+; count = (total_sectors - (data_lba - part1_lba)) >> spc_shift.
+;
+; BUG FIX (2026-09-11): max_clust used to be estimated as spf*256-1, from
+; the FAT's size rather than the volume's. mkfs sizes the FAT generously,
+; so that overshoots real FAT16 volumes (+39 clusters on 32MB, +1605 on
+; 499MB). Those phantom entries are zero, so fat_alloc treated them as
+; free and could place file data past the end of the partition.
+;
+; The count also decides the FAT type, which is how the FAT spec defines
+; it: fewer than 4085 clusters is FAT12, 65525 or more is FAT32. This
+; kernel reads 16-bit FAT entries only, so either is left absent rather
+; than silently misread (MOUNT refuses them too).
+            mov         rf,boot_scratch+$13
+            lda         rf
+            plo         ra
+            ldn         rf
+            phi         ra                  ; RA = 16-bit total sectors
+            ldi         0
+            phi         r9
+            plo         r9
+            glo         ra
+            lbnz        boot_b7_have
+            ghi         ra
+            lbnz        boot_b7_have
+            mov         rf,boot_scratch+$20
+            lda         rf
+            plo         ra
+            lda         rf
+            phi         ra
+            lda         rf
+            plo         r9
+            ldn         rf
+            phi         r9                  ; R9:RA = 32-bit total sectors
+boot_b7_have:
+            mov         rf,boot_data_lba+1
+            lda         rf
+            phi         rd
+            ldn         rf
+            plo         rd                  ; RD = data_lba, low 16 bits
+            mov         rf,boot_part1_lba+2
+            ldn         rf
+            str         r2
+            glo         rd
+            sm
+            plo         rd
+            dec         rf
+            ldn         rf
+            str         r2
+            ghi         rd
+            smb
+            phi         rd                  ; RD = sectors before cluster 2
+            glo         rd
+            str         r2
+            glo         ra
+            sm
+            plo         ra
+            ghi         rd
+            str         r2
+            ghi         ra
+            smb
+            phi         ra
+            glo         r9
+            smbi        0
+            plo         r9
+            ghi         r9
+            smbi        0
+            phi         r9                  ; R9:RA = data-region sectors
+            mov         rf,boot_spc_shift
+            ldn         rf
+            plo         rc
+boot_b7_shift:
+            glo         rc
+            lbz         boot_b7_shifted
+            ghi         r9
+            shr
+            phi         r9
+            glo         r9
+            shrc
+            plo         r9
+            ghi         ra
+            shrc
+            phi         ra
+            glo         ra
+            shrc
+            plo         ra
+            dec         rc
+            lbr         boot_b7_shift
+boot_b7_shifted:
+            ghi         r9
+            lbnz        boot_drive_absent
+            glo         r9
+            lbnz        boot_drive_absent
+            glo         ra
+            smi         $F5
+            ghi         ra
+            smbi        $FF
+            lbdf        boot_drive_absent   ; count >= 65525: FAT32
+            glo         ra
+            smi         $F5
+            ghi         ra
+            smbi        $0F
+            lbnf        boot_drive_absent   ; count < 4085: FAT12
+            inc         ra
+            mov         rf,boot_max_clust
+            ghi         ra
+            str         rf
+            inc         rf
+            glo         ra
+            str         rf
+boot_b7_end:
 
 ;--------------------------------------------------------------
 ; Phase 2: copy every field computed above into drive_bpb_table[idx]
@@ -1074,8 +1170,22 @@ boot_drive_copy:
             add16       rd,DRIVE_LETTER_OFF
             add16       rd,r9               ; RD = &drive_letter[idx]
 
+            ; BUG FIX (2026-09-11): only a PRESENT slot gets a letter.
+            ; This used to assign C:-F: to all four MBR slots
+            ; unconditionally, breaking kernel_data.asm's invariant
+            ; (drive_letter[i] != 0 exactly when drive_present[i] != 0):
+            ; an empty or refused partition still showed up in MOUNT's
+            ; listing and counted as "mounted". Absent slots keep 0.
+            mov         rf,boot_present_addr
+            lda         rf
+            phi         rb
+            ldn         rf
+            plo         rb                  ; RB = &drive_present[idx]
+            ldn         rb
+            lbz         boot_letter_store   ; absent: D = 0, no letter
             glo         r9
             adi         BOOT_DRIVE_FIRST
+boot_letter_store:
             str         rd
 
 ; ---- advance to the next drive; loop while idx < MBR_PART_COUNT ----

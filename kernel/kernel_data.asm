@@ -46,14 +46,14 @@ bpb_spf:        dw      0               ; sectors per FAT (big-endian) --
                                         ; needed to locate FAT copy 2, 3, ...
 bpb_max_clust:  dw      0               ; highest valid cluster number
                                         ; (big-endian) -- bounds fat_alloc's
-                                        ; scan; derived as spf*256-1 rather
-                                        ; than from the BPB's total-sector
-                                        ; field, so it's a slight
-                                        ; over-estimate if the FAT was
-                                        ; sized looser than the true data
-                                        ; area (rare in practice, but a
-                                        ; known simplification -- see
-                                        ; bpb.asm)
+                                        ; scan. Exactly cluster count + 1,
+                                        ; computed from the BPB's total
+                                        ; sectors by krnboot/MOUNT (Step
+                                        ; 7b). Until 2026-09-11 it was
+                                        ; spf*256-1, which overshoots
+                                        ; nearly every real FAT16 volume
+                                        ; and let fat_alloc hand out
+                                        ; clusters past the partition end.
 
 bpb_dev:        db      0               ; block device unit number (0-7)
                                         ; this drive's partition lives on.

@@ -561,7 +561,10 @@ BPBBLK_SPC_SHIFT:  equ  13         ; 1 byte
 BPBBLK_ROOT_ENTS:  equ  14         ; 2 bytes
 BPBBLK_NUM_FATS:   equ  16         ; 1 byte
 BPBBLK_SPF:        equ  17         ; 2 bytes
-BPBBLK_MAX_CLUST:   equ  19          ; 2 bytes
+BPBBLK_MAX_CLUST:   equ  19          ; 2 bytes -- highest valid cluster:
+                    ; exactly the volume's cluster count + 1, so
+                    ; clusters 2..max_clust exist (2026-09-11; was
+                    ; an over-estimate derived from the FAT size)
 BPBBLK_DEV:         equ  21          ; 1 byte -- block device UNIT number
                     ; (0-7) this partition lives on, passed to
                     ; the BIOS in R8.1 on every f_ideread /
