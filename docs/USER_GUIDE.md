@@ -256,8 +256,8 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | Command | Usage | What it does |
 |---|---|---|
 | `TYPE` | `TYPE <filename>` | Displays a text file on the screen. |
-| `LESS` | `LESS <filename>` | Pages through a file, forward AND backward, by screen or by line. `SPACE`/`F`/PgDn = next page, `B`/PgUp = previous page, `g` = go to the top, `G` = go to the end; typing a number first jumps there -- `50g` (or `50G`; either letter works) goes to line 50, and a number past the end of the file shows the last page, the same as a bare `G`; Down-arrow/`J`/Ctrl-N/Ctrl-E = down one line, Up-arrow/`K`/Ctrl-P/Ctrl-Y = up one line (moving up or back past the point where `LESS` has any recorded history -- e.g. right after `G`, `g`, or a search match -- scans backward through the file for the true previous line/page instead of just stopping); `/` = search forward (case-sensitive), `N` = repeat the last search, `Q` = quit. A search pattern may contain escape sequences -- `\\n`, `\\r`, `\\t`, `\\0`, `\\\\` for a literal backslash, and `\\xHH` for any byte by hex value (exactly two digits) -- so you can search for tabs, line endings, or arbitrary binary bytes, and a pattern may span a line boundary. A backslash followed by anything else is reported as an error rather than searched for literally. |
-| `HEXDUMP` | `HEXDUMP <filename>` | Shows a file's raw bytes, in hexadecimal and as text, side by side. |
+| `LESS` | `LESS [-N] <filename>` | Pages through a file, forward AND backward, by screen or by line. `-N` numbers the lines, as in `less -N`: each line starts with its number, right-justified in 7 columns, and the text keeps the rest of the screen. Paging and scrolling cost nothing extra, but with `-N` a long jump into a large file (`G`, a search) has to count the lines it skips -- several times quicker than a numbered jump such as `50000g`, but no longer instant. `SPACE`/`F`/PgDn = next page, `B`/PgUp = previous page, `g` = go to the top, `G` = go to the end; typing a number first jumps there -- `50g` (or `50G`; either letter works) goes to line 50, and a number past the end of the file shows the last page, the same as a bare `G`; Down-arrow/`J`/Ctrl-N/Ctrl-E = down one line, Up-arrow/`K`/Ctrl-P/Ctrl-Y = up one line (moving up or back past the point where `LESS` has any recorded history -- e.g. right after `G`, `g`, or a search match -- scans backward through the file for the true previous line/page instead of just stopping); `/` = search forward (case-sensitive), `N` = repeat the last search, `Q` = quit. A search pattern may contain escape sequences -- `\\n`, `\\r`, `\\t`, `\\0`, `\\\\` for a literal backslash, and `\\xHH` for any byte by hex value (exactly two digits) -- so you can search for tabs, line endings, or arbitrary binary bytes, and a pattern may span a line boundary. A backslash followed by anything else is reported as an error rather than searched for literally. A line wider than the screen (`COLUMNS`) is cut off at the right edge instead of wrapping; the whole line is still searched. |
+| `HEXDUMP` | `HEXDUMP [-c] <filename>` | Shows a file's raw bytes, 16 to a row: the offset, the bytes in hexadecimal, and the same bytes as text. The rows appear in the same pager as `LESS`, with the same keys, except that a number before `g` is a byte offset (typed in decimal, e.g. `65536g`) rather than a line number, and a search matches the file's raw bytes, so `/\\x00\\xff` finds binary data. `-c` prints every row straight through with no paging, so the output can be redirected to a file: `HEXDUMP -c data.bin > dump.txt`. Offsets are shown in full for files of any size. Each row is fitted to the screen width (the `COLUMNS` variable): 16 bytes at 80 columns or when `COLUMNS` is not set, 12 at 64, and up to 32 on a wide screen. `-c` uses the same width. |
 | `COPY` | `COPY [-y] <source> <destination>` | Copies one file to another name, or one or more files into a directory. `-y` skips the "overwrite?" prompt. |
 | `MOVE` | `MOVE <source> <destination>` | Moves or renames one or more files, the same way `COPY` takes its arguments. |
 | `REN` | `REN <path> <newname>` | Renames a file or directory. It must stay in the same directory — use `MOVE` to move it elsewhere. |
@@ -282,6 +282,16 @@ batch files can read. They are persistent across reboots.
 | `EXPORT` | `EXPORT [name[=value]...]` | With no arguments, lists every variable. `EXPORT NAME=VALUE` sets one; `EXPORT NAME` sets the variable to an empty string. Use `UNSET` to delete a variable. |
 | `PRINTENV` | `PRINTENV [name...]` | With no arguments, lists every variable and its value. Given one or more names, prints just those values. |
 | `UNSET` | `UNSET name...` | Removes one or more variables. |
+
+Two variables describe your screen. `ROWS` is its height and `COLUMNS` its
+width, in characters; when they are not set, programs assume 24 by 80.
+`LS` fits its columns to `COLUMNS`; `LESS` and `HEXDUMP` use `ROWS` for the
+page length and cut every line, status line included, to fit `COLUMNS`;
+`HEXDUMP` also fits its rows to `COLUMNS`; `EDLIN` uses `ROWS` for its page
+length.
+`TERMSIZE` asks the terminal for its real size and sets both, so a line in
+`AUTOEXEC.BAT` is all it takes. On a 64-column terminal, for example,
+`EXPORT COLUMNS=64` is enough.
 
 ### Date, time, and the system
 

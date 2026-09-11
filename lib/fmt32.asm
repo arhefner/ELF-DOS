@@ -175,6 +175,68 @@ fsz_build_done:
             endp
 
 ; ----------------------------------------------------------------
+; fmt_uint32: format a 32-bit unsigned value as plain decimal digits,
+; with no commas and no leading zeros (0 -> "0", 4294967295 ->
+; "4294967295"). The same digit extraction as fmt_size32 above; only
+; the reassembly differs. Added 2026-09-11 for LESS -N's line numbers.
+;
+; Args:    RD:R8 = 32-bit value (RD = high word, R8 = low word)
+;          RF = destination buffer, at least 11 bytes
+; Returns: the buffer filled and null-terminated
+; Modifies: R7, R8, R9, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            proc    fmt_uint32
+
+            mov     rb, rf              ; RB = destination -- not touched
+                                        ; by _div32_by10 (R7/R9/RD:R8)
+            mov     rf, raw_digits
+            ldi     0
+            plo     rc                  ; RC.0 = digit count
+
+fu_extract:
+            ghi     rd
+            lbnz    fu_have_value
+            glo     rd
+            lbnz    fu_have_value
+            ghi     r8
+            lbnz    fu_have_value
+            glo     r8
+            lbnz    fu_have_value
+            glo     rc
+            lbnz    fu_extract_done     ; value used up: stop
+                                        ; (a value of 0 falls through
+                                        ; once, for its single '0')
+fu_have_value:
+            call    _div32_by10         ; RD:R8 = quotient, R9.0 = digit
+            glo     r9
+            adi     '0'
+            str     rf
+            inc     rf                  ; raw_digits[count] = digit
+            glo     rc
+            adi     1
+            plo     rc
+            lbr     fu_extract
+
+fu_extract_done:
+            ; RF = raw_digits + count; the digits are least significant
+            ; first, so copy them out backward
+            mov     r8, rb              ; R8 = write cursor
+fu_copy:
+            dec     rf
+            ldn     rf
+            str     r8
+            inc     r8
+            glo     rc
+            smi     1
+            plo     rc
+            lbnz    fu_copy
+            ldi     0
+            str     r8                  ; null-terminate
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; _div32_by10: divide a 32-bit value by 10 in place. No native divide
 ; on the 1802 -- standard "restoring division" via 32 bit-shifts: each
 ; iteration shifts the dividend left by 1 (low byte first, carry

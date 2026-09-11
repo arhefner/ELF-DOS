@@ -412,6 +412,15 @@ BATCH_ARGS_RESERVE_LEN: equ 149   ; total reservation size
 ; arithmetic anywhere, so no call-depth dependency, ever.
 STACK_RESERVE_LEN:  equ     128
 
+; REDIR_OBUF_LEN: redirected output is collected in a buffer this size
+; (kernel/redir_data.asm) and written to the file a buffer at a time.
+; It used to go through file_write one byte per call, and file_write
+; writes the whole sector back on every call -- 73 KB of HEXDUMP output
+; was 73,436 sector writes (2026-09-11). Kept in volatile RAM, so it
+; counts against the volatile margin; must stay <= 255 (the count is a
+; byte, and _type_to_file flushes when it reaches this value).
+REDIR_OBUF_LEN:     equ     128
+
 ; ----------------------------------------------------------------
 ; Disk geometry
 ; ----------------------------------------------------------------

@@ -49,6 +49,12 @@ redir_scratch:          db      0   ; shared 1-byte I/O scratch for
                                     ; (never in concurrent use -- this
                                     ; kernel is single-threaded)
 
+redir_ocount:           db      0   ; bytes waiting in redir_obuf
+redir_obuf:              ds      REDIR_OBUF_LEN ; redirected output,
+                                    ; written to the file a buffer at a
+                                    ; time rather than a byte at a time
+                                    ; (see _type_to_file)
+
 himem_scratch:           dw      0   ; scratch word used by
                                     ; _himem_reserve/_himem_release's
                                     ; SEX-protected 16-bit arithmetic
@@ -69,5 +75,7 @@ himem_scratch:           dw      0   ; scratch word used by
                 public  redir_stack_reserved
                 public  redir_scratch
                 public  himem_scratch
+                public  redir_ocount
+                public  redir_obuf
 
             endp

@@ -1,41 +1,54 @@
 ;
-; hexdump.asm - dump a file's contents in hex and ASCII
+; hexdump.asm - show a file's contents in hex and ASCII
 ;
-; Usage: HEXDUMP <filename>
+; Usage: HEXDUMP [-c] <filename>
 ;
-; Output format modeled on Linux's `hexdump -C`: one row per 16 bytes,
-; an 8-digit hex offset, the 16 bytes in hex (two groups of 8, with an
-; extra gap between them), then the same bytes as ASCII (printable
-; bytes as themselves, everything else as '.'), framed in '|...|'. A
-; short final row shows only the real bytes it has -- missing hex
-; positions are blank-padded so the '|' column still lines up, but the
-; ASCII field itself is never padded.
+; Rows are `hexdump -C` style -- an 8-digit hex offset, the bytes in hex
+; (two equal groups), then the same bytes as ASCII between bars:
 ;
-; File offsets printed here top out at 16 bits -- this program's own
-; offset tracking, not a kernel limitation anymore (kernel/file.asm's
-; FCB_FPOS/FCB_FSIZE support the full 32 bits as of 2026-07-26), so
-; the offset's high 4 hex digits are always "0000"; printed anyway, to
-; match hexdump -C's layout. Widening this program to track a real
-; 32-bit offset is a separate, not-yet-done follow-on.
+;   00000000  48 65 6c 6c 6f 0a 00 ff  01 02 03 04 05 06 07 08  |Hello...........|
 ;
-; The hex conversion (hex_nibble/hex_byte below) is hand-rolled rather
-; than using the BIOS's own f_hexout2 -- that routine has never been
-; used anywhere in this codebase (confirmed via grep), so its exact
-; register contract isn't verified on this hardware, and getting a hex
-; dump's own hex digits subtly wrong would defeat the entire point of
-; the tool. Plain shift/mask arithmetic needs no such trust.
+; The row length follows the COLUMNS environment variable: the most bytes
+; -- a multiple of 4, from 4 to 32 -- whose row fits in COLUMNS-1
+; characters, leaving the last column alone (many terminals wrap the
+; moment it is written). A row of n bytes is 14 + 4n characters, so an
+; 80-column screen (or no COLUMNS at all) gets the usual 16, a 64-column
+; one gets 12, and 132 columns get 28. -c follows COLUMNS too.
 ;
-; The row byte count and column index are both kept in memory, not
-; registers, across every K_INMSG/K_MSG/K_TYPE/K_FILE_READ call in the
-; row-printing loops below -- this project has only confirmed R9's
-; survival across f_msg/f_inmsg (CLAUDE.md gotcha #8), nothing for
-; K_TYPE, so nothing here relies on any register surviving a call
-; whose clobber list isn't already proven (RF/RC across K_TYPE is the
-; one exception, proven by progs/type.asm's own hot loop).
+; By default the rows are shown in the pager (lib/pager.asm), with the
+; same keys as LESS: SPACE/b page, arrows or j/k scroll a row, g/G top
+; and end, / search, n again, q quit. Two things mean something
+; different for a hex view, and the hex source decides both:
+;   - a number before g jumps to that BYTE OFFSET (typed in decimal),
+;     rounded down to its row;
+;   - a search matches the file's raw bytes, so a pattern like
+;     \x00\xff finds binary data, and a match can span rows.
+;
+; -c prints every row straight through instead, with no paging, so the
+; output can be redirected: HEXDUMP -c file > dump.txt. It reads the
+; very same rows from the very same source, so the two modes can never
+; disagree about a byte.
+;
+; Offsets are full 32-bit values, so files over 64K show their real
+; offsets. (This program used to format rows itself and kept only a
+; 16-bit offset; the formatting now lives in lib/src_hex.asm.)
+;
+; Below 31 columns even 4 bytes (a 30-character row) cannot fit, and
+; rows wrap.
 ;
 
 #include    include/opcodes.def
+#include    include/bios.inc
 #include    include/kernel_api.inc
+
+            extrn   pager_run
+            extrn   src_open
+            extrn   src_close
+            extrn   src_read_line
+            extrn   src_line_buf
+            extrn   hx_set_row
+            extrn   env_getenv
+            extrn   env_parse_uint
 
             org     PROG_BASE
 
@@ -48,226 +61,156 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = argv pointer, RC = argc (RC.0 alone is enough --
-            ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
-            ; program's own name; argv[1] is the filename argument.
-            glo     rc
-            smi     2
-            lbnf    usage               ; argc < 2: no filename given
-
-            mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
-            lda     rb
-            phi     rf
-            ldn     rb
-            plo     rf                  ; RF = argv[1] (filename)
-            mov     rd, hd_fcb          ; RD = our FCB struct
-            mov     ra, hd_iobuf        ; RA = our I/O buffer
-            ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
-                                        ; hd_fcb is a fixed address,
-                                        ; nothing to capture)
-            lbdf    not_found
-
-            mov     rf, hd_offset
+            ; RA = argv, RC.0 = argc. The argument scan makes no calls,
+            ; so it works in registers: R9.0 = index, R7.0 = -c seen,
+            ; R8 = the filename (0 until one is found).
             ldi     0
-            str     rf
-            inc     rf
-            str     rf                  ; hd_offset = 0
-
-row_loop:
-            mov     rf, hd_rowbuf
-            ldi     16
-            plo     rc
-            ldi     0
-            phi     rc                  ; RC = 16 (bytes requested)
-            mov     rd, hd_fcb          ; RD = FCB pointer (fixed --
-                                        ; RF untouched)
-            call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
-            lbdf    io_error
-
-            mov     rf, hd_row_count
-            glo     rc
-            str     rf                  ; hd_row_count = bytes read
-                                        ; (0-16)
-            lbz     done                ; 0 bytes: EOF
-
-            ; --- print the 8-digit offset ---
-            call    K_INMSG
-            db      "0000",0
-            mov     rf, hd_digits
-            mov     rd, hd_offset
-            lda     rd                  ; D = offset high byte
-            call    hex_byte
-            ldn     rd                  ; D = offset low byte
-            call    hex_byte
-            ldi     0
-            str     rf                  ; null-terminate hd_digits
-            mov     rf, hd_digits
-            call    K_MSG
-
-            call    K_INMSG
-            db      "  ",0
-
-            ; --- hex byte columns ---
-            mov     rf, hd_col
-            ldi     0
-            str     rf                  ; hd_col = 0
-hex_col:
-            mov     rf, hd_col
-            ldn     rf
-            xri     8
-            lbnz    hc_no_gap
-            call    K_INMSG
-            db      " ",0
-hc_no_gap:
-            mov     rf, hd_row_count
-            ldn     rf                  ; D = row_count
-            str     r2                  ; M(X) = row_count
-            mov     rf, hd_col
-            ldn     rf                  ; D = col (fresh read)
-            sm                          ; D = col - row_count
-            lbnf    hc_have_byte        ; DF=0 (borrow): col < row_count
-
-            call    K_INMSG
-            db      "   ",0
-            lbr     hc_next
-
-hc_have_byte:
-            ldi     0
+            plo     r7
             phi     r8
-            mov     rf, hd_col
-            ldn     rf
-            plo     r8                  ; R8 = col, zero-extended --
-                                        ; used only for this one add16,
-                                        ; never trusted across a call
-            mov     rf, hd_rowbuf
-            add16   rf, r8
-            ldn     rf                  ; D = the byte at this column
-            plo     rc                  ; stash it (mov below clobbers
-                                        ; D -- gotcha #4; this exact
-                                        ; ordering mistake was the
-                                        ; original bug here, every byte
-                                        ; printed as hd_digits' own
-                                        ; address low byte instead of
-                                        ; the real data)
-            mov     rf, hd_digits
-            glo     rc                  ; D = the byte (reloaded,
-                                        ; correct)
-            call    hex_byte
-            ldi     0
-            str     rf
-            mov     rf, hd_digits
-            call    K_MSG
-            call    K_INMSG
-            db      " ",0
+            plo     r8
+            ldi     1
+            plo     r9
 
-hc_next:
-            mov     rf, hd_col
-            ldn     rf
-            adi     1
-            str     rf
-            smi     16
-            lbnz    hex_col
-
-            ; --- ascii column ---
-            call    K_INMSG
-            db      " |",0
-
-            mov     rf, hd_col
-            ldi     0
-            str     rf                  ; hd_col = 0 (reused)
-ascii_col:
-            mov     rf, hd_row_count
-            ldn     rf
-            str     r2                  ; M(X) = row_count
-            mov     rf, hd_col
-            ldn     rf
-            sm                          ; D = col - row_count
-            lbdf    ascii_done          ; DF=1 (no borrow): col >= row_count
-
-            ldi     0
-            phi     r8
-            mov     rf, hd_col
-            ldn     rf
-            plo     r8                  ; R8 = col, zero-extended
-            mov     rf, hd_rowbuf
-            add16   rf, r8
-            ldn     rf                  ; D = the byte at this column
-
-            ; printable range $20-$7E; anything else prints as '.'
-            plo     rc                  ; stash it (very short-lived,
-                                        ; not across a call -- just to
-                                        ; survive the mov two lines
-                                        ; below, gotcha #4)
+arg_loop:
             glo     rc
-            smi     $20
-            lbnf    ascii_dot
-            glo     rc
-            smi     $7F
-            lbdf    ascii_dot
-
-            glo     rc
-            call    K_TYPE
-            lbr     ascii_next
-
-ascii_dot:
-            ldi     '.'
-            call    K_TYPE
-
-ascii_next:
-            mov     rf, hd_col
-            ldn     rf
-            adi     1
-            str     rf
-            lbr     ascii_col
-
-ascii_done:
-            call    K_INMSG
-            db      "|",13,10,0
-
-            ; --- advance the offset by the row's real byte count ---
-            mov     rf, hd_offset
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd                  ; RD = hd_offset
-            mov     rf, hd_row_count
-            ldn     rf
             str     r2
-            glo     rd
+            glo     r9
+            sm                          ; index - argc
+            lbdf    args_done           ; no borrow: index >= argc
+
+            glo     r9
+            shl                         ; 2*index (argc <= 16, fits)
+            str     r2
+            glo     ra
             add
             plo     rd
-            ghi     rd
+            ghi     ra
             adci    0
-            phi     rd
-            mov     rf, hd_offset
-            ghi     rd
+            phi     rd                  ; RD = &argv[index]
+            lda     rd
+            phi     rb
+            ldn     rd
+            plo     rb                  ; RB = argv[index]
+
+            ghi     rb
+            phi     rf
+            glo     rb
+            plo     rf                  ; RF = the same, to walk
+            ldn     rf
+            xri     '-'
+            lbnz    arg_name
+            inc     rf
+            ldn     rf
+            ani     $DF                 ; -c or -C
+            xri     'C'
+            lbnz    usage               ; any other flag
+            inc     rf
+            ldn     rf
+            lbnz    usage               ; "-cx" and the like
+            ldi     1
+            plo     r7                  ; -c seen
+            lbr     arg_next
+
+arg_name:
+            ghi     r8
+            lbnz    usage               ; a second filename
+            glo     r8
+            lbnz    usage
+            ghi     rb
+            phi     r8
+            glo     rb
+            plo     r8                  ; R8 = the filename
+
+arg_next:
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     arg_loop
+
+args_done:
+            ghi     r8
+            lbnz    have_name
+            glo     r8
+            lbz     usage               ; no filename at all
+have_name:
+            mov     rf, hd_continuous
+            glo     r7
+            str     rf                  ; kept in memory: env_getenv and
+            mov     rf, hd_file         ; src_open below clobber every
+            ghi     r8                  ; register
             str     rf
             inc     rf
-            glo     rd
+            glo     r8
             str     rf
 
-            ; a short row (< 16 bytes) is always the last one
-            mov     rf, hd_row_count
+            ; --- bytes per row from COLUMNS: n = (COLUMNS-15)/4, rounded
+            ; down to a multiple of 4 by hx_set_row, and held to 4..32.
+            ; Unset or 0 means an 80-column screen. ---
+            mov     rf, hd_cols_name
+            call    env_getenv          ; RF = value or 0
+            ghi     rf
+            lbnz    cols_have
+            glo     rf
+            lbz     cols_default        ; not set
+cols_have:
+            call    env_parse_uint      ; RD = the value
+            ghi     rd
+            lbnz    cols_wide           ; 256 or more
+            glo     rd
+            lbz     cols_default        ; 0
+            smi     143
+            lbdf    cols_wide           ; 143 or more: 32 bytes fit
+            glo     rd
+            smi     31
+            lbnf    cols_narrow         ; under 31: not even 4 fit
+            glo     rd
+            smi     15
+            shr
+            shr                         ; (COLUMNS-15)/4, 4..31
+            lbr     cols_set
+cols_wide:
+            ldi     32
+            lbr     cols_set
+cols_narrow:
+            ldi     4
+            lbr     cols_set
+cols_default:
+            ldi     16
+cols_set:
+            call    hx_set_row          ; before src_open reads a row
+
+            mov     rf, hd_file
+            lda     rf
+            phi     r8
             ldn     rf
-            smi     16
-            lbnz    done
+            plo     r8
+            mov     rf, r8
+            call    src_open
+            lbdf    not_found
 
-            lbr     row_loop
+            mov     rf, hd_continuous
+            ldn     rf
+            lbnz    continuous
 
-done:
-            mov     rd, hd_fcb
-            call    K_FILE_CLOSE
+            mov     rf, hd_name         ; shown on the status line
+            ldi     0                   ; options: none (no line numbers)
+            call    pager_run
+            call    src_close
             ldi     0                   ; exit code 0 = success
             rtn
 
-io_error:
-            mov     rd, hd_fcb
-            call    K_FILE_CLOSE
+continuous:
+            call    src_read_line
+            lbdf    cont_done
+            mov     rf, src_line_buf
+            call    K_MSG
             call    K_INMSG
-            db      "Read error.",13,10,0
-            ldi     1
+            db      13,10,0
+            lbr     continuous
+
+cont_done:
+            call    src_close
+            ldi     0
             rtn
 
 not_found:
@@ -278,72 +221,13 @@ not_found:
 
 usage:
             call    K_INMSG
-            db      "Usage: HEXDUMP <filename>",13,10,0
+            db      "Usage: HEXDUMP [-c] <filename>",13,10,0
             ldi     1                   ; exit code 1 = error
             rtn
 
-;------------------------------------------------------------------
-; hex_nibble: convert a 4-bit value (0-15) in D to its lowercase ASCII
-; hex digit.
-; Args:    D = nibble (0-15)
-; Returns: D = ASCII character ('0'-'9' or 'a'-'f')
-; Modifies: D only
-;------------------------------------------------------------------
-hex_nibble:
-            smi     10
-            lbnf    hn_digit            ; DF=0 (borrow): nibble < 10
-            adi     'a'                 ; nibble >= 10: D = 'a' +
-                                        ; (nibble-10)
-            rtn
-hn_digit:
-            adi     10 + '0'            ; D = (nibble-10) + 10 + '0'
-                                        ; = nibble + '0'
-            rtn
-
-;------------------------------------------------------------------
-; hex_byte: write 2 lowercase ASCII hex digits for a byte to *RF,
-; advancing RF by 2. Does not null-terminate.
-; Args:    D = byte value, RF = destination
-; Returns: RF advanced by 2
-; Modifies: D, RC (used as local scratch across the two hex_nibble
-;           calls -- never live across this call at either of its two
-;           call sites above)
-;------------------------------------------------------------------
-hex_byte:
-            plo     rc                  ; RC.0 = byte value (stash
-                                        ; across the two hex_nibble
-                                        ; calls below)
-            glo     rc
-            shr
-            shr
-            shr
-            shr                         ; D = high nibble (SHR always
-                                        ; zero-fills the top bit, so
-                                        ; four of them give a clean
-                                        ; >>4 with no DF dependency)
-            call    hex_nibble
-            str     rf
-            inc     rf
-
-            glo     rc
-            ani     $0F                 ; D = low nibble
-            call    hex_nibble
-            str     rf
-            inc     rf
-            rtn
-
-.align  32                  ; FCB must not straddle a page --
-                            ; file_open rejects one that does
-hd_fcb:         ds      FCB_LEN
-#if (hd_fcb & $FF) > (256 - FCB_LEN)
-#error hd_fcb crosses a page boundary
-#endif
-hd_iobuf:       ds      FCB_IOBUF_LEN
-hd_rowbuf:      ds      16
-hd_offset:      dw      0
-hd_row_count:   db      0
-hd_col:         db      0
-hd_digits:      ds      3           ; scratch for hex_byte's 2-digit
-                                    ; output + forced NUL
+hd_continuous:  db      0
+hd_file:        dw      0           ; the filename argument
+hd_name:        db      "HEXDUMP",0
+hd_cols_name:   db      "COLUMNS",0
 
             end     start

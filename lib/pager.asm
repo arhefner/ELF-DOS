@@ -9,34 +9,60 @@
 ;
 ;   THE SOURCE CONTRACT -- what a data source must provide
 ;   ------------------------------------------------------
-;     src_rewind    ()
-;           reset to the very beginning: src_pos = 0, buffers invalid.
-;     src_seek_to   (RF = ptr to a 4-byte position)
-;           reposition there. The CALLER updates src_pos to match; this
-;           only moves the source. (An asymmetry inherited from the
-;           original code and deliberately left alone during the split
-;           -- see progs/less.asm's history in CLAUDE.md.)
-;     src_read_line ()
-;           DF=0: src_line_buf holds the line starting at the current
-;                 position, NUL-terminated and capped at the source's
-;                 own maximum, and src_pos has advanced past it.
-;           DF=1: nothing left.
-;     src_prev_start(RF = ptr to a 4-byte position)
-;           src_prev_result = the start of the line BEFORE it.
+;     src_open      (RF = whatever identifies the data -- a path for a file)
+;           DF=0 ready, positioned at 0;  DF=1 failed.
 ;     src_close     ()
 ;           release whatever the source holds.
+;     src_rewind    ()
+;           back to the very beginning: src_pos = 0, buffers invalid.
+;     src_seek_to   (RF = ptr to a 4-byte position; may be src_pos itself)
+;           reposition there AND set src_pos to match. (Until 2026-09-10
+;           the caller had to set src_pos itself; every caller did, so
+;           the source now does it and the pager's copies are gone.)
+;     src_read_line ()
+;           DF=0: src_line_buf holds the line starting at src_pos,
+;                 NUL-terminated and capped at the source's own maximum,
+;                 and src_pos has advanced past it.
+;           DF=1: nothing left.
+;     src_prev_start(RF = ptr to a 4-byte position, > 0)
+;           src_prev_result = the start of the line BEFORE it -- or of
+;           the line containing it, when the position is mid-line.
+;     src_last_page (D = n)
+;           src_goto_result = where the last n lines begin.
+;     src_goto      (RF = ptr to a 4-byte count typed by the user)
+;           DF=0: src_goto_result = where that count lands (a line
+;           number for text, a byte offset for a fixed-width source).
+;           DF=1: past the end; the pager shows the last page instead.
+;     src_search    (RF = pattern bytes, RC.0 = length, RD = ptr to start)
+;           DF=0: src_search_top = a displayable position containing the
+;           match, src_search_resume = where a following search resumes.
+;           DF=1: not found. Either way the source's read position is
+;           left unspecified -- the pager always seeks afterward.
+;     src_line_of   (RF = ptr to a 4-byte position)
+;           DF=0: RD:R8 = that position's 1-based line number (RD high).
+;           DF=1: this source has no line numbers; -N is turned off.
+;           The read position is left unspecified, as after src_search.
+;     src_line_mark (RF = ptr to a 4-byte position, RD = ptr to its
+;           4-byte line number)
+;           a number the pager already knows, so a later src_line_of can
+;           count from there. Must not move the read position.
 ;
-;   Shared variables: src_pos (current position) and src_line_buf (the
-;   line text), both owned and published by the source.
+;   Shared variables, all owned and published by the source: src_pos,
+;   src_line_buf, src_prev_result, src_goto_result, src_search_top and
+;   src_search_resume. A program links exactly ONE source, so every
+;   source uses these same names.
 ;
 ;   A POSITION IS AN OPAQUE 4-BYTE TOKEN. The pager stores positions in
 ;   less_visible[] and less_stack and hands them back to the source, but
-;   never interprets one. That is the whole point: a byte offset for a
-;   file (lib/src_file.asm), the same for a hex view, LBA*512 + row*16
-;   for a sector dumper -- nothing here changes.
+;   never interprets one. That is the whole point: a byte offset into a
+;   text file (lib/src_file.asm), a row-aligned byte offset for a hex
+;   view (lib/src_hex.asm), LBA*512 + row*16 for a sector dumper --
+;   nothing here changes.
 ;
-;   Entry point: pager_run (). Runs until the user quits, then returns;
-;   the caller opens the source beforehand and closes it afterward.
+;   Entry point: pager_run (RF = the program's name, NUL-terminated, shown
+;   on the status line; D = options, PAGER_OPT_NUMBERS = number the lines,
+;   like less -N). Runs until the user quits, then returns; the caller
+;   opens the source beforehand and closes it afterward.
 ;
 ; Terminal behaviour (page redraw vs. IND/RI single-line scrolling, why
 ; there is no DECSTBM scroll region, and why every scrolled row is
@@ -51,6 +77,7 @@
 
 LESS_SEARCH_MAX: equ    32          ; longest search pattern (incl NUL)
 LESS_PAGE_LINES: equ    23          ; default screen height - 1
+LESS_WIDTH_DEFAULT: equ 79          ; widest line: 80 columns - 1
 LESS_MAX_VISIBLE: equ   80          ; cap on less_page_lines -- bounds the
                                     ; less_visible[] sliding window's size;
                                     ; a ROWS value producing a larger page
@@ -64,6 +91,11 @@ LESS_MAX_VISIBLE: equ   80          ; cap on less_page_lines -- bounds the
                                     ; formatter never needs a 3rd digit
 COUNT_MAX_DIGITS: equ   9           ; a 9-digit count still fits
                                     ; comfortably inside 32 bits
+PAGER_OPT_NUMBERS: equ  1           ; pager_run's D: number the lines
+PAGER_OPT_NOWRAP:  equ  2           ; pager_run's D: -S, truncate + hscroll
+LINENUM_WIDTH:   equ    7           ; less -N: numbers right-justified in
+                                    ; 7 columns, then a space
+LINENUM_COL:     equ    8           ; ... so the whole number column is 8 wide
 LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
                                     ; <= 255 -- less_stack_count is a byte)
 
@@ -72,7 +104,6 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   src_seek_to
             extrn   src_read_line
             extrn   src_prev_start
-            extrn   src_close
             extrn   src_pos
             extrn   src_line_buf
             extrn   src_prev_result
@@ -82,6 +113,13 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   src_last_page
             extrn   src_goto_result
             extrn   src_goto
+            extrn   src_line_of
+            extrn   src_line_mark
+            extrn   src_set_mode
+            extrn   src_at_line_start
+            extrn   src_row_wrapped
+            extrn   fmt_uint32
+            extrn   subbyte32
             extrn   shl32
             extrn   add32
             extrn   addbyte32
@@ -119,12 +157,52 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   less_count_buf
             extrn   less_count_len
             extrn   less_count_pending
+            extrn   less_title
+            extrn   less_cols_name
+            extrn   less_width
+            extrn   less_col
+            extrn   less_status_room
+            extrn   less_numbers
+            extrn   less_nowrap
+            extrn   less_hshift
+            extrn   less_top_line
+            extrn   less_next_line
+            extrn   less_row_line
+            extrn   less_row_text
+            extrn   less_room
+            extrn   less_num_digits
+            extrn   less_num_buf
+
+            plo     r9                  ; D = options -- before any mov
+            mov     r8, less_numbers    ; clobbers it (gotcha #4)
+            glo     r9
+            ani     PAGER_OPT_NUMBERS
+            str     r8
+            mov     r8, less_nowrap
+            glo     r9
+            ani     PAGER_OPT_NOWRAP
+            str     r8
+
+            mov     r8, less_title      ; the caller's name for itself,
+            ghi     rf                  ; for the status line -- stashed
+            str     r8                  ; before src_rewind can clobber RF
+            inc     r8
+            glo     rf
+            str     r8
 
             ; --- init state ---
             call    src_rewind          ; the SOURCE resets its own state
                                         ; (src_pos = 0, buffers invalidated)
             mov     rf, less_top
             call    zero4bytes
+            mov     rf, less_top_line   ; ... which is line 1
+            call    zero4bytes
+            mov     rf, less_top_line
+            inc     rf
+            inc     rf
+            inc     rf
+            ldi     1
+            str     rf
             mov     rf, less_stack_count
             ldi     0
             str     rf
@@ -194,6 +272,77 @@ less_draw_first:
             str     rf
 
 less_draw_first2:
+            ; --- read COLUMNS the same way. Nothing the pager prints
+            ; may wrap: a wrapped line or status line scrolls the whole
+            ; screen, and then no row is where the scroll routines
+            ; expect it. So every line -- the source's and the status
+            ; line -- stops at COLUMNS-1 display columns, never touching
+            ; the last column, which many terminals wrap on the moment
+            ; it is written. An unset, zero or one-column value means
+            ; 80. ---
+            mov     rf, less_width
+            ldi     LESS_WIDTH_DEFAULT
+            str     rf
+            mov     rf, less_cols_name
+            call    env_getenv          ; RF = value or 0
+            ghi     rf
+            lbnz    less_have_cols
+            glo     rf
+            lbz     less_draw_first3    ; not set: keep the default
+less_have_cols:
+            call    env_parse_uint      ; RD = parsed value
+            ghi     rd
+            lbnz    less_cols_wide      ; >= 256: as wide as a byte goes
+            glo     rd
+            smi     2
+            lbnf    less_draw_first3    ; 0 or 1: keep the default
+            glo     rd
+            smi     1
+            plo     r9
+            mov     rf, less_width
+            glo     r9
+            str     rf                  ; limit = COLUMNS - 1
+            lbr     less_draw_first3
+less_cols_wide:
+            mov     rf, less_width
+            ldi     255
+            str     rf
+less_draw_first3:
+            ; --- tell the source the display mode + per-row text width. In
+            ; wrap mode the source breaks rows to fit that width exactly
+            ; (COLUMNS-1, less the 8-wide number column when -N is on); in
+            ; nowrap (-S) mode the source returns whole lines and the width
+            ; is unused. ---
+            mov     rf, less_width
+            ldn     rf
+            plo     r9                  ; R9.0 = width
+            mov     rf, less_nowrap
+            ldn     rf
+            lbnz    lsm_room            ; -S: room = width
+            mov     rf, less_numbers
+            ldn     rf
+            lbz     lsm_room            ; no -N: room = width
+            glo     r9
+            smi     LINENUM_COL
+            lbnf    lsm_min             ; width < 8: clamp
+            lbz     lsm_min             ; width == 8: clamp
+            plo     r9                  ; room = width - 8
+            lbr     lsm_room
+lsm_min:
+            ldi     1
+            plo     r9
+lsm_room:
+            glo     r9
+            plo     rc                  ; RC.0 = room
+            mov     rf, less_nowrap
+            ldn     rf
+            lbz     lsm_wrap            ; nowrap flag clear -> wrapping
+            ldi     0
+            lbr     lsm_set
+lsm_wrap:
+            ldi     1
+lsm_set:
+            call    src_set_mode        ; D = wrap flag, RC.0 = room
             call    draw_page
             lbr     main_loop
 
@@ -354,6 +503,12 @@ less_escape:
             xri     'B'
             lbz     cmd_line_down
             glo     r9
+            xri     'C'
+            lbz     cmd_hscroll_right   ; Right arrow (-S mode only)
+            glo     r9
+            xri     'D'
+            lbz     cmd_hscroll_left    ; Left arrow (-S mode only)
+            glo     r9
             xri     '5'
             lbz     less_escape_pgup
             glo     r9
@@ -390,6 +545,9 @@ cmd_forward:
             ; start of the next page with no seek needed.
             mov     rf, src_pos
             mov     rd, less_top
+            call    copy4bytes
+            mov     rf, less_next_line  ; and its number is simply the
+            mov     rd, less_top_line   ; one after the old bottom row's
             call    copy4bytes
 
             call    draw_page
@@ -541,8 +699,30 @@ cmd_goto_end:
             mov     rf, src_goto_result
             mov     rd, less_top
             call    copy4bytes
+            call    less_goto_end       ; last page: mark EOF so the
+            lbr     main_loop           ; status shows (END) and forward/
+                                        ; down are no-ops
+
+;------------------------------------------------------------------
+; less_goto_end: like less_goto, but for a jump that lands on the file's
+; LAST page (G, or a numbered jump past the end). draw_page only sets
+; less_at_eof when a read hits EOF DURING the draw, i.e. on a SHORT last
+; page; a last page that is exactly full ends right at EOF without a
+; short read, so less_at_eof would stay 0 and the status would read as
+; if there were more below (and forward/down would try to move). Since
+; a last-page jump is at the end by construction, set less_at_eof here
+; and reprint the status row so it shows (END). Redundant-but-harmless
+; on a short page (draw already set it). Verified: after G the last real
+; line is always on screen (the backward scan is exact); this only fixes
+; the status/at-end behaviour, not what is displayed.
+;------------------------------------------------------------------
+less_goto_end:
             call    less_goto
-            lbr     main_loop
+            mov     rf, less_at_eof
+            ldi     1
+            str     rf
+            call    less_reprint_status
+            rtn
 
 ;------------------------------------------------------------------
 cmd_search:
@@ -632,7 +812,6 @@ cmd_next:
 
 ;------------------------------------------------------------------
 cmd_quit:
-            call    src_close
             call    K_INMSG
             db      13,10,0             ; land the shell's next prompt
                                         ; at the start of a fresh line
@@ -669,7 +848,7 @@ cgn_past_end:
             mov     rf, src_goto_result
             mov     rd, less_top
             call    copy4bytes
-            call    less_goto
+            call    less_goto_end       ; past the end: same as G
             lbr     main_loop
 
 ;------------------------------------------------------------------
@@ -818,10 +997,7 @@ lsf_notfound:
             ; touching; less_page_end holds exactly the right value
             ; (snapshotted by draw_page's own dp_status, every time)
             mov     rf, less_page_end
-            mov     rd, src_pos
-            call    copy4bytes
-            mov     rf, src_pos
-            call    src_seek_to
+            call    src_seek_to         ; also sets src_pos
 
             mov     rf, less_status_mode
             ldi     1
@@ -855,18 +1031,50 @@ lsf_notfound:
             rtn
 
 ;------------------------------------------------------------------
-; less_goto: seek to less_top (via src_seek_to), set src_pos =
-; less_top, and redraw.
+; less_goto: seek to less_top (src_seek_to also sets src_pos), and
+; redraw.
 ;------------------------------------------------------------------
 less_goto:
+            call    less_sync_top_line  ; a jump: ask the source what
+                                        ; line the new top is
             mov     rf, less_top
             call    src_seek_to
 
-            mov     rf, less_top
-            mov     rd, src_pos
-            call    copy4bytes
-
             call    draw_page
+            rtn
+
+;------------------------------------------------------------------
+; less_sync_top_line: with -N on, less_top_line = the source's line
+; number for less_top. Called only where less_top has just jumped; a
+; sequential move knows the number already. The source leaves its read
+; position unspecified, so every caller seeks right afterward. A source
+; with no line numbers (DF=1) turns -N off for the rest of the session.
+;------------------------------------------------------------------
+less_sync_top_line:
+            mov     rf, less_numbers
+            ldn     rf
+            lbz     lstl_done
+            mov     rf, less_top
+            call    src_line_of         ; RD:R8 = its number
+            lbdf    lstl_none
+            mov     rf, less_top_line
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            inc     rf
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
+lstl_done:
+            rtn
+lstl_none:
+            mov     rf, less_numbers
+            ldi     0
+            str     rf
             rtn
 
 ;------------------------------------------------------------------
@@ -912,6 +1120,9 @@ draw_page:
             mov     rf, less_lines_this_page
             ldi     0
             str     rf
+            mov     rf, less_top_line   ; row 0's number (unused without
+            mov     rd, less_row_line   ; -N); put_row advances it
+            call    copy4bytes
 
 dp_loop:
             ; less_visible[i] = src_pos (i = less_lines_this_page,
@@ -931,8 +1142,34 @@ dp_loop:
             call    src_read_line
             lbdf    dp_eof
 
+            ; -N number bookkeeping. less_row_line holds the CURRENT row's
+            ; source line number. Row 0 already has it (= less_top_line, and
+            ; the source is told the top's number here so a later jump counts
+            ; from it -- not before the read: a top at EOF is no line). A
+            ; later row that BEGINS a new source line bumps the number by 1;
+            ; a wrapped continuation keeps it (put_row blanks the column). A
+            ; nowrap source always starts a line, so this is +1 per row --
+            ; exactly the old behaviour.
+            mov     rf, less_numbers
+            ldn     rf
+            lbz     dp_print            ; no -N: no number work at all
+            mov     rf, less_lines_this_page
+            ldn     rf
+            lbz     dp_mark_top         ; row 0: no bump, mark the top
+            mov     rf, src_at_line_start
+            ldn     rf
+            lbz     dp_print            ; continuation row: keep the number
+            mov     rf, less_row_line
+            ldi     1
+            call    addbyte32           ; a new source line
+            lbr     dp_print
+dp_mark_top:
+            mov     rf, less_top
+            mov     rd, less_top_line
+            call    src_line_mark
+dp_print:
             mov     rf, src_line_buf
-            call    K_MSG
+            call    put_row             ; number + line, cut to the width
             call    K_INMSG
             db      13,10,0
 
@@ -959,6 +1196,19 @@ dp_eof:
             str     rf
 
 dp_status:
+            ; less_next_line = the number the row AFTER the bottom will get:
+            ; the bottom row's own number, plus 1 unless that row wrapped
+            ; (in which case the next row continues the same source line).
+            mov     rf, less_row_line
+            mov     rd, less_next_line
+            call    copy4bytes
+            mov     rf, src_row_wrapped
+            ldn     rf
+            lbnz    dp_status_vis       ; wrapped: next row is a continuation
+            mov     rf, less_next_line
+            ldi     1
+            call    addbyte32
+dp_status_vis:
             mov     rb, less_visible_count
             mov     rf, less_lines_this_page
             ldn     rf
@@ -999,6 +1249,15 @@ print_status_line:
             call    K_INMSG
             db      27,'[K',0
 
+            ; everything below goes through psl_put, which stops once
+            ; this line has used up its room (see less_draw_first2)
+            mov     rf, less_width
+            ldn     rf
+            plo     r9
+            mov     rf, less_status_room
+            glo     r9
+            str     rf
+
             mov     rf, less_status_mode
             ldn     rf
             lbz     psl_normal
@@ -1012,24 +1271,335 @@ psl_normal:
             ldn     rf
             lbnz    psl_end
 
-            call    K_INMSG
-            db      "-- LESS: SPACE next  b back  g top  G end  / search  n again  q quit --",0
+            mov     rf, psl_s_open
+            call    psl_put
+            mov     rf, less_title
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, r8
+            call    psl_put
+            mov     rf, less_width
+            ldn     rf
+            smi     LESS_WIDTH_DEFAULT
+            lbdf    psl_long            ; 80 columns or more: the full text
+            mov     rf, psl_s_short     ; narrower: the same keys, briefer
+            call    psl_put
+            rtn
+psl_long:
+            mov     rf, psl_s_long
+            call    psl_put
             rtn
 
 psl_end:
-            call    K_INMSG
-            db      "-- (END) --  b back  g top  / search  q quit --",0
+            mov     rf, psl_s_end
+            call    psl_put
             rtn
 
 psl_notfound:
-            call    K_INMSG
-            db      "-- Pattern not found -- press any key --",0
+            mov     rf, psl_s_notfound
+            call    psl_put
             rtn
 
 psl_bad_escape:
-            call    K_INMSG
-            db      "-- Bad escape (use \\ \n \r \t \0 \xHH) -- press any key --",0
+            mov     rf, psl_s_bad_escape
+            call    psl_put
             rtn
+
+;------------------------------------------------------------------
+; psl_put: print the NUL-terminated string at RF, one character at a
+; time, for as long as less_status_room lasts -- a narrow screen gets a
+; cut-off status line rather than a wrapped one.
+; Args: RF = string.  Modifies: R8, D (RF advanced; RF survives K_TYPE,
+; which progs/type.asm's own hot loop has always depended on)
+;------------------------------------------------------------------
+psl_put:
+            ldn     rf
+            lbz     psl_put_done        ; end of the string
+            mov     r8, less_status_room
+            ldn     r8
+            lbz     psl_put_done        ; out of room
+            smi     1
+            str     r8
+            lda     rf
+            call    K_TYPE
+            lbr     psl_put
+psl_put_done:
+            rtn
+
+;------------------------------------------------------------------
+; put_row: print one row -- the line number first when -N is on, then
+; the line itself, the two together cut to less_width columns.
+;
+; The number is right-justified in LINENUM_WIDTH columns and followed by
+; a space, as real less -N does; a number wider than that just takes
+; more room. put_line then gets whatever columns remain, and counts its
+; tab stops from where the text starts, not from the left edge. On a
+; screen too narrow for even the number, the number itself is cut and
+; the text gets no room at all -- nothing the pager prints may wrap.
+;
+; Args:    RF = NUL-terminated line.
+; Uses:    less_row_line, printed and then advanced by 1 (with -N only).
+; Modifies: everything
+;------------------------------------------------------------------
+put_row:
+            mov     r8, less_row_text   ; K_MSG moves RF: keep the line
+            ghi     rf
+            str     r8
+            inc     r8
+            glo     rf
+            str     r8
+
+            mov     rf, less_width
+            ldn     rf
+            plo     r9
+            mov     rf, less_room
+            glo     r9
+            str     rf                  ; room = the whole width
+
+            mov     rf, less_numbers
+            ldn     rf
+            lbz     pr_text
+            mov     rf, src_at_line_start
+            ldn     rf
+            lbz     pr_blanks           ; a wrapped continuation row: the
+                                        ; number column is left blank
+
+            mov     rf, less_row_line
+            lda     rf
+            phi     rd
+            lda     rf
+            plo     rd
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, less_num_digits
+            call    fmt_uint32
+
+            ; R9.0 = how many digits
+            mov     rf, less_num_digits
+            ldi     0
+            plo     r9
+pr_len:
+            lda     rf
+            lbz     pr_len_done
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     pr_len
+pr_len_done:
+            ; less_num_buf = spaces up to LINENUM_WIDTH, digits, a space.
+            ; No calls from here to the K_MSG, so registers are safe.
+            mov     rd, less_num_buf    ; write cursor
+            glo     r9
+            smi     LINENUM_WIDTH
+            lbdf    pr_digits           ; that wide already: no padding
+            sdi     0                   ; D = LINENUM_WIDTH - digits
+            plo     rb
+pr_pad:
+            ldi     ' '
+            str     rd
+            inc     rd
+            glo     rb
+            smi     1
+            plo     rb
+            lbnz    pr_pad
+pr_digits:
+            mov     rf, less_num_digits
+pr_copy:
+            lda     rf
+            lbz     pr_copy_done
+            str     rd
+            inc     rd
+            lbr     pr_copy
+pr_copy_done:
+            ldi     ' '
+            str     rd
+            inc     rd
+            ldi     0
+            str     rd
+
+            ; RB.0 = the prefix's length: max(digits, width) + 1
+            glo     r9
+            smi     LINENUM_WIDTH
+            lbdf    pr_wide
+            ldi     LINENUM_WIDTH+1
+            lbr     pr_have_len
+pr_wide:
+            glo     r9
+            adi     1
+pr_have_len:
+            plo     rb
+
+            mov     rf, less_width
+            ldn     rf
+            str     r2
+            glo     rb
+            sm                          ; prefix - width
+            lbdf    pr_cut              ; no borrow: it fills the row
+
+            sdi     0                   ; room = width - prefix
+            plo     r9
+            mov     rf, less_room
+            glo     r9
+            str     rf
+            lbr     pr_print
+
+pr_cut:
+            mov     rf, less_width      ; end the prefix at the width
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     r9
+            mov     rf, less_num_buf
+            add16   rf, r9
+            ldi     0
+            str     rf
+            mov     rf, less_room
+            ldi     0
+            str     rf                  ; and leave the text no room
+
+pr_print:
+            mov     rf, less_num_buf
+            call    K_MSG
+
+pr_text:
+            mov     rf, less_row_text
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, r8
+            call    put_line
+            rtn                         ; the caller advances less_row_line
+                                        ; (only a line-start row bumps it, so
+                                        ; the count can't be done here)
+
+;------------------------------------------------------------------
+; pr_blanks: -N continuation row -- fill the number column with spaces
+; (min(width, LINENUM_COL) of them) instead of a number, leaving the text
+; the same room a numbered row leaves it, then print the text.
+;------------------------------------------------------------------
+pr_blanks:
+            mov     rf, less_width
+            ldn     rf
+            plo     r9                  ; R9.0 = width
+            smi     LINENUM_COL
+            lbnf    pr_bl_narrow        ; width < 8
+            plo     rb                  ; RB.0 = room = width - 8
+            mov     rf, less_room
+            glo     rb
+            str     rf
+            ldi     LINENUM_COL
+            plo     rb                  ; RB.0 = blank count = 8
+            lbr     pr_bl_emit
+pr_bl_narrow:
+            mov     rf, less_room
+            ldi     0
+            str     rf                  ; room = 0
+            glo     r9
+            plo     rb                  ; blank count = width
+pr_bl_emit:
+            mov     rd, less_num_buf
+pr_bl_loop:
+            glo     rb
+            lbz     pr_bl_done
+            ldi     ' '
+            str     rd
+            inc     rd
+            glo     rb
+            smi     1
+            plo     rb
+            lbr     pr_bl_loop
+pr_bl_done:
+            ldi     0
+            str     rd                  ; NUL-terminate
+            mov     rf, less_num_buf
+            call    K_MSG
+            lbr     pr_text
+
+;------------------------------------------------------------------
+; put_line: print a line from the source, cut at less_room DISPLAY
+; columns -- the `less -S` behaviour. less_room is set by put_row: the
+; whole width, or what a line number leaves of it. The line itself is untouched; only
+; what reaches the screen is shortened, so searching, positions and
+; scrolling never see the difference.
+;
+; A TAB moves to the next multiple of 8 and is printed only if it lands
+; no further right than less_room; any other byte counts as one column.
+; A cursor sitting at column less_room is fine -- only a character
+; printed THERE would wrap -- so a tab may land exactly on it.
+;
+; Args:    RF = NUL-terminated line
+; Modifies: R8, R9, D, DF (RF advanced; it survives K_TYPE, which
+;           progs/type.asm's own hot loop has always depended on)
+;------------------------------------------------------------------
+put_line:
+            ; The source has already applied the -S horizontal scroll: it
+            ; skipped less_hshift display columns while READING, so the
+            ; buffer at RF already starts at the visible edge and can reach
+            ; arbitrarily far into a long line without the pager ever holding
+            ; the scrolled-past prefix. (hshift is 0 in wrap mode and for
+            ; HEXDUMP, where RF is simply the row start.) Nothing to skip
+            ; here -- render up to less_room columns straight from RF.
+pl_render:
+            mov     r8, less_col
+            ldi     0
+            str     r8                  ; screen column 0
+
+pl_loop:
+            ldn     rf
+            lbz     pl_done             ; end of the line
+            xri     9
+            lbz     pl_tab
+
+            mov     r8, less_room
+            ldn     r8
+            str     r2
+            mov     r8, less_col        ; (mov leaves M(R2) alone)
+            ldn     r8
+            sm                          ; column - width
+            lbdf    pl_done             ; no borrow: no room for it
+            ldn     r8
+            adi     1
+            str     r8                  ; column + 1
+            lda     rf
+            call    K_TYPE
+            lbr     pl_loop
+
+pl_tab:
+            mov     r8, less_col
+            ldn     r8
+            ori     7
+            adi     1                   ; the next multiple of 8
+            lbdf    pl_done             ; past 255: certainly too far
+            plo     r9
+            mov     r8, less_room
+            ldn     r8
+            str     r2
+            glo     r9
+            sm                          ; stop - width
+            lbnf    pl_tab_fits         ; borrow: short of the width
+            lbnz    pl_done             ; beyond it
+pl_tab_fits:
+            mov     r8, less_col
+            glo     r9
+            str     r8
+            lda     rf
+            call    K_TYPE              ; the tab itself
+            lbr     pl_loop
+
+pl_done:
+            rtn
+
+psl_s_open:         db      "-- ",0
+psl_s_long:         db      ": SPACE next  b back  g top  G end  / search  n again  q quit --",0
+psl_s_short:        db      ": SPACE/b page  g/G ends  / find  n again  q quit --",0
+psl_s_end:          db      "-- (END) --  b back  g top  / search  q quit --",0
+psl_s_notfound:     db      "-- Pattern not found -- press any key --",0
+psl_s_bad_escape:   db      "-- Bad escape (use \\ \n \r \t \0 \xHH) -- press any key --",0
 
 ;------------------------------------------------------------------
 ; less_reprint_status: repositions to the status row and reprints it
@@ -1169,7 +1739,7 @@ scroll_up_and_print_bottom:
                                         ; see the header above for why a
                                         ; trailing clear isn't enough
             mov     rf, src_line_buf
-            call    K_MSG
+            call    put_row             ; number + line, cut to the width
 
             mov     rf, less_page_lines
             ldn     rf
@@ -1199,7 +1769,7 @@ scroll_down_and_print_top:
             db      27,'[K',0           ; clear the WHOLE row FIRST --
                                         ; see the header above
             mov     rf, src_line_buf
-            call    K_MSG
+            call    put_row             ; number + line, cut to the width
 
             mov     rf, less_page_lines
             ldn     rf
@@ -1219,18 +1789,53 @@ cmd_line_down:
             ldn     rf
             lbnz    main_loop           ; already at EOF: ignore
 
+            ; -N + wrap: the number bookkeeping across a wrapped scroll is
+            ; too fiddly to track incrementally, so just redraw the page one
+            ; row down (new top = less_visible[1]). less_goto recomputes the
+            ; top's number from the source. Only this uncommon combination
+            ; pays the redraw; every other mode keeps the fast IND scroll.
+            mov     rf, less_numbers
+            ldn     rf
+            lbz     cld_incr
+            mov     rf, less_nowrap
+            ldn     rf
+            lbnz    cld_incr            ; nowrap -N: incremental is exact
+            mov     rf, less_visible
+            inc     rf
+            inc     rf
+            inc     rf
+            inc     rf                  ; -> &less_visible[1]
+            mov     rd, less_top
+            call    copy4bytes          ; less_top = the second visible row
+            call    less_goto
+            lbr     main_loop
+
+cld_incr:
             mov     rf, src_pos
             mov     rd, less_new_line
-            call    copy4bytes          ; less_new_line = current
-                                        ; src_pos (where the new
-                                        ; bottom line starts)
+            call    copy4bytes          ; less_new_line = current src_pos
+                                        ; (where the new bottom row starts)
 
-            call    src_read_line      ; into src_line_buf; advances
-                                        ; src_pos past it
+            call    src_read_line      ; into src_line_buf; advances src_pos
             lbdf    cld_eof
 
             call    less_shift_visible_left
+            mov     rf, less_next_line  ; the new bottom row's number
+            mov     rd, less_row_line
+            call    copy4bytes
             call    scroll_up_and_print_bottom
+            ; less_next_line = this row's number + 1 unless it wrapped (put_row
+            ; no longer advances less_row_line itself)
+            mov     rf, less_row_line
+            mov     rd, less_next_line
+            call    copy4bytes
+            mov     rf, src_row_wrapped
+            ldn     rf
+            lbnz    cld_done
+            mov     rf, less_next_line
+            ldi     1
+            call    addbyte32
+cld_done:
             lbr     main_loop
 
 cld_eof:
@@ -1238,6 +1843,75 @@ cld_eof:
             ldi     1
             str     rf
             lbr     main_loop
+
+;------------------------------------------------------------------
+; cmd_hscroll_right / cmd_hscroll_left: -S horizontal scroll (Right/Left
+; arrows). Shift the view sideways by half the screen width, like real
+; less -S, then redraw the current page (less_top is unchanged, so
+; less_goto just re-renders it at the new offset). Ignored in wrap mode,
+; where there is nothing off to the right.
+;------------------------------------------------------------------
+cmd_hscroll_right:
+            mov     rf, less_nowrap
+            ldn     rf
+            lbz     main_loop           ; wrap mode: no sideways scroll
+            call    hscroll_amount      ; R9.0 = half the width (>= 1)
+            mov     r8, less_hshift     ; less_hshift += R9.0 (16-bit BE)
+            inc     r8
+            glo     r9
+            str     r2
+            ldn     r8
+            add
+            str     r8
+            dec     r8
+            ldi     0
+            str     r2
+            ldn     r8
+            adc
+            str     r8
+            call    less_goto
+            lbr     main_loop
+
+cmd_hscroll_left:
+            mov     rf, less_nowrap
+            ldn     rf
+            lbz     main_loop
+            call    hscroll_amount
+            mov     r8, less_hshift     ; less_hshift -= R9.0; clamp at 0
+            inc     r8
+            glo     r9
+            str     r2
+            ldn     r8
+            sm
+            str     r8
+            dec     r8
+            ldi     0
+            str     r2
+            ldn     r8
+            smb
+            str     r8
+            lbdf    chl_redraw          ; no borrow: still >= 0
+            mov     rf, less_hshift
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf                  ; underflow: clamp to 0
+chl_redraw:
+            call    less_goto
+            lbr     main_loop
+
+;------------------------------------------------------------------
+; hscroll_amount: R9.0 = half the screen width, at least 1.
+;------------------------------------------------------------------
+hscroll_amount:
+            mov     rf, less_width
+            ldn     rf
+            shr                         ; width / 2
+            lbnz    ha_have
+            ldi     1
+ha_have:
+            plo     r9
+            rtn
 
 ;------------------------------------------------------------------
 ; cmd_line_up: move the view up by exactly one line (up-arrow, k/K,
@@ -1316,7 +1990,28 @@ clu_can_scan:
             call    copy4bytes
 
 clu_have_top:
-            ; less_top now holds the new top row's offset
+            ; -N + wrap: redraw one row up (less_goto recomputes the number)
+            ; rather than tracking it incrementally across a wrapped scroll.
+            ; See cmd_line_down's own comment; only this combination pays it.
+            mov     rf, less_numbers
+            ldn     rf
+            lbz     clu_incr
+            mov     rf, less_nowrap
+            ldn     rf
+            lbnz    clu_incr
+            call    less_goto
+            lbr     main_loop
+
+clu_incr:
+            ; less_top now holds the new top row's offset. Its number
+            ; comes from the source (the stack keeps positions only) --
+            ; asked BEFORE the seek below, since the source leaves its
+            ; read position unspecified.
+            call    less_sync_top_line
+            mov     rf, less_top_line
+            mov     rd, less_row_line
+            call    copy4bytes
+
             mov     rf, less_top
             call    src_seek_to
 
@@ -1336,7 +2031,14 @@ clu_have_top:
                                         ; bottom hasn't moved, restore
                                         ; the value saved at entry
 
-            ; DF=0: the dropped line is no longer in view -- resume
+            ; DF=0: the dropped line is no longer in view. A read from
+            ; it gives the number the bottom row had, one less than
+            ; less_next_line said.
+            mov     rf, less_next_line
+            ldi     1
+            call    subbyte32
+
+            ; the dropped line is no longer in view -- resume
             ; future forward reads from exactly where it starts. Both
             ; the FCB/chunk-buffer state AND the src_pos variable need
             ; re-syncing here -- setting the variable alone would leave
@@ -1344,18 +2046,12 @@ clu_have_top:
             ; second entry, silently disagreeing with what src_pos
             ; claims (the same class of bug this fix exists for).
             mov     rf, less_dropped
-            call    src_seek_to
-            mov     rf, less_dropped
-            mov     rd, src_pos
-            call    copy4bytes
+            call    src_seek_to         ; also sets src_pos
             lbr     clu_display
 
 clu_restore_saved:
             mov     rf, less_saved_pos
-            call    src_seek_to
-            mov     rf, less_saved_pos
-            mov     rd, src_pos
-            call    copy4bytes
+            call    src_seek_to         ; also sets src_pos
 
 clu_display:
             mov     rf, less_at_eof
@@ -1949,6 +2645,22 @@ less_status_mode:       db      0
 less_key:               db      0
 less_rows_name:         db      "ROWS",0
 less_esc_buf:           ds      10
+less_title:             dw      0       ; pager_run's RF: the program name
+less_cols_name:         db      "COLUMNS",0
+less_width:             db      LESS_WIDTH_DEFAULT ; widest line (COLUMNS-1)
+less_col:               db      0       ; put_line's current display column
+less_status_room:       db      0       ; what is left of it, while printing
+less_numbers:           db      0       ; -N: number the lines
+less_nowrap:            db      0       ; -S: truncate + horizontal scroll
+less_hshift:            dw      0       ; -S horizontal scroll offset (columns)
+less_top_line:          ds      4       ; less_top's line number
+less_next_line:         ds      4       ; the number a read from src_pos
+                                        ; (the row after the bottom) gets
+less_row_line:          ds      4       ; the number put_row prints next
+less_row_text:          dw      0       ; put_row's line, across K_MSG
+less_room:              db      0       ; columns left for put_line
+less_num_digits:        ds      11      ; fmt_uint32's digits
+less_num_buf:           ds      12      ; padded number + space, printed
                 public  less_top
                 public  less_candidate_top
                 public  less_search_buf
@@ -1977,4 +2689,19 @@ less_esc_buf:           ds      10
                 public  less_count_buf
                 public  less_count_len
                 public  less_count_pending
+                public  less_title
+                public  less_cols_name
+                public  less_width
+                public  less_col
+                public  less_status_room
+                public  less_numbers
+                public  less_nowrap
+                public  less_hshift
+                public  less_top_line
+                public  less_next_line
+                public  less_row_line
+                public  less_row_text
+                public  less_room
+                public  less_num_digits
+                public  less_num_buf
             endp

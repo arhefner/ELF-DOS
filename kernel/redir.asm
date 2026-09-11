@@ -109,6 +109,7 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   _type_discard
             extrn   _read_from_file
             extrn   _read_eof_immediate
+            extrn   _redir_flush_out
 
 ; same-file cross-proc data references (required even within the same
 ; file -- see CLAUDE.md gotcha #6)
@@ -121,6 +122,8 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   redir_stack_reserved
             extrn   redir_scratch
             extrn   himem_scratch
+            extrn   redir_ocount
+            extrn   redir_obuf
 
 ; ----------------------------------------------------------------
 ; _himem_reserve: reduce mem_top by RC bytes, freeing that much RAM at
@@ -426,9 +429,11 @@ ind_no:
 ; previous command once this returns, matching this project's own
 ; standing "always reset shared state up front" preference).
 ;
+; Flushes the output buffer (_redir_flush_out) before closing.
+;
 ; Args:    none
 ; Returns: nothing
-; Modifies: R7, R8, R9, RA, RD, RF
+; Modifies: R7, R8, R9, RA, RB, RC, RD, RF
 ; ----------------------------------------------------------------
             proc    _redir_close_out_if_open
 
@@ -441,6 +446,8 @@ ind_no:
             mov     rf, redir_out_null
             ldn     rf
             lbnz    rcoo_clear          ; NUL: nothing to close
+
+            call    _redir_flush_out    ; whatever is still buffered
 
             mov     ra, redir_out_handle
             lda     ra
@@ -912,22 +919,32 @@ rt_release_done:
             endp
 
 ; ----------------------------------------------------------------
-; _type_to_file: write one character (D) to the currently-open output
-; redirect file (redir_out_handle). Reached ONLY via K_TYPE's own
-; self-modified jump-table slot ($011E), while output is redirected to
-; a real file -- K_TYPE's slot is repatched per command by
-; _redir_setup/_redir_teardown, not checked via a runtime flag on every
-; call (see this file's own module header for the full Phase 2 design).
+; _type_to_file: send one character (D) to the output redirect file.
+; Reached ONLY via K_TYPE's own self-modified jump-table slot ($011E),
+; while output is redirected to a real file -- K_TYPE's slot is
+; repatched per command by _redir_setup/_redir_teardown, not checked via
+; a runtime flag on every call (see this file's own module header for
+; the full Phase 2 design).
+;
+; BUFFERED (2026-09-11). The character is appended to redir_obuf, and
+; the buffer goes to the file in one file_write only when it is full;
+; _redir_close_out_if_open writes whatever is left before closing. This
+; used to call file_write for every character, and file_write writes the
+; whole sector back on every call, so a redirected command did one
+; sector write per byte of output -- 73 KB of HEXDUMP -c output was
+; 73,436 writes, long enough on real hardware to look like a hang (and
+; roughly 37 MB of writes to the card).
 ;
 ; MUST preserve RF/RC/RA -- same hardware-found-bug caution as the old
-; _redir_type this replaces (2026-07-16): this routine uses all three
-; as its own internal scratch for the file_write call, and real callers
-; (progs/type.asm's own hot loop) depend on RF/RC surviving a "call
-; K_TYPE" regardless of which routine that slot currently targets.
+; _redir_type this replaces (2026-07-16): real callers (progs/type.asm's
+; own hot loop) depend on RF/RC surviving a "call K_TYPE" regardless of
+; which routine that slot currently targets.
 ;
 ; Args:    D = character to write
-; Returns: whatever file_write itself returns (unexamined by every
-;          existing caller, matching the old _redir_type's own contract)
+; Returns: nothing meaningful. A write error is not reported here -- it
+;          never was examined by any caller, and now surfaces at most a
+;          buffer later.
+; Modifies: R7, and when the buffer fills whatever file_write does
 ; ----------------------------------------------------------------
             proc    _type_to_file
 
@@ -939,30 +956,63 @@ rt_release_done:
             push    rc
             push    ra
 
-            mov     rf, redir_scratch   ; RF = &redir_scratch -- also
-                                        ; file_write's own source
-                                        ; buffer argument below, no
-                                        ; need to reload it
-            glo     r7                  ; D = the character (reloaded
-                                        ; from R7, stashed above)
-            str     rf                  ; redir_scratch = character
+            mov     rf, redir_ocount
+            ldn     rf
+            plo     rc                  ; RC.0 = bytes already buffered
+            mov     ra, redir_obuf
+            glo     rc
+            str     r2
+            glo     ra
+            add
+            plo     ra
+            ghi     ra
+            adci    0
+            phi     ra                  ; RA = &redir_obuf[count]
+            glo     r7
+            str     ra                  ; buffer the character
 
+            glo     rc
+            adi     1
+            str     rf                  ; count + 1 (RF -> redir_ocount)
+            smi     REDIR_OBUF_LEN
+            lbnz    ttf_done            ; room left: nothing to write yet
+
+            call    _redir_flush_out
+
+ttf_done:
+            pop     ra
+            pop     rc
+            pop     rf
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _redir_flush_out: write whatever is in redir_obuf to the output
+; redirect file and empty the buffer. A no-op when it is already empty.
+; The count is cleared BEFORE the write, so an error cannot leave stale
+; bytes queued for the next command.
+; Args:    none (the file is redir_out_handle)
+; Returns: nothing
+; Modifies: whatever file_write does, plus RA, RC, RD, RF
+; ----------------------------------------------------------------
+            proc    _redir_flush_out
+
+            mov     rf, redir_ocount
+            ldn     rf
+            lbz     rfo_done            ; nothing buffered
+            plo     rc
             ldi     0
-            phi     rc
-            ldi     1
-            plo     rc                  ; RC = 1 (one byte)
+            str     rf                  ; count = 0
+            phi     rc                  ; RC = bytes to write
             mov     ra, redir_out_handle
             lda     ra
             phi     rd
             ldn     ra
-            plo     rd                  ; RD = the FCB pointer (loaded
-                                        ; via RA scratch, leaving RF/RC
-                                        ; untouched)
+            plo     rd                  ; RD = the FCB pointer
+            mov     rf, redir_obuf
             call    file_write
-
-            pop     ra
-            pop     rc
-            pop     rf
+rfo_done:
             rtn
 
             endp

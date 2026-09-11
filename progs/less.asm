@@ -2,7 +2,11 @@
 ; less.asm - page through a file's contents with bi-directional
 ; scrolling and basic forward search (a scaled-down "less").
 ;
-; Usage: LESS <filename>
+; Usage: LESS [-N] [-S] <filename>
+;
+; -N numbers the lines, as in less -N.
+; -S chops long lines to the screen width and scrolls sideways with the
+;    Left/Right arrows, as in less -S. The default is to WRAP long lines.
 ;
 ; As of 2026-09-08 this is a thin main program: it parses argv, opens
 ; the file, hands control to the reusable pager, and closes the file
@@ -41,17 +45,96 @@
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = argv pointer, RC = argc. argv[1] is the filename.
-            glo     rc
-            smi     2
-            lbnf    usage
+            ; RA = argv, RC.0 = argc. The argument scan makes no calls,
+            ; so it works in registers: R9.0 = index, R7.0 = options,
+            ; R8 = the filename (0 until one is found). -N may come
+            ; before or after the name.
+            ldi     0
+            plo     r7
+            phi     r8
+            plo     r8
+            ldi     1
+            plo     r9
 
-            mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
-            lda     rb
+arg_loop:
+            glo     rc
+            str     r2
+            glo     r9
+            sm                          ; index - argc
+            lbdf    args_done           ; no borrow: index >= argc
+
+            glo     r9
+            shl                         ; 2*index (argc <= 16, fits)
+            str     r2
+            glo     ra
+            add
+            plo     rd
+            ghi     ra
+            adci    0
+            phi     rd                  ; RD = &argv[index]
+            lda     rd
+            phi     rb
+            ldn     rd
+            plo     rb                  ; RB = argv[index]
+
+            ghi     rb
             phi     rf
-            ldn     rb
-            plo     rf                  ; RF = argv[1] (filename)
+            glo     rb
+            plo     rf                  ; RF = the same, to walk
+            ldn     rf
+            xri     '-'
+            lbnz    arg_name
+            inc     rf                  ; skip the '-'
+            ldn     rf
+            xri     'N'                 ; -N, as in less (case matters:
+            lbz     arg_flag_n          ; less's -n means the opposite)
+            ldn     rf
+            xri     'S'                 ; -S: chop long lines + sideways scroll
+            lbz     arg_flag_s
+            lbr     usage
+arg_flag_n:
+            inc     rf
+            ldn     rf
+            lbnz    usage               ; "-Nx" and the like
+            glo     r7
+            ori     1                   ; PAGER_OPT_NUMBERS
+            plo     r7
+            lbr     arg_next
+arg_flag_s:
+            inc     rf
+            ldn     rf
+            lbnz    usage
+            glo     r7
+            ori     2                   ; PAGER_OPT_NOWRAP
+            plo     r7
+            lbr     arg_next
+
+arg_name:
+            ghi     r8
+            lbnz    usage               ; a second filename
+            glo     r8
+            lbnz    usage
+            ghi     rb
+            phi     r8
+            glo     rb
+            plo     r8                  ; R8 = the filename
+
+arg_next:
+            glo     r9
+            adi     1
+            plo     r9
+            lbr     arg_loop
+
+args_done:
+            ghi     r8
+            lbnz    have_name
+            glo     r8
+            lbz     usage               ; no filename at all
+have_name:
+            mov     rf, less_opts       ; kept in memory: src_open
+            glo     r7                  ; clobbers every register
+            str     rf
+            mov     rf, r8
             call    src_open            ; the SOURCE owns its own FCB
             lbdf    not_found           ; and learns its own size
 
@@ -61,6 +144,11 @@ start:
             ; FCB, which is exactly what lets a different source (a
             ; memory or sector range, with nothing to open at all) drop
             ; into the same engine.
+            mov     rf, less_opts
+            ldn     rf
+            plo     r9
+            mov     rf, less_name       ; shown on the status line
+            glo     r9                  ; D = options
             call    pager_run
             call    src_close
             ldi     0                   ; exit code 0 = success
@@ -70,7 +158,7 @@ start:
 ;------------------------------------------------------------------
 usage:
             call    K_INMSG
-            db      "Usage: LESS <filename>",13,10,0
+            db      "Usage: LESS [-N] [-S] <filename>",13,10,0
             ldi     1
             rtn
 
@@ -79,5 +167,8 @@ not_found:
             db      "File not found.",13,10,0
             ldi     1
             rtn
+
+less_opts:  db      0                   ; pager_run's options
+less_name:  db      "LESS",0
 
             end     start

@@ -309,6 +309,9 @@ lib/src_file.prg: lib/src_file.asm include/opcodes.def include/bios.inc include/
 lib/pager.prg: lib/pager.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/lineedit.inc
 	cd lib && $(ASM) $(ASMFLAGS) pager.asm
 
+lib/src_hex.prg: lib/src_hex.asm include/opcodes.def include/bios.inc include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) src_hex.asm
+
 lib/icall.prg: lib/icall.asm include/opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) icall.asm
 
@@ -407,9 +410,13 @@ bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
 	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg lib/drives.prg
 	rm -f bin/edlin.lkb
 
-bin/less: progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
-	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/env.prg lib/lineedit.prg lib/drives.prg
+bin/less: progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg
 	rm -f bin/less.lkb
+
+bin/hexdump: progs/hexdump.prg lib/pager.prg lib/src_hex.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/hexdump progs/hexdump.prg lib/pager.prg lib/src_hex.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg
+	rm -f bin/hexdump.lkb
 
 bin/shell: progs/shell.prg lib/env.prg lib/drives.prg | bin
 	$(LINK) $(LFLAGS) -o bin/shell progs/shell.prg lib/env.prg lib/drives.prg

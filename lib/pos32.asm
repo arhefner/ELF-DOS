@@ -190,3 +190,89 @@
             str     r7
             rtn
             endp
+
+;------------------------------------------------------------------
+; sub32: the 4-byte big-endian value at [RF] -= the one at [RD].
+; LSB first with borrow propagated, the subtrahend byte staged in M(R2)
+; immediately before each SM/SMB that consumes it.
+; Args: RF = destination pointer, RD = subtrahend pointer
+; Returns: DF=1 no borrow ([RF] was >= [RD]), DF=0 borrow
+; Modifies: R7, R8, D, DF
+;------------------------------------------------------------------
+            proc    sub32
+            mov     r7, rf
+            inc     r7
+            inc     r7
+            inc     r7                  ; -> dest LSB
+            mov     r8, rd
+            inc     r8
+            inc     r8
+            inc     r8                  ; -> subtrahend LSB
+
+            ldn     r8
+            str     r2
+            ldn     r7
+            sm
+            str     r7
+
+            dec     r7
+            dec     r8
+            ldn     r8
+            str     r2
+            ldn     r7
+            smb
+            str     r7
+
+            dec     r7
+            dec     r8
+            ldn     r8
+            str     r2
+            ldn     r7
+            smb
+            str     r7
+
+            dec     r7
+            dec     r8
+            ldn     r8
+            str     r2
+            ldn     r7
+            smb
+            str     r7
+            rtn
+            endp
+
+;------------------------------------------------------------------
+; subbyte32: the 4-byte big-endian value at [RF] -= D (unsigned byte).
+; Args: RF = pointer, D = the byte
+; Returns: DF=1 no borrow, DF=0 borrow
+; Modifies: R7, R8, D, DF
+;------------------------------------------------------------------
+            proc    subbyte32
+            plo     r8                  ; stash the byte (gotcha #4)
+            mov     r7, rf
+            inc     r7
+            inc     r7
+            inc     r7                  ; -> LSB
+
+            glo     r8
+            str     r2
+            ldn     r7
+            sm
+            str     r7
+
+            dec     r7
+            ldn     r7
+            smbi    0
+            str     r7
+
+            dec     r7
+            ldn     r7
+            smbi    0
+            str     r7
+
+            dec     r7
+            ldn     r7
+            smbi    0
+            str     r7
+            rtn
+            endp

@@ -77,7 +77,10 @@
 ;   actually overran by 5. Always trust the built figure, never the
 ;   computed one.
 ;
-; $BE00 ends at $EEC6, 313 bytes below NVK_TOP -- deliberately close.
+; $BCE0 (2026-09-11, lowered from $BE00 to make room for buffered output
+; redirection and the FAT12 work): see check_kernel_margin.py's report for
+; the current headroom. $BE00 ended at $EEC6, 313 bytes below NVK_TOP --
+; deliberately close.
 ; Program RAM is the whole point of this layout, and overshooting is now
 ; a loud build failure rather than a silent hang, so thin headroom costs
 ; a rebuild rather than a hardware round. Expect to re-tune this after
@@ -93,7 +96,7 @@
 ; (32K RAM + 32K ROM, NVK_BASE $8000 / NVK_TOP $FFFF), where the kernel
 ; leaves RAM entirely and programs gain its whole ~12.9K.
 ;
-NVK_BASE:       equ     $BE00       ; start of the non-volatile kernel
+NVK_BASE:       equ     $BCE0       ; start of the non-volatile kernel
 NVK_TOP:        equ     $EFFF       ; ceiling; build fails if exceeded
 
 ; Signature krnboot checks to decide "is the non-volatile kernel

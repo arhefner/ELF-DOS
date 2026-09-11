@@ -136,7 +136,7 @@ INCS =  include\bios.inc    \
 # ---- The progs\*.asm that link against lib\ -- see build_progs.bat's
 # own exclusion list, which must be kept in sync with this set ----
 SPECIAL_BINS = bin\printenv bin\export bin\unset \
-        bin\ls bin\edlin bin\less bin\move bin\xcopy bin\shell \
+        bin\ls bin\edlin bin\less bin\hexdump bin\move bin\xcopy bin\shell \
         bin\yr bin\ys bin\termsize bin\mr bin\ms \
         bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
         bin\stat bin\chkdsk bin\mount
@@ -251,6 +251,12 @@ lib\src_file.prg: lib\src_file.asm include\opcodes.def include\bios.inc include\
 lib\pager.prg: lib\pager.asm include\opcodes.def include\bios.inc include\kernel_api.inc include\lineedit.inc
 	cd lib && $(ASM) $(ASMFLAGS) pager.asm
 
+lib\src_hex.prg: lib\src_hex.asm include\opcodes.def include\bios.inc include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) src_hex.asm
+
+lib\drives.prg: lib\drives.asm include\opcodes.def include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) drives.asm
+
 
 lib\icall.prg: lib\icall.asm include\opcodes.def
 	cd lib && $(ASM) $(ASMFLAGS) icall.asm
@@ -351,9 +357,16 @@ bin\edlin: progs\edlin.prg lib\env.prg lib\lineedit.prg bin
 progs\less.prg: progs\less.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) less.asm
 
-bin\less: progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\env.prg lib\lineedit.prg bin
-	$(LINK) $(LFLAGS) -o bin\less progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\env.prg lib\lineedit.prg
+bin\less: progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\less progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg
 	-del /F /Q bin\less.lkb
+
+progs\hexdump.prg: progs\hexdump.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) hexdump.asm
+
+bin\hexdump: progs\hexdump.prg lib\pager.prg lib\src_hex.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\hexdump progs\hexdump.prg lib\pager.prg lib\src_hex.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg
+	-del /F /Q bin\hexdump.lkb
 
 progs\move.prg: progs\move.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) move.asm
