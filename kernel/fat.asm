@@ -333,6 +333,10 @@ fat_get_err:
 ; Args:   RD = cluster number to update
 ;         RB = value to write
 ; Returns: DF = 0 on success, DF = 1 on error
+;
+; Writing 0 (freeing a cluster) below fat_next_free also lowers
+; fat_next_free to that cluster -- see the note at the end of the body.
+; RD and RB are both left unchanged.
 ; ----------------------------------------------------------------
             proc    fat_set
 
@@ -361,6 +365,38 @@ fat_get_err:
             ldi     1
             str     rf                  ; mark cache dirty (see fat_flush)
 
+            ; freeing a cluster below fat_alloc's search hint: pull the
+            ; hint down to it, so the next allocation finds it on its
+            ; forward scan instead of only after running off the end and
+            ; wrapping. Done here rather than in DEL's own free loop so any
+            ; future code that frees clusters gets it for free. Only a
+            ; hint -- fat_alloc's wrap stays, since the hint is global
+            ; across drives (see fat_alloc's header).
+            glo     rb
+            lbnz    fs_hint_done
+            ghi     rb
+            lbnz    fs_hint_done        ; not a free: leave the hint alone
+
+            mov     rf, fat_next_free
+            inc     rf
+            ldn     rf                  ; D = hint.lo
+            str     r2
+            glo     rd
+            sm                          ; D = cluster.lo - hint.lo
+            dec     rf                  ; (INC/DEC/LDN/STR/GHI leave DF)
+            ldn     rf                  ; D = hint.hi
+            str     r2
+            ghi     rd
+            smb                         ; cluster.hi - hint.hi - borrow
+            lbdf    fs_hint_done        ; no borrow: cluster >= hint
+
+            ghi     rd                  ; RF -> hint high byte
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; fat_next_free = cluster
+
+fs_hint_done:
             clc                         ; DF = 0, success
             rtn
 
@@ -389,6 +425,15 @@ fat_set_err:
 ; freed by an earlier DEL/RD (which live before the hint) stay
 ; reachable -- at the cost of a second bounded pass only when the
 ; first one comes up empty.
+;
+; fat_set lowers the hint whenever it frees a cluster below it
+; (2026-09-10), so a freed cluster is normally found on the forward
+; pass. The wrap is still required, not just insurance: fat_next_free
+; is ONE global shared by every drive and is not reset by
+; _switch_drive or MOUNT, so the hint can come from a different
+; drive's allocations; and anything that frees clusters without going
+; through fat_set (a raw-sector tool, fsck on the host) leaves free
+; space below it that only the wrap will find.
 ;
 ; Claims the cluster immediately by marking it end-of-chain, so a
 ; second call in a row can't return the same cluster before the

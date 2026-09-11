@@ -742,10 +742,17 @@ K_HIMEM_RELEASE:    equ     $018B       ; -> kernel_himem_release
 ; drive_bpb_table entry can be replaced (MOUNT) or its drive_present
 ; flag cleared (UMOUNT), added 2026-09-09 for multi-drive support.
 ;
-; Does exactly two things, both of which userland cannot: flushes the
-; FAT cache if the named drive is the currently active one, and forces
-; the next _switch_drive to reload from drive_bpb_table rather than
-; taking its already-active no-op path.
+; Does exactly two things, both of which userland cannot: flushes and
+; then discards the FAT cache if the named drive is the currently
+; active one, and forces the next _switch_drive to reload from
+; drive_bpb_table rather than taking its already-active no-op path.
+;
+; Also the call for a program that writes sectors directly with
+; K_SECWRITE: call it BEFORE the raw writes (so no pending FAT change
+; can land on top of them later) and AFTER (so the kernel holds no
+; stale copy of a FAT sector that was just changed underneath it). The
+; kernel keeps no directory or file-data cache between calls, so the
+; FAT sector is the only thing that needs this.
 ;
 ; *** ORDERING CONTRACT ***  Call this BEFORE you overwrite
 ; drive_bpb_table[i] or clear drive_present[i], never after. The flush

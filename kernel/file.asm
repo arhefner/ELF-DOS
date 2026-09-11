@@ -121,6 +121,8 @@
             extrn   fcrw_slot
             extrn   fcrw_iobuf
             extrn   _fclose_rewrite_size
+            extrn   _fclose_trim_chain
+            extrn   _free_chain
             extrn   _fcb_seek_to
             extrn   _load_lba24
             extrn   _dir_read_sector_from
@@ -3246,6 +3248,17 @@ fc_no_term:
 
 ; ----------------------------------------------------------------
 ; file_close: flush and release an FCB
+;
+; If the file was written or truncated (FCB_F_SIZECHG), rewrites its
+; directory entry and then frees any clusters its chain holds past the
+; final size. That second step fixes a leak found 2026-09-10: opening an
+; existing file in mode 1 sets its size to 0 and writes reuse the chain
+; from the start, but nothing ever freed the old tail, so overwriting a
+; larger file with shorter content left clusters linked past end of
+; file (fsck: "cluster chain length is > N bytes"; CHKDSK: size/cluster-
+; chain mismatch). Done at close rather than at open so an interrupted
+; overwrite does not lose the old data early.
+;
 ; Args:   RD = FCB pointer (the same one the caller passed to
 ;              file_open)
 ; Returns: DF = 0 on success, DF = 1 on error
@@ -3267,27 +3280,34 @@ fc_no_term:
             call    _switch_drive
             pop     rd
 
-            ; if the file grew since it was opened, rewrite the
-            ; directory entry's size field
+            ; FCB_FLAGS = 0 (closed) up front, keeping the old value for
+            ; the SIZECHG test -- nothing below reads the flags
             mov     rf, rd              ; RF = FCB base (FCB_FLAGS)
             ldn     rf
+            plo     rc                  ; RC.0 = flags (stash)
+            ldi     0
+            str     rf                  ; FCB_FLAGS = 0
+            glo     rc
             ani     FCB_F_SIZECHG
-            lbz     fclose_no_rewrite
+            lbz     fclose_done         ; not written: nothing on disk to fix
 
             push    rd                  ; save the FCB pointer across
                                         ; the rewrite -- its own header
                                         ; documents RD as clobbered
             call    _fclose_rewrite_size
-            pop     rd
-            ; rewrite errors are ignored here -- there's nothing more
-            ; to do at close time
+            pop     rd                  ; (POP leaves DF alone)
+            lbdf    fclose_done         ; entry not rewritten: freeing
+                                        ; anything now could leave it
+                                        ; pointing at free clusters, so
+                                        ; leave the chain as it is.
+                                        ; Errors are otherwise ignored
+                                        ; -- nothing more to do at close
 
-fclose_no_rewrite:
-            ; mark the FCB itself closed (light sanity flag)
-            mov     rf, rd
-            ldi     0
-            str     rf                  ; FCB_FLAGS = 0
+            ; --- free whatever the chain holds past the final size (see
+            ; _fclose_trim_chain). Errors ignored, as above.
+            call    _fclose_trim_chain
 
+fclose_done:
             clc
             rtn
 
@@ -3527,6 +3547,128 @@ fclose_no_rewrite:
 
 fcrw_err:
             stc                         ; DF = 1, I/O error
+            rtn
+
+; ----------------------------------------------------------------
+; _fclose_trim_chain: free the clusters a file's chain holds beyond its
+; final size. Called by file_close AFTER the directory entry has been
+; rewritten, so a crash part-way leaves lost clusters rather than an
+; entry pointing at freed ones.
+;
+; Two cases:
+;   FSIZE > 0:  position on the file's last byte with _fcb_seek_to (which
+;               leaves FCB_CCLUST on the cluster holding it -- writes
+;               resolve the next cluster lazily, so a file ending exactly
+;               on a cluster boundary still ends there), mark that cluster
+;               end-of-chain, and free what followed it.
+;   FSIZE == 0: the whole chain goes. FCB_SCLUST is zeroed and the entry
+;               rewritten a second time (DE_CLUSTER = 0) BEFORE freeing,
+;               for the same crash-safety reason -- the extra sector
+;               write only happens when a file is truncated to empty.
+;
+; Skipped for FSIZE >= 32MB: _fcb_seek_to keeps only a 16-bit sector
+; index, so past that it lands on the wrong cluster, and trimming there
+; would cut real data. Also skipped if the entry after the last cluster
+; is not a real link (end-of-chain, bad, free or reserved), so a chain
+; that is already right costs one fat_get.
+;
+; Args:    RD = FCB base
+; Returns: DF = 0 on success, DF = 1 on I/O error (file_close ignores it)
+; Modifies: everything (R7-RF)
+; ----------------------------------------------------------------
+            endp
+
+            proc    _fclose_trim_chain
+
+            mov     rb, rd              ; RB = FCB base
+            call    _fcb_load_fsize32   ; R9:R8 = FSIZE
+            ghi     r9
+            str     r2
+            glo     r9
+            shr
+            or
+            lbnz    fct_done            ; >= 32MB: past _fcb_seek_to's range
+            glo     r9
+            str     r2
+            ghi     r8
+            or
+            str     r2
+            glo     r8
+            or
+            lbz     fct_empty           ; FSIZE == 0
+
+            ghi     r9
+            phi     rd
+            glo     r9
+            plo     rd                  ; RD:R8 = FSIZE (target, > 0)
+            push    rb
+            call    _fcb_seek_to        ; RB = FCB base on entry
+            pop     rb
+            lbdf    fct_err
+            call    _fcb_load_cclust    ; RD = L, the file's last cluster
+
+            push    rd
+            call    fat_get             ; RD = L's FAT entry
+            mov     r9, rd              ; R9 = entry (MOV/POP leave DF)
+            pop     rd                  ; RD = L
+            lbdf    fct_err
+
+            ; only a real link (2..$FFF6) has anything after it: RC =
+            ; entry - 2 wraps 0/1 to $FFFE/$FFFF, so one unsigned test
+            ; RC >= $FFF5 rejects free, reserved, bad and end-of-chain
+            glo     r9
+            smi     2
+            plo     rc
+            ghi     r9
+            smbi    0
+            phi     rc                  ; RC = entry - 2
+            ghi     rc
+            xri     $FF
+            lbnz    fct_link
+            glo     rc
+            smi     $F5
+            lbdf    fct_done
+
+fct_link:
+            push    r9
+            ldi     $FF
+            phi     rb
+            plo     rb                  ; RB = $FFFF, end of chain
+            call    fat_set             ; L's entry = end of chain (RD = L)
+            pop     r9                  ; R9 = first cluster past L
+            lbdf    fct_err
+fct_free_it:
+            lbr     _free_chain         ; frees R9's chain, flushes the FAT
+
+fct_empty:
+            ghi     rb
+            phi     rf
+            glo     rb
+            adi     FCB_SCLUST
+            plo     rf                  ; RF -> FCB_SCLUST
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = first cluster
+            ldi     0
+            str     rf
+            dec     rf
+            str     rf                  ; FCB_SCLUST = 0
+            glo     r9
+            str     r2
+            ghi     r9
+            or
+            lbz     fct_done            ; never allocated: nothing to free
+            push    r9
+            mov     rd, rb
+            call    _fclose_rewrite_size ; DE_CLUSTER = 0 on disk first
+            pop     r9
+            lbnf    fct_free_it
+fct_err:
+            stc
+            rtn
+fct_done:
+            clc
             rtn
 
 ; ----------------------------------------------------------------
@@ -3776,13 +3918,40 @@ med_err:
             ldn     rf
             plo     r9                  ; R9 = first cluster (reloaded)
 
+            lbr     _free_chain         ; frees it and flushes the FAT
+
+dle_err:
+            stc                         ; DF = 1, error
+            rtn
+
+; ----------------------------------------------------------------
+; _free_chain: free a whole cluster chain, then flush the FAT.
+; Split out of _delete_located_entry (DEL/RD) on 2026-09-10 so
+; file_close's chain trim (_fclose_trim_chain) shares the same loop.
+; Freeing goes through fat_set, which also lowers fat_alloc's search
+; hint (see fat_set).
+;
+; Uses fdel_next_clust (in _shared_scratch) for the next cluster, kept
+; in memory because fat_set may clobber any register. Both callers are
+; outside every other _shared_scratch user's lifetime: DEL/RD's own
+; fdel_* use ends at _mark_entry_deleted, and file_close's
+; _fcb_seek_to has already returned.
+;
+; Args:    R9 = first cluster to free (0 = nothing; only the FAT flush)
+; Returns: DF = 0 on success, DF = 1 on I/O error
+; Modifies: R7, R8, R9, RB, RC, RD, RF
+; ----------------------------------------------------------------
+            endp
+
+            proc    _free_chain
+
             ghi     r9
-            lbnz    dle_free_loop
+            lbnz    fch_loop
             glo     r9
-            lbz     dle_flush          ; first cluster == 0: nothing
+            lbz     fch_flush          ; first cluster == 0: nothing
                                         ; to free
 
-dle_free_loop:
+fch_loop:
             mov     rd, r9              ; RD = current cluster
             push    rd                  ; save it across fat_get, which
                                         ; overwrites RD with the NEXT
@@ -3798,14 +3967,14 @@ dle_free_loop:
                                         ; register -- fat_set below may
                                         ; clobber almost anything)
             pop     rd                  ; RD = current cluster (restored)
-            lbdf    dle_err            ; I/O error (stack already
+            lbdf    fch_err            ; I/O error (stack already
                                         ; balanced by the pop above)
 
             ldi     0
             phi     rb
             plo     rb                  ; RB = 0 (FAT_FREE)
             call    fat_set             ; marks the current cluster free
-            lbdf    dle_err
+            lbdf    fch_err
 
             ; is the next cluster end-of-chain? reload fresh from
             ; memory into R9 (fat_set may have clobbered any register)
@@ -3817,19 +3986,19 @@ dle_free_loop:
 
             ghi     r9
             smi     $FF
-            lbnf    dle_free_loop      ; hi < $FF: valid, keep freeing
+            lbnf    fch_loop      ; hi < $FF: valid, keep freeing
             glo     r9
             smi     $F8
-            lbnf    dle_free_loop      ; < $FFF8: still valid, keep going
+            lbnf    fch_loop      ; < $FFF8: still valid, keep going
 
-dle_flush:
+fch_flush:
             call    fat_flush
-            lbdf    dle_err
+            lbdf    fch_err
 
             clc                         ; DF = 0, success
             rtn
 
-dle_err:
+fch_err:
             stc                         ; DF = 1, error
             rtn
 

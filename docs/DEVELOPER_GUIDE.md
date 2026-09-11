@@ -390,15 +390,21 @@ on, and the one guaranteed to stay mounted.
 
 **`K_DRIVE_INVALIDATE`**
 Drops the cached state belonging to one drive, so its entry in the drive
-table can be replaced or cleared. Flushes the FAT cache if that drive is
-the active one, and forces the next drive switch to reload the table
-rather than assume it is already current. Used by `MOUNT` and `UMOUNT`.
+table can be replaced or cleared. Flushes and then discards the FAT cache
+if that drive is the active one, and forces the next drive switch to
+reload the table rather than assume it is already current. Used by
+`MOUNT` and `UMOUNT`.
 - **Args:** `D` = drive index.
 - **Returns:** `DF` = 0 always.
 - **Call this *before* changing the drive's table entry, never after.**
   The flush works out where to write from the *currently active* geometry,
   so running it against an entry that has already been replaced would
   write a cached sector to an address computed for the new partition.
+- **Writing sectors directly?** Call it before your `K_SECWRITE` calls
+  and again after them. The first call makes sure no pending FAT change
+  lands on top of your writes later; the second makes sure the kernel
+  holds no stale copy of a FAT sector you changed. The FAT sector is the
+  only thing the kernel caches between calls, so nothing else needs this.
 
 > **A drive index is not a letter.** Since drive letters became
 > assignable, index and letter are separate: any of the `DRIVE_COUNT`

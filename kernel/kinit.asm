@@ -35,6 +35,7 @@
             extrn   autoexec_path
             extrn   _switch_drive
             extrn   fat_flush
+            extrn   fat_csec
             extrn   active_bpb_drive
             extrn   shell_drive
             extrn   shell_elba
@@ -581,6 +582,10 @@ ksd_absent:
 ;   2. Force active_bpb_drive to $FF, so the next _switch_drive does a
 ;      real reload from drive_bpb_table instead of its no-op fast path.
 ;      Without this a MOUNT onto the active drive would be invisible.
+;      The cached FAT sector is also discarded immediately once it has
+;      been flushed (2026-09-10), so a program writing raw sectors with
+;      K_SECWRITE can call this afterwards and know the kernel holds no
+;      stale copy of anything it changed.
 ;
 ; *** ORDERING CONTRACT -- READ BEFORE CHANGING A CALLER ***
 ; Call this BEFORE overwriting drive_bpb_table[i] or clearing
@@ -591,7 +596,9 @@ ksd_absent:
 ; A drive that is not currently active has nothing cached (the FAT
 ; cache only ever holds one drive's sector, and _switch_drive already
 ; flushed the outgoing drive on its way out), so the whole routine is
-; a cheap no-op in that case.
+; a cheap no-op in that case. The exception is active_bpb_drive = $FF
+; (left by a previous call): the cache may still hold the last active
+; drive's sector, so it is flushed and dropped then too.
 ;
 ; Args:    D = drive index (0..DRIVE_COUNT-1)
 ; Returns: DF = 0 always (a flush failure is not reported -- see below)
@@ -611,20 +618,51 @@ ksd_absent:
             str     r2                  ; M(X) = currently active drive
             glo     rc
             sm                          ; D = target - active
-            lbnz    kdi_done            ; not the active drive: nothing
+            lbz     kdi_active          ; the active drive: drop its cache
+            ldn     rf                  ; RF still -> active_bpb_drive
+            xri     $FF
+            lbnz    kdi_done            ; another drive is active: nothing
                                         ; of this drive's is cached
+            ; active_bpb_drive = $FF (an earlier invalidate) does NOT mean
+            ; the cache is empty: K_DIR_OPEN/K_DIR_READ reload FAT sectors
+            ; without calling _switch_drive, so the BPB fields -- and the
+            ; sector cached under them -- are still whichever drive was
+            ; last active. Found in emulation: invalidate, walk a
+            ; directory, rewrite its FAT entry, invalidate again -- the
+            ; second call skipped the drop and the next walk read the old
+            ; chain. Flushing here is safe: the BPB fields still match the
+            ; cached sector (MOUNT only changes drive_bpb_table), and a
+            ; clean cache makes fat_flush a no-op.
 
+kdi_active:
             call    fat_flush           ; uses the OLD (still correct)
                                         ; active BPB fields -- see the
-                                        ; ordering contract above. Its
-                                        ; DF is deliberately ignored:
-                                        ; there is nothing useful a
-                                        ; caller could do about a failed
-                                        ; flush at this point, and
-                                        ; reporting it would leave the
+                                        ; ordering contract above. A
+                                        ; failure is not reported to the
+                                        ; caller: there is nothing useful
+                                        ; it could do about it, and
+                                        ; returning early would leave the
                                         ; stale active_bpb_drive in
                                         ; place, which is worse.
+            lbdf    kdi_keep_cache      ; flush failed: keep the dirty
+                                        ; sector, so the next
+                                        ; _switch_drive retries it
 
+            ; drop the (now clean) cached FAT sector right away. The next
+            ; _switch_drive would do this too -- and every path that can
+            ; reach fat_set goes through one first, so a stale copy could
+            ; never be WRITTEN back even before this. But K_DIR_OPEN/
+            ; K_DIR_READ reach fat_get without calling _switch_drive, so a
+            ; program that rewrote a FAT sector with K_SECWRITE and then
+            ; walked a directory's cluster chain would otherwise READ the
+            ; kernel's stale copy.
+            mov     rf, fat_csec
+            ldi     $FF
+            str     rf
+            inc     rf
+            str     rf                  ; fat_csec = $FFFF (nothing cached)
+
+kdi_keep_cache:
             mov     rf, active_bpb_drive
             ldi     $FF
             str     rf                  ; force a real reload on the
