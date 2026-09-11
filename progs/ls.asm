@@ -695,6 +695,16 @@ ls_init_collect:
             ldi     0
             str     rb                  ; ls_count = 0
 
+            mov     rb, ls_sum_dlen
+            ldi     0
+            str     rb
+            inc     rb
+            ldi     0
+            str     rb                  ; ls_sum_dlen = 0 -- per listing:
+                                        ; ls_trycols_loop's reject test
+                                        ; needs the sum over exactly the
+                                        ; entries it is laying out
+
             mov     rf, ls_entries
             mov     rb, ls_next_entry
             ghi     rf
@@ -956,6 +966,22 @@ ladd_dlen_nof:
             glo     r9
             str     rf                  ; entry->namelen = display len
             inc     rf                  ; RF now at LSENT_QUOTE in dest
+
+            ; Keep a running SUM of display lengths too, for the
+            ; per-candidate reject test in ls_trycols_loop. 16 bits is
+            ; plenty: at most LS_MAX_ENTRIES (255) entries of at most
+            ; LS_NAME_CAP+3 (130). RF must survive; RD is scratch here.
+            mov     rd, ls_sum_dlen
+            inc     rd                  ; RD -> low byte
+            glo     r9
+            str     r2                  ; M(R2) = this display length
+            ldn     rd
+            add                         ; D = low + dlen, DF = carry
+            str     rd
+            dec     rd                  ; RD -> high byte (DEC and LDN
+            ldn     rd                  ; leave DF alone)
+            adci    0
+            str     rd                  ; high += carry
 
             ; Keep the SMALLEST display length seen. ls_print_columnar
             ; uses it to bound the column-count search from above (see
@@ -1671,6 +1697,113 @@ ls_trycols_init:
                                         ; ever decremented while > 1)
 
 ls_trycols_loop:
+            ; ---- cheap per-candidate REJECT test (2026-09-10) ----
+            ; Before paying for the O(n) column scan below, rule this
+            ; candidate out if a LOWER BOUND on its total width already
+            ; exceeds the screen. With S = the sum of every display
+            ; length, n = ls_count and c = the candidate: a column's
+            ; width is at least its own mean, every column holds at most
+            ; rows = ceil(n/c) <= (n+c)/c entries, and every column also
+            ; costs LS_COL_GAP (even an empty trailing one), so
+            ;     total(c) >= floor(S*c/(n+c)) + 2c
+            ; The rows <= (n+c)/c step is what keeps this a true lower
+            ; bound -- the tempting rows ~= n/c is not one. Division-free,
+            ; with k = screen - 2c:
+            ;     reject  iff  k < 0  or  S*c >= (k+1)*(n+c)
+            ; Modelled in Python over 100,000 random directories before
+            ; being written: never above the true width, never changes
+            ; the chosen layout, and skips ~80% of the column scans.
+            ; Unlike the min-length clamp in ls_col0_ok, one short name
+            ; (such as '.') barely weakens it.
+            ;
+            ; Candidate 1 is never tested -- it is always accepted.
+            mov     rf, ls_trycols
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = c (high byte always 0)
+            smi     1
+            lbz     ls_trycols_scan     ; c == 1: no test
+
+            shl16   rc                  ; RC = 2c
+            mov     rf, ls_screen_cols
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = screen
+            glo     rc
+            str     r2
+            glo     rd
+            sm
+            ghi     rc
+            str     r2
+            ghi     rd
+            smb                         ; DF=0 iff screen < 2c
+            lbnf    ls_trycols_reject   ; k < 0: cannot fit
+            sub16   rd, rc
+            inc     rd                  ; RD = k+1 (2c >= 4, so no wrap)
+
+            ; right side: (k+1) * (n+c), at most 25 bits
+            mov     ra, rd              ; RA = k+1 (multiplicand low)
+            ldi     0
+            phi     r9
+            plo     r9                  ; R9 = 0   (multiplicand high)
+            mov     rf, ls_count
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = n
+            mov     rf, ls_trycols
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7                  ; R7 = c
+            add16   rc, r7              ; RC = n+c (<= 287)
+            call    ls_mul32            ; RD:R8 = (k+1)*(n+c)
+            mov     rf, ls_rej_rhs
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            inc     rf
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf                  ; ls_rej_rhs = (k+1)*(n+c)
+
+            ; left side: S * c, at most 22 bits
+            mov     rf, ls_sum_dlen
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; RA = S
+            ldi     0
+            phi     r9
+            plo     r9                  ; R9 = 0
+            mov     rf, ls_trycols
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = c
+            call    ls_mul32            ; RD:R8 = S*c
+
+            mov     rf, ls_rej_rhs
+            lda     rf
+            phi     r9
+            lda     rf
+            plo     r9
+            lda     rf
+            phi     ra
+            ldn     rf
+            plo     ra                  ; R9:RA = (k+1)*(n+c)
+            call    ls_cmp32_ge         ; DF=1 iff S*c >= (k+1)*(n+c)
+            lbdf    ls_trycols_reject   ; the bound alone is too wide
+
+ls_trycols_scan:
+            ; Every register used below is loaded fresh, so nothing the
+            ; test above left behind can leak into the scan.
             ; num_rows = ceil(ls_count / ls_trycols)
             mov     rf, ls_count
             lda     rf
@@ -1950,6 +2083,10 @@ ls_trycols_done:
                                         ; totalwidth, fits
 
             ; doesn't fit -- try one fewer column
+ls_trycols_reject:                      ; also reached straight from the
+                                        ; reject test at ls_trycols_loop
+                                        ; (which never tests c == 1, so
+                                        ; the decrement is always safe)
             mov     rf, ls_trycols
             lda     rf
             phi     rd
@@ -3152,6 +3289,36 @@ ls_dbl32:
             shlc16  rd
             rtn
 
+; ls_mul32: RD:R8 = R9:RA * RC, by shift-and-add. The multiplier is
+; consumed one low bit per round and the loop ends as soon as it is
+; zero, so it costs only as many rounds as the multiplier has bits (at
+; most 9 in this program). The caller guarantees the product fits.
+; Args:     R9:RA = multiplicand (32-bit), RC = multiplier (16-bit)
+; Returns:  RD:R8 = product
+; Modifies: RD, R8, R9, RA, RC (and D, DF)
+ls_mul32:
+            ldi     0
+            phi     rd
+            plo     rd
+            phi     r8
+            plo     r8                  ; product = 0
+lm32_loop:
+            ghi     rc
+            lbnz    lm32_step
+            glo     rc
+            lbz     lm32_done           ; multiplier used up
+lm32_step:
+            shr16   rc                  ; DF = the bit shifted out
+            lbnf    lm32_noadd
+            call    ls_add32            ; product += multiplicand
+                                        ; (leaves R9:RA unchanged)
+lm32_noadd:
+            shl16   ra
+            shlc16  r9                  ; multiplicand *= 2 (32-bit)
+            lbr     lm32_loop
+lm32_done:
+            rtn
+
 ;------------------------------------------------------------------
 ; ls_human_decdigit: compute ROUND(10*remainder/scale) EXACTLY, via 10
 ; repeated add+compare+subtract iterations (each exact -- no precision
@@ -3539,6 +3706,10 @@ ls_curname:     dw      0
 ; per-column-width layout state (2026-07-19 redesign -- see
 ; ls_print_columnar's own header comment)
 ls_trycols:     dw      0           ; candidate column count being tried
+ls_sum_dlen:    dw      0           ; sum of every display length in
+                                    ; the current listing (ls_add_entry;
+                                    ; reset by ls_init_collect)
+ls_rej_rhs:     ds      4           ; reject-test scratch, 32-bit BE
 ls_totalwidth:  dw      0           ; running summed column width for
                                     ; the current candidate
 ls_min_dlen:            db      LS_MIN_DLEN_NONE  ; smallest display
