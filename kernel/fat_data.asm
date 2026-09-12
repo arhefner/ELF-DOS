@@ -65,8 +65,20 @@ ffl_sector_idx: db      0
 ; call into this file between one fat_alloc and the next.
 fat_next_free:  dw      0
 
+; FAT12 support (PROTOTYPE). bpb_fat16 is derived by _switch_drive from
+; bpb_max_clust whenever a drive becomes active -- not stored per drive,
+; so drive_bpb_table's layout and every published offset are unchanged.
+; Initialised to 1 so anything reaching the FAT before the first switch
+; behaves exactly as it always has. f12_clust_hi is fat_set's scratch:
+; _fat_load_sector hands RD back with RD.1 = FAT sector index, so the
+; cluster's high byte has to be put back from memory.
+bpb_fat16:      db      1
+f12_clust_hi:   db      0
+
                 public  fls_cluster
                 public  ffl_sector_idx
                 public  fat_next_free
+                public  bpb_fat16
+                public  f12_clust_hi
 
                 endp

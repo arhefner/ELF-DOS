@@ -867,9 +867,9 @@ boot_spc_done:
 ; free and could place file data past the end of the partition.
 ;
 ; The count also decides the FAT type, which is how the FAT spec defines
-; it: fewer than 4085 clusters is FAT12, 65525 or more is FAT32. This
-; kernel reads 16-bit FAT entries only, so either is left absent rather
-; than silently misread (MOUNT refuses them too).
+; it: fewer than 4085 clusters is FAT12, 65525 or more is FAT32. FAT32 is
+; left absent. FAT12 is accepted: the kernel reads it (fat.asm derives
+; bpb_fat16 from this same max_clust in _switch_drive).
             mov         rf,boot_scratch+$13
             lda         rf
             plo         ra
@@ -955,11 +955,6 @@ boot_b7_shifted:
             ghi         ra
             smbi        $FF
             lbdf        boot_drive_absent   ; count >= 65525: FAT32
-            glo         ra
-            smi         $F5
-            ghi         ra
-            smbi        $0F
-            lbnf        boot_drive_absent   ; count < 4085: FAT12
             inc         ra
             mov         rf,boot_max_clust
             ghi         ra

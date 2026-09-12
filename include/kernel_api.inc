@@ -564,7 +564,13 @@ BPBBLK_SPF:        equ  17         ; 2 bytes
 BPBBLK_MAX_CLUST:   equ  19          ; 2 bytes -- highest valid cluster:
                     ; exactly the volume's cluster count + 1, so
                     ; clusters 2..max_clust exist (2026-09-11; was
-                    ; an over-estimate derived from the FAT size)
+                    ; an over-estimate derived from the FAT size).
+                    ; It also IS the FAT type, as the spec defines
+                    ; it: max_clust < $0FF6 (fewer than 4085
+                    ; clusters) means FAT12, otherwise FAT16. The
+                    ; kernel derives its own FAT12 flag from this
+                    ; in _switch_drive, and a program decoding a
+                    ; raw FAT itself (CHKDSK) must do the same.
 BPBBLK_DEV:         equ  21          ; 1 byte -- block device UNIT number
                     ; (0-7) this partition lives on, passed to
                     ; the BIOS in R8.1 on every f_ideread /

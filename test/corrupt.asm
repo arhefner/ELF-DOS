@@ -793,6 +793,36 @@ crp_read_bpb:
             ldn     rf
             str     rb
 
+            mov     rf, r9
+            add16   rf, BPBBLK_MAX_CLUST
+            mov     rb, crp_max_clust
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb                  ; crp_max_clust (2B)
+
+            ; crp_fat12 = (max_clust < $0FF6) -- the cluster count is
+            ; the FAT type, the same rule the kernel and CHKDSK use.
+            ; R8, not R9: R9 holds the BPB block's address and the
+            ; crp_unit read below still needs it.
+            mov     rf, crp_max_clust
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            glo     r8
+            smi     $F6
+            ghi     r8
+            smbi    $0F                 ; DF = 1: FAT16
+            ldi     0
+            shlc
+            xri     1                   ; D = 1 for FAT12
+            plo     r8
+            mov     rb, crp_fat12
+            glo     r8
+            str     rb
+
             ; BUG FIX (2026-09-11): crp_unit -- the raw sector I/O below
             ; used to hardcode R8.1 = 0, so a drive MOUNTed from another
             ; unit was read (and corrupted!) on the boot device instead.
@@ -862,6 +892,10 @@ cctl2_done:
 ; Modifies: R7, R8, R9, RB, RF (and D) -- treat as fully clobbering
 ;------------------------------------------------------------------
 crp_fat_read:
+            mov     rb, crp_fat12
+            ldn     rb
+            lbnz    cfr12
+
             mov     rb, crp_fr_cluster
             ghi     rd
             str     rb
@@ -924,6 +958,196 @@ cfr_ioerr:
             rtn
 
 ;------------------------------------------------------------------
+; cfr12: the FAT12 half of crp_fat_read. The entry for cluster N starts
+; at byte N + N/2 of the FAT; when that byte is the last in its sector
+; the entry straddles into the next one, which is read separately.
+; $FF7-$FFF widen to $FFF7-$FFFF so this tool's own FAT_EOC/FAT_BAD
+; comparisons keep working unchanged.
+; Args:    RD = cluster
+; Returns: DF = 0, RD = entry value; DF = 1 on I/O error
+;------------------------------------------------------------------
+cfr12:
+            call    crp_f12_split       ; crp_p12_sector/crp_p12_off
+            call    crp_f12_read_sector ; RF -> crp_fr_secbuf sector
+            lbdf    cfr_ioerr
+
+            mov     rf, crp_p12_off
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = byte offset in sector
+            mov     rf, crp_fr_secbuf
+            add16   rf, r9
+            ldn     rf
+            plo     r8                  ; R8.0 = first byte
+
+            glo     r9
+            xri     $FF
+            lbnz    cfr12_same
+            ghi     r9
+            lbz     cfr12_same
+
+            ; straddles: the second byte is the next sector's first
+            mov     rf, crp_p12_sector
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            add16   r9, 1
+            mov     rf, crp_p12_sector
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            glo     r8
+            plo     rb                  ; keep the first byte: the read
+                                        ; below clobbers R8
+            call    crp_f12_read_sector
+            lbdf    cfr_ioerr
+            glo     rb
+            plo     r8
+            mov     rf, crp_fr_secbuf
+            lbr     cfr12_second
+
+cfr12_same:
+            mov     rf, crp_p12_off
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            add16   r9, 1
+            mov     rf, crp_fr_secbuf
+            add16   rf, r9
+cfr12_second:
+            ldn     rf
+            phi     r8                  ; R8 = the 16 bits holding it
+
+            mov     rf, crp_fr_cluster
+            inc     rf
+            ldn     rf
+            shr                         ; DF = cluster is odd
+            lbnf    cfr12_even
+            glo     r8
+            shr
+            shr
+            shr
+            shr
+            str     r2
+            ghi     r8
+            shl
+            shl
+            shl
+            shl
+            or
+            plo     r8
+            ghi     r8
+            shr
+            shr
+            shr
+            shr
+            phi     r8
+cfr12_even:
+            ghi     r8
+            ani     $0F
+            phi     r8
+            xri     $0F
+            lbnz    cfr12_done
+            glo     r8
+            smi     $F7
+            lbnf    cfr12_done
+            ldi     $FF
+            phi     r8
+cfr12_done:
+            ghi     r8
+            phi     rd
+            glo     r8
+            plo     rd
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; crp_f12_split: where cluster RD's own FAT12 entry lives.
+; Args:    RD = cluster
+; Returns: crp_fr_cluster = RD, crp_p12_sector = byte_offset >> 9,
+;          crp_p12_off = byte_offset & 511
+; Modifies: R8, R9, RB, RF (and D)
+;------------------------------------------------------------------
+crp_f12_split:
+            mov     rb, crp_fr_cluster
+            ghi     rd
+            str     rb
+            inc     rb
+            glo     rd
+            str     rb
+
+            ghi     rd
+            shr
+            phi     r9
+            glo     rd
+            shrc
+            plo     r9                  ; R9 = cluster >> 1
+            add16   r9, rd              ; R9 = byte offset in the FAT
+
+            ghi     r9
+            shr                         ; D = sector index, DF = bit 8
+            plo     r8
+            ldi     0
+            phi     r8
+            phi     rb
+            ldi     0
+            shlc
+            phi     rb
+            glo     r9
+            plo     rb                  ; RB = offset within the sector
+
+            mov     rf, crp_p12_sector
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
+            mov     rf, crp_p12_off
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; crp_f12_read_sector: read FAT copy 0's sector crp_p12_sector into
+; crp_fr_secbuf.
+; Returns: DF = 0/1
+; Modifies: everything
+;------------------------------------------------------------------
+crp_f12_read_sector:
+            mov     rf, crp_fat_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            lda     rf
+            plo     r7
+            mov     rf, crp_unit
+            ldn     rf
+            phi     r8
+
+            mov     rf, crp_p12_sector
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            add16   r7, r9
+            glo     r8
+            adci    0
+            plo     r8
+
+            mov     rf, crp_fr_secbuf
+            call    K_SECREAD
+            rtn
+
+;------------------------------------------------------------------
 ; crp_fat_write: write a raw 16-bit value into a cluster's own FAT
 ; entry, mirrored into every FAT copy (bpb_num_fats), matching
 ; kernel/fat.asm's own fat_flush convention -- writing only one copy
@@ -934,6 +1158,10 @@ cfr_ioerr:
 ; Modifies: everything (R7-R9, RA-RD, RF) -- treat as fully clobbering
 ;------------------------------------------------------------------
 crp_fat_write:
+            mov     rb, crp_fat12
+            ldn     rb
+            lbnz    cfw12
+
             mov     rb, crp_fw_cluster
             ghi     rd
             str     rb
@@ -1101,6 +1329,263 @@ fw_no_copy_off2:
 
 fw_ioerr:
             stc
+            rtn
+
+;------------------------------------------------------------------
+; cfw12: the FAT12 half of crp_fat_write. A 12-bit entry shares each of
+; its two bytes with a neighbour, so each byte is a read-modify-write:
+; keep the neighbour's nibble, replace ours. The two bytes are patched
+; independently (crp_fat12_patch), which also handles the case where
+; they are in different sectors at no extra cost.
+; Args:    RD = cluster, R8 = value (only the low 12 bits are stored)
+;------------------------------------------------------------------
+cfw12:
+            mov     rb, crp_fw_value    ; stash the value: crp_f12_split
+            glo     r8                  ; clobbers R8
+            str     rb
+            inc     rb
+            ghi     r8
+            str     rb
+
+            call    crp_f12_split       ; crp_p12_sector/off, crp_fr_cluster
+
+            mov     rf, crp_fr_cluster
+            inc     rf
+            ldn     rf
+            shr                         ; DF = cluster is odd
+            lbdf    cfw12_odd
+
+            ; even: first byte = value's low 8 bits, second byte keeps
+            ; its high nibble and takes value's top 4 bits
+            mov     rf, crp_fw_value
+            ldn     rf
+            plo     r9                  ; R9.0 = new bits for byte 0
+            mov     rf, crp_p12_keep
+            ldi     0
+            str     rf                  ; keep nothing of byte 0
+            mov     rf, crp_p12_bits
+            glo     r9
+            str     rf
+            call    crp_fat12_patch
+            lbdf    fw_ioerr
+
+            call    crp_f12_next_byte   ; advance to the second byte
+            mov     rf, crp_fw_value
+            inc     rf
+            ldn     rf
+            ani     $0F
+            plo     r9
+            mov     rf, crp_p12_keep
+            ldi     $F0
+            str     rf
+            mov     rf, crp_p12_bits
+            glo     r9
+            str     rf
+            lbr     cfw12_second
+
+cfw12_odd:
+            ; odd: first byte keeps its low nibble and takes value's
+            ; bottom 4 bits, second byte is value >> 4
+            mov     rf, crp_fw_value
+            ldn     rf
+            shl
+            shl
+            shl
+            shl
+            plo     r9
+            mov     rf, crp_p12_keep
+            ldi     $0F
+            str     rf
+            mov     rf, crp_p12_bits
+            glo     r9
+            str     rf
+            call    crp_fat12_patch
+            lbdf    fw_ioerr
+
+            call    crp_f12_next_byte
+            mov     rf, crp_fw_value
+            ldn     rf
+            shr
+            shr
+            shr
+            shr
+            str     r2
+            mov     rf, crp_fw_value
+            inc     rf
+            ldn     rf
+            shl
+            shl
+            shl
+            shl
+            or
+            plo     r9
+            mov     rf, crp_p12_keep
+            ldi     0
+            str     rf
+            mov     rf, crp_p12_bits
+            glo     r9
+            str     rf
+
+cfw12_second:
+            call    crp_fat12_patch
+            rtn
+
+;------------------------------------------------------------------
+; crp_f12_next_byte: move crp_p12_sector/crp_p12_off on to the entry's
+; second byte, crossing into the next sector when the first byte was
+; the last one in its own.
+; Modifies: R9, RF (and D)
+;------------------------------------------------------------------
+crp_f12_next_byte:
+            mov     rf, crp_p12_off
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            glo     r9
+            xri     $FF
+            lbnz    cfnb_same
+            ghi     r9
+            lbnz    cfnb_same
+
+            ldi     0
+            phi     r9
+            plo     r9                  ; offset 0 of the next sector
+            mov     rf, crp_p12_off
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            mov     rf, crp_p12_sector
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            add16   r9, 1
+            mov     rf, crp_p12_sector
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            rtn
+
+cfnb_same:
+            add16   r9, 1
+            mov     rf, crp_p12_off
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; crp_fat12_patch: in every FAT copy, replace part of one byte:
+;   byte = (byte & crp_p12_keep) | crp_p12_bits
+; at sector crp_p12_sector, offset crp_p12_off within it.
+; Returns: DF = 0/1
+; Modifies: everything
+;------------------------------------------------------------------
+crp_fat12_patch:
+            mov     rf, crp_p12_copy
+            ldi     0
+            str     rf
+
+p12_copy_loop:
+            call    p12_set_lba
+            mov     rf, crp_fw_secbuf
+            call    K_SECREAD
+            lbdf    p12_err
+
+            mov     rf, crp_p12_off
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            mov     rf, crp_fw_secbuf
+            add16   rf, r9              ; RF -> the byte to patch
+            mov     r8, crp_p12_keep
+            ldn     r8
+            str     r2
+            ldn     rf
+            and                         ; D = byte & keep
+            str     r2
+            mov     r8, crp_p12_bits
+            ldn     r8
+            or                          ; D = (byte & keep) | bits
+            str     rf
+
+            call    p12_set_lba         ; K_SECREAD clobbered R7/R8
+            mov     rf, crp_fw_secbuf
+            call    K_SECWRITE
+            lbdf    p12_err
+
+            mov     rf, crp_p12_copy
+            ldn     rf
+            adi     1
+            str     rf
+            mov     r8, crp_num_fats
+            ldn     r8
+            str     r2
+            mov     rf, crp_p12_copy
+            ldn     rf
+            sm
+            lbnf    p12_copy_loop       ; more FAT copies to write
+
+            clc
+            rtn
+
+p12_err:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; p12_set_lba: R7/R8 = FAT copy crp_p12_copy's own copy of sector
+; crp_p12_sector, with R8.1 = the drive's unit.
+; Modifies: R7, R8, R9, RB, RD, RF (and D)
+;------------------------------------------------------------------
+p12_set_lba:
+            mov     rf, crp_fat_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            lda     rf
+            plo     r7
+            mov     rf, crp_unit
+            ldn     rf
+            phi     r8
+
+            mov     rf, crp_p12_copy
+            ldn     rf
+            lbz     p12_no_copy_off
+            plo     rb
+p12_copy_off_loop:
+            mov     rf, crp_spf
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            add16   r7, rd
+            glo     r8
+            adci    0
+            plo     r8
+            dec     rb
+            glo     rb
+            lbnz    p12_copy_off_loop
+p12_no_copy_off:
+
+            mov     rf, crp_p12_sector
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            add16   r7, r9
+            glo     r8
+            adci    0
+            plo     r8
             rtn
 
 ;------------------------------------------------------------------
@@ -1689,6 +2174,14 @@ crp_spc:                ds  1
 crp_spc_shift:          ds  1
 crp_num_fats:           ds  1
 crp_spf:                ds  2
+
+crp_max_clust:          ds  2
+crp_fat12:              db  0       ; 1 = this volume is FAT12
+crp_p12_sector:         ds  2       ; crp_fat12_patch's arguments
+crp_p12_off:            ds  2
+crp_p12_keep:           db  0
+crp_p12_bits:           db  0
+crp_p12_copy:           db  0
 
 crp_fr_cluster:         ds  2
 crp_fr_secbuf:          ds  512

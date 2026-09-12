@@ -59,6 +59,10 @@
             extrn   ffl_sector_idx
             extrn   fat_next_free
             extrn   bpb_dev
+            extrn   bpb_fat16
+            extrn   f12_clust_hi
+            extrn   _f12_locate
+            extrn   _f12_second
 
 ; ----------------------------------------------------------------
 ; fat_init: reset cache state at boot
@@ -136,9 +140,17 @@
 ; first if it's dirty, then loads the new sector if it isn't
 ; already the one cached.
 ;
-; Args:    RD = cluster number
+; Args:    RD = cluster number (FAT12: RD.1 = FAT sector index, and
+;          RD.0 is carried through untouched -- _f12_locate relies on
+;          getting the cluster's own low byte back, for its odd/even
+;          test)
 ; Returns: DF = 0 on success, DF = 1 on I/O error
-; Modifies: R7, R8, RF
+; Modifies: R7, R8, RF -- and RC, which fat_flush uses as its FAT-copy
+;          counter on the flush path only (every caller here already
+;          protects RC; documented 2026-09-11 after the header was found
+;          to under-state it). RB is deliberately preserved (see the
+;          push/pop around fat_flush below), and fat_get/fat_set's own
+;          callers depend on that.
 ; ----------------------------------------------------------------
             proc    _fat_load_sector
 
@@ -296,6 +308,10 @@ fls_err:
 ; ----------------------------------------------------------------
             proc    fat_get
 
+            mov     rf, bpb_fat16
+            ldn     rf
+            lbz     fg12
+
             call    _fat_load_sector    ; RD unchanged; DF = 0/1
             lbdf    fat_get_err
 
@@ -322,6 +338,55 @@ fls_err:
             clc                         ; DF = 0, success
             rtn
 
+fg12:
+            call    _f12_locate         ; RF -> first byte, R7 = offset
+            lbdf    fat_get_err
+            lda     rf
+            plo     r8                  ; R8.0 = first byte
+            call    _f12_second         ; RF -> second byte (R8 kept)
+            lbdf    fat_get_err
+            ldn     rf
+            phi     r8                  ; R8 = the 16 bits holding the entry
+            glo     rd                  ; RD.0 is still cluster.0
+            shr
+            lbnf    fg12_even
+            glo     r8                  ; odd cluster: entry = R8 >> 4
+            shr
+            shr
+            shr
+            shr
+            str     r2
+            ghi     r8
+            shl
+            shl
+            shl
+            shl
+            or
+            plo     r8
+            ghi     r8
+            shr
+            shr
+            shr
+            shr
+            phi     r8
+fg12_even:
+            ghi     r8
+            ani     $0F                 ; (odd: already < $10, harmless)
+            phi     r8
+            ; $FF7-$FFF (bad, end of chain) widen to $FFF7-$FFFF, so every
+            ; caller's existing 16-bit test works unchanged
+            xri     $0F
+            lbnz    fg12_done
+            glo     r8
+            smi     $F7
+            lbnf    fg12_done
+            ldi     $FF
+            phi     r8
+fg12_done:
+            mov     rd, r8
+            clc
+            rtn
+
 fat_get_err:
             stc                         ; DF = 1, I/O error
             rtn
@@ -329,9 +394,78 @@ fat_get_err:
             endp
 
 ; ----------------------------------------------------------------
+; _f12_locate (PROTOTYPE): load the FAT sector holding a FAT12 entry's
+; first byte. The entry for cluster N starts at byte N + N/2 of the FAT.
+;
+; Args:    RD = cluster
+; Returns: DF = 0: RF -> first byte in fat_cache, R7 = its offset in the
+;          sector (511 = the entry straddles into the next sector),
+;          RD.1 = FAT sector index, RD.0 = cluster.0 (unchanged)
+;          DF = 1 on I/O error
+; Modifies: R7, R8, RF, RD.1, plus _fat_load_sector's own footprint.
+;          RB survives (_fat_load_sector protects it).
+; ----------------------------------------------------------------
+            proc    _f12_locate
+
+            ghi     rd
+            shr
+            phi     r7
+            glo     rd
+            shrc
+            plo     r7                  ; R7 = cluster >> 1
+            add16   r7, rd              ; R7 = byte offset of the entry
+            ghi     r7
+            shr                         ; D = FAT sector index, DF = bit 8
+            phi     rd                  ; RD.1 selects the sector
+            ldi     0
+            shlc
+            phi     r7                  ; R7 = offset within the sector
+            push    r7
+            call    _fat_load_sector
+            pop     r7                  ; POP leaves DF
+            lbdf    f12l_err
+            mov     rf, r7
+            add16   rf, fat_cache       ; RF -> entry's first byte
+            clc
+f12l_err:
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
+; _f12_second (PROTOTYPE): point at a FAT12 entry's second byte.
+; Args:    RF -> one past the first byte, R7 = first byte's offset,
+;          RD.1 = FAT sector index
+; Returns: DF = 0: RF -> second byte (the next sector is loaded first
+;          when R7 = 511); DF = 1 on I/O error. R8 and RB survive.
+; ----------------------------------------------------------------
+            proc    _f12_second
+
+            glo     r7
+            xri     $FF
+            lbnz    f12s_ok
+            ghi     r7
+            lbz     f12s_ok             ; offset < 511: same sector
+            ghi     rd
+            adi     1
+            phi     rd                  ; RD.1 = next sector index
+            push    r8
+            call    _fat_load_sector
+            pop     r8
+            lbdf    f12s_err
+            mov     rf, fat_cache
+f12s_ok:
+            clc
+f12s_err:
+            rtn
+
+            endp
+
+; ----------------------------------------------------------------
 ; fat_set: write a value into the FAT for a given cluster
 ; Args:   RD = cluster number to update
-;         RB = value to write
+;         RB = value to write (FAT12: only the low 12 bits are stored,
+;              so FAT_EOC $FFF8 lands on disk as $FF8)
 ; Returns: DF = 0 on success, DF = 1 on error
 ;
 ; Writing 0 (freeing a cluster) below fat_next_free also lowers
@@ -339,6 +473,10 @@ fat_get_err:
 ; RD and RB are both left unchanged.
 ; ----------------------------------------------------------------
             proc    fat_set
+
+            mov     rf, bpb_fat16
+            ldn     rf
+            lbz     fs12
 
             push    rb                  ; save value across _fat_load_sector
             call    _fat_load_sector    ; RD unchanged; DF = 0/1
@@ -364,7 +502,94 @@ fat_get_err:
             mov     rf, fat_dirty
             ldi     1
             str     rf                  ; mark cache dirty (see fat_flush)
+            lbr     fs_hint
 
+fs12:
+            mov     rf, f12_clust_hi
+            ghi     rd
+            str     rf                  ; RD.1 is about to become an index
+            push    rb                  ; this path rewrites RB into the
+                                        ; on-disk bit pattern below, and
+                                        ; this proc's contract says RB is
+                                        ; unchanged -- restored at every
+                                        ; exit, including fs12_err
+            call    _f12_locate         ; RF -> first byte, R7 = offset
+            lbdf    fs12_err
+            ; normalise RB to the 16 bits as they sit on disk: odd clusters
+            ; hold the entry in the top 12 bits, even ones in the bottom 12
+            glo     rd
+            shr
+            lbnf    fs12_even
+            glo     rb                  ; odd: RB = value << 4
+            shr
+            shr
+            shr
+            shr
+            str     r2
+            ghi     rb
+            shl
+            shl
+            shl
+            shl
+            or
+            phi     rb
+            glo     rb
+            shl
+            shl
+            shl
+            shl
+            plo     rb
+            lbr     fs12_norm
+fs12_even:
+            ghi     rb
+            ani     $0F
+            phi     rb
+fs12_norm:
+            ; first byte keeps $0F (odd) or nothing (even)
+            glo     rd
+            ani     1
+            smi     1
+            xri     $FF
+            ani     $0F
+            str     r2
+            ldn     rf
+            and
+            str     r2
+            glo     rb
+            or
+            str     rf
+            inc     rf
+            mov     r8, fat_dirty
+            ldi     1
+            str     r8                  ; dirty BEFORE a straddle load flushes
+            call    _f12_second
+            lbdf    fs12_err
+            ; second byte keeps $F0 (even) or nothing (odd)
+            glo     rd
+            ani     1
+            smi     1
+            ani     $F0
+            str     r2
+            ldn     rf
+            and
+            str     r2
+            ghi     rb
+            or
+            str     rf
+            mov     r8, fat_dirty
+            ldi     1
+            str     r8
+            mov     rf, f12_clust_hi
+            ldn     rf
+            phi     rd                  ; RD = cluster again
+            pop     rb                  ; RB = the caller's value again
+            lbr     fs_hint
+
+fs12_err:
+            pop     rb
+            lbr     fat_set_err
+
+fs_hint:
             ; freeing a cluster below fat_alloc's search hint: pull the
             ; hint down to it, so the next allocation finds it on its
             ; forward scan instead of only after running off the end and
@@ -754,6 +979,19 @@ swd_copy_loop:
             dec     rc
             glo     rc
             lbnz    swd_copy_loop
+
+            ; bpb_fat16 = (bpb_max_clust >= $0FF6): max_clust is count+1,
+            ; and FAT12 is defined as count < 4085. MOV leaves DF.
+            mov     rf, bpb_max_clust+1
+            ldn     rf
+            smi     $F6
+            dec     rf
+            ldn     rf
+            smbi    $0F                 ; DF = 1: FAT16
+            mov     rf, bpb_fat16
+            ldi     0
+            shlc
+            str     rf
 
             ; never trust the copied fat_csec -- always start the new
             ; drive with an empty FAT cache (see header comment)

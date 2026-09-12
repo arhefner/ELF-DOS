@@ -1,7 +1,7 @@
 # ELF-DOS User's Guide
 
 ELF-DOS is a disk operating system for the CDP1802 microprocessor. It uses
-the FAT16 file system, the same one used by early versions of MS-DOS, so
+the FAT file system, the same one used by early versions of MS-DOS, so
 disks made on ELF-DOS can be read on most other computers, and vice versa.
 
 This guide explains how to use ELF-DOS from day to day: starting the
@@ -102,9 +102,24 @@ for this, exactly as you would expect, though nothing forces it.)
 One drive cannot be unmounted: the one ELF-DOS booted from, because the
 commands themselves live there. `MOUNT` and `UMOUNT` both refuse.
 
-ELF-DOS reads FAT16 volumes only. `MOUNT` checks before attaching anything
-and will tell you if a disk is FAT12 - common on floppies - rather than
-attaching it and misreading it.
+ELF-DOS reads both FAT16 and FAT12 volumes. FAT12 is what `FORMAT` on
+another machine will have put on a floppy, and on small flash or RAM disks
+of roughly 16MB and under; FAT16 is usual on anything larger. You do not
+have to say which a disk is: ELF-DOS works it out from the disk itself.
+FAT32 is not supported, and `MOUNT` says so rather than attaching it.
+
+**Changing a floppy.** Nothing tells ELF-DOS that you have swapped a disk,
+and it remembers the old one's layout, so writing to the new disk could
+damage it. After changing a disk, mount it again before using it:
+
+```
+C:/> MOUNT 1 0 A:
+Mounted partition 0 as A:
+```
+
+That re-reads the new disk and starts you at its root directory. Do it at
+the prompt, with no program running, and the old disk is left complete:
+ELF-DOS never leaves a write half-finished once a command has ended.
 
 ## Typing Commands
 
@@ -526,7 +541,8 @@ prints `Label not found.` and stops the batch file right there.
 
 ## A Few Notes About the File System
 
-- ELF-DOS uses FAT16, the same file system used by early MS-DOS. Long,
+- ELF-DOS uses FAT16 and FAT12, the same file systems used by early
+  MS-DOS. Long,
   lowercase file names are supported normally, alongside the traditional
   eight-character-name-plus-three-character-extension form.
 - The root directory of a drive has no `.` or `..` entries. A path starting

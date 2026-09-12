@@ -207,6 +207,13 @@ chk_print_header:
             db      ":",13,10,0
 
             call    chk_read_bpb
+            call    chk_load_fat12      ; FAT12 only; no-op on FAT16
+            lbnf    chk_fat_loaded
+            call    K_INMSG
+            db      "Cannot read the file allocation table.",13,10,0
+            ldi     1
+            rtn
+chk_fat_loaded:
 
             ; zero every tally counter -- `ds` does NOT guarantee
             ; zero-initialized memory in this codebase (confirmed via
@@ -439,6 +446,27 @@ chk_read_bpb:
             ldn     rf
             str     rb                  ; chk_unit (1B)
 
+            ; chk_fat12 = (max_clust < $0FF6). max_clust is the cluster
+            ; count + 1, and the FAT type IS the cluster count: fewer
+            ; than 4085 clusters is FAT12 (same rule the kernel's own
+            ; _switch_drive uses).
+            mov     rf, chk_max_clust
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = max_clust
+            glo     r9
+            smi     $F6
+            ghi     r9
+            smbi    $0F                 ; DF = 1: FAT16
+            ldi     0
+            shlc
+            xri     1                   ; D = 1 for FAT12
+            plo     r9
+            mov     rb, chk_fat12
+            glo     r9
+            str     rb
+
             ; chk_cluster_bytes (32-bit, big-endian, matching
             ; DIRENT_SIZE's own in-memory convention) = chk_spc * 512.
             ; 512 = 2^9: compute temp16 = chk_spc*2 (a plain 16-bit
@@ -557,6 +585,10 @@ cctl_done:
 ; Modifies: R7, R8, R9, RB, RF (and D) -- treat as fully clobbering
 ;------------------------------------------------------------------
 chk_fat_read:
+            mov     rb, chk_fat12
+            ldn     rb
+            lbnz    cfr12               ; FAT12: decode from RAM
+
             ; stash the cluster number in memory immediately -- RD
             ; itself is about to be reused as scratch below, and nothing
             ; here may be trusted to survive the eventual K_SECREAD call
@@ -626,6 +658,149 @@ chk_fat_read:
             rtn
 
 chk_fr_ioerr:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; cfr12: the FAT12 half of chk_fat_read. The entry for cluster N starts
+; at byte N + N/2 of the FAT, which chk_load_fat12 has already read into
+; chk_fat12_buf, so there is no I/O here at all. Values $FF7-$FFF are
+; widened to $FFF7-$FFFF so every 16-bit end-of-chain/bad-cluster test
+; in this program keeps working unchanged.
+;------------------------------------------------------------------
+cfr12:
+            ghi     rd
+            shr
+            phi     r9
+            glo     rd
+            shrc
+            plo     r9                  ; R9 = cluster >> 1
+            add16   r9, rd              ; R9 = byte offset of the entry
+            mov     rf, chk_fat12_buf
+            add16   rf, r9
+            lda     rf
+            plo     r8                  ; R8.0 = first byte
+            ldn     rf
+            phi     r8                  ; R8 = the 16 bits holding it
+            glo     rd
+            shr
+            lbnf    cfr12_even
+            glo     r8                  ; odd cluster: entry = R8 >> 4
+            shr
+            shr
+            shr
+            shr
+            str     r2
+            ghi     r8
+            shl
+            shl
+            shl
+            shl
+            or
+            plo     r8
+            ghi     r8
+            shr
+            shr
+            shr
+            shr
+            phi     r8
+cfr12_even:
+            ghi     r8
+            ani     $0F
+            phi     r8
+            xri     $0F
+            lbnz    cfr12_done
+            glo     r8
+            smi     $F7
+            lbnf    cfr12_done
+            ldi     $FF
+            phi     r8
+cfr12_done:
+            ghi     r8
+            phi     rd
+            glo     r8
+            plo     rd
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; chk_load_fat12: read the whole FAT into chk_fat12_buf (FAT12 only;
+; a no-op on FAT16). Called once, right after chk_read_bpb.
+; Returns: DF = 0 on success (or not FAT12), DF = 1 on an I/O error
+; Modifies: everything
+;------------------------------------------------------------------
+chk_load_fat12:
+            mov     rf, chk_fat12
+            ldn     rf
+            lbnz    clf_go
+            clc
+            rtn
+clf_go:
+            mov     rf, chk_lf_idx
+            ldi     0
+            str     rf
+clf_loop:
+            mov     rf, chk_lf_idx
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     r9                  ; R9 = sector index
+            mov     rf, chk_spf
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = spf
+            mov     r7, r9
+            sub16   r7, r8
+            lbdf    clf_done            ; index >= spf: whole FAT read
+            glo     r9
+            smi     CHK_FAT12_MAXSEC
+            lbdf    clf_done            ; a FAT12 FAT is never longer
+
+            mov     rf, chk_fat_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            lda     rf
+            plo     r7
+            mov     rf, chk_lf_idx
+            ldn     rf
+            str     r2
+            glo     r7
+            add
+            plo     r7
+            ghi     r7
+            adci    0
+            phi     r7
+            glo     r8
+            adci    0
+            plo     r8
+            mov     rf, chk_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's unit
+
+            mov     rf, chk_lf_idx
+            ldn     rf
+            phi     r9
+            ldi     0
+            plo     r9                  ; R9 = index * 256
+            shl16   r9                  ; R9 = index * 512
+            mov     rf, chk_fat12_buf
+            add16   rf, r9              ; RF -> this sector's slot
+
+            call    K_SECREAD
+            lbdf    clf_err
+
+            mov     rf, chk_lf_idx
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     clf_loop
+clf_done:
+            clc
+            rtn
+clf_err:
             stc
             rtn
 
@@ -881,6 +1056,14 @@ mc_already_set:
 ;          consumed by any caller, but kept for completeness).
 ; Modifies: everything (R7-RD) -- treat as fully clobbering
 ;------------------------------------------------------------------
+; A FAT12 FAT is at most 12 sectors (4085 entries * 1.5 bytes = 6128),
+; so CHKDSK reads the whole thing into RAM once and decodes from there.
+; That is both simpler than the FAT16 sector-at-a-time path and much
+; faster on a floppy, where chk_fat_read's uncached read would otherwise
+; cost a seek per chain hop.
+CHK_FAT12_MAXSEC:       equ     12
+CHK_FAT12_BUF_LEN:      equ     CHK_FAT12_MAXSEC*512
+
 CHK_REASON_EOC:         equ     0
 CHK_REASON_TOOLONG:     equ     1
 CHK_REASON_BADCLUSTER:  equ     2
@@ -2433,6 +2616,88 @@ cbis_notset:
 ; check inside cfsl_entry_loop below, rather than trying to start the
 ; two counters at a mismatched offset.
 chk_fat_scan_lost:
+            mov     rf, chk_fat12
+            ldn     rf
+            lbz     cfsl_fat16
+
+            ; FAT12: the whole FAT is already in RAM, so walk the
+            ; clusters directly -- no sector loop, no entry_idx.
+            mov     rf, chk_fscan_cluster
+            ldi     0
+            str     rf
+            inc     rf
+            ldi     2
+            str     rf                  ; cluster = 2
+cfsl12_loop:
+            mov     r7, chk_fscan_cluster
+            lda     r7
+            phi     r9
+            ldn     r7
+            plo     r9                  ; R9 = cluster
+            mov     r7, chk_max_clust
+            lda     r7
+            phi     r8
+            ldn     r7
+            plo     r8                  ; R8 = max_clust
+            mov     r7, r8
+            sub16   r7, r9              ; DF=1 if max_clust >= cluster
+            lbnf    cfsl12_done
+
+            ghi     r9
+            phi     rd
+            glo     r9
+            plo     rd                  ; RD = cluster
+            call    chk_fat_read        ; RD = entry (no I/O: RAM copy)
+            lbdf    cfsl12_done
+
+            glo     rd
+            lbnz    cfsl12_nonzero
+            ghi     rd
+            lbnz    cfsl12_nonzero
+            mov     rf, chk_tally_free
+            call    chk_inc16
+            lbr     cfsl12_next
+
+cfsl12_nonzero:
+            mov     rf, chk_fscan_cluster
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_bit_is_set
+            lbdf    cfsl12_next         ; referenced -- not lost
+
+            call    K_INMSG
+            db      "Lost cluster: ",0
+            mov     rf, chk_fscan_cluster
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_print_uint
+            call    K_INMSG
+            db      13,10,0
+            mov     rf, chk_tally_lost
+            call    chk_inc16
+
+cfsl12_next:
+            mov     r7, chk_fscan_cluster
+            lda     r7
+            phi     r9
+            ldn     r7
+            plo     r9
+            add16   r9, 1
+            mov     r7, chk_fscan_cluster
+            ghi     r9
+            str     r7
+            inc     r7
+            glo     r9
+            str     r7
+            lbr     cfsl12_loop
+cfsl12_done:
+            rtn
+
+cfsl_fat16:
             mov     rf, chk_fscan_cluster
             ldi     0
             str     rf
@@ -3077,6 +3342,9 @@ chk_scale_dest:         ds  2
 chk_fmt_buf:            ds  14
 chk_total_bytes:        ds  4
 chk_unit:               db  0       ; block-device unit of the checked drive
+chk_fat12:              db  0       ; 1 = this volume is FAT12
+chk_lf_idx:             db  0       ; chk_load_fat12's sector counter
+chk_fat12_buf:          ds  CHK_FAT12_BUF_LEN
 chk_free_bytes:         ds  4
 chk_used_bytes:         ds  4
 chk_overflow_flag:      ds  1

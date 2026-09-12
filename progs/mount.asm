@@ -505,38 +505,38 @@ mnt_read_vbr:
             call    K_SECREAD
             lbdf    mnt_vbr_err
 
-            ; ---- is this actually a FAT16 volume? ----
-            ; The 8-byte type string at offset $36 is informational per
-            ; the FAT spec -- the authoritative test is cluster count --
-            ; but as a guard it earns its keep twice over:
+            ; ---- does this even look like a volume boot record? ----
+            ; Until 2026-09-11 this compared the 8-byte type string at
+            ; offset $36 against "FAT16", which also served to reject
+            ; FAT12 (then unreadable) and to stop "MOUNT <unit> 0" on a
+            ; partitioned device mounting the partition TABLE as a
+            ; volume: an MBR's boot code passes the geometry checks
+            ; below by accident. FAT12 is readable now, and the type
+            ; string is informational per the spec anyway (the cluster
+            ; count decides, checked in Step 7b), so the string check is
+            ; gone -- but the partition-table guard still has to exist.
             ;
-            ;   * it rejects mounting a partition TABLE as a volume,
-            ;     which "MOUNT 0" would otherwise do on a partitioned
-            ;     device: an MBR's boot code passes the geometry checks
-            ;     below by accident.
-            ;
-            ;   * it rejects a FAT12 floppy outright. This kernel reads
-            ;     16-bit FAT entries unconditionally and checks the FAT
-            ;     type NOWHERE else, so a FAT12 volume is not refused --
-            ;     it is silently misread. An error beats that, and this
-            ;     is the only place positioned to say so.
-            ;
-            ; The cost is that a genuinely-FAT16 volume whose formatter
-            ; omitted the string would be refused. That is a loud,
-            ; recoverable failure rather than a quiet destructive one,
-            ; and every formatter in practical use writes it.
+            ; A VBR opens with a jump over the BPB: $EB (short) or $E9
+            ; (near), which every formatter writes and which no
+            ; partition table has (ELF-DOS's own MBR begins "MBR").
+            ; The $55 $AA signature is checked too; an MBR has one as
+            ; well, so it is the jump byte that discriminates.
             mov     rf, mnt_sector
-            add16   rf, $36
-            mov     rd, mnt_fat16_sig
-mnt_sig_loop:
-            lda     rd                      ; D = expected char
-            lbz     mnt_sig_ok              ; end of "FAT16": matched
-            str     r2
-            lda     rf                      ; D = actual char
-            sm                              ; D = actual - expected
-            lbnz    mnt_not_fat16
-            lbr     mnt_sig_loop
-mnt_sig_ok:
+            ldn     rf
+            xri     $EB
+            lbz     mnt_vbr_sig
+            ldn     rf
+            xri     $E9
+            lbnz    mnt_bad_vbr
+mnt_vbr_sig:
+            mov     rf, mnt_sector
+            add16   rf, 510
+            lda     rf
+            xri     $55
+            lbnz    mnt_bad_vbr
+            ldn     rf
+            xri     $AA
+            lbnz    mnt_bad_vbr
 
 ;------------------------------------------------------------------
 ; From here to mnt_commit is the port of boot/krnboot.asm's Phase 1
@@ -560,7 +560,7 @@ mnt_sig_ok:
             ldn     rf                      ; D = sectors_per_cluster
             plo     r9
 
-            lbz     mnt_bad_vbr             ; spc of 0 is not a FAT16 VBR
+            lbz     mnt_bad_vbr             ; spc of 0 is not a FAT VBR
 
             mov     rf, mnt_bpb
             add16   rf, BPBBLK_SPC
@@ -604,7 +604,7 @@ mnt_spc_done:
             add16   rf, BPB_NFAT
             ldn     rf
             plo     r9                      ; R9.0 = num_fats
-            lbz     mnt_bad_vbr             ; zero FAT copies: not FAT16
+            lbz     mnt_bad_vbr             ; zero FAT copies: not a FAT VBR
 
             mov     rf, mnt_bpb
             add16   rf, BPBBLK_NUM_FATS
@@ -696,9 +696,9 @@ mnt_spc_done:
             ; past the end of the partition. Same fix as krnboot's own
             ; Step 7b; keep the two in sync.
             ;
-            ; The count is also the authoritative FAT-type test the
-            ; signature check above only approximates: fewer than 4085
-            ; clusters is FAT12, 65525 or more is FAT32.
+            ; The count is also the FAT type, as the spec defines it:
+            ; fewer than 4085 clusters is FAT12 (read by this kernel
+            ; since 2026-09-11), 65525 or more is FAT32 (refused).
             mov     rf, mnt_sector
             add16   rf, $13
             call    mnt_get_le16            ; RD = 16-bit total sectors
@@ -775,11 +775,6 @@ mnt_count_done:
             ghi     ra
             smbi    $FF
             lbdf    mnt_bad_vbr             ; count >= 65525: FAT32
-            glo     ra
-            smi     $F5
-            ghi     ra
-            smbi    $0F
-            lbnf    mnt_not_fat16           ; count < 4085: FAT12
             inc     ra
             mov     rd, ra
             mov     rf, mnt_bpb
@@ -949,13 +944,7 @@ mnt_vbr_err:
 
 mnt_bad_vbr:
             call    K_INMSG
-            db      "That partition is not a FAT16 volume.",13,10,0
-            ldi     1
-            rtn
-
-mnt_not_fat16:
-            call    K_INMSG
-            db      "Not a FAT16 volume (ELF-DOS cannot read FAT12).",13,10,0
+            db      "That partition is not a FAT12 or FAT16 volume.",13,10,0
             ldi     1
             rtn
 
@@ -1154,7 +1143,6 @@ mnt_i:          db      0           ; listing-mode loop: the LETTER
                                     ; being considered, 'A'..'Z'
 mnt_slot:       db      0           ; slot that letter maps to
 mnt_shown:      db      0           ; how many rows printed
-mnt_fat16_sig:  db      "FAT16",0
 mnt_numbuf:     ds      14          ; fmt_size32 destination
 mnt_bpb:        ds      BPBBLK_LEN  ; assembled BPB image, committed
                                     ; to drive_bpb_table only at the end
