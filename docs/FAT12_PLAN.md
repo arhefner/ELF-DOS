@@ -174,9 +174,21 @@ These are not FAT12 problems, but a floppy is where they will dominate:
 - **`file_write` flushes the FAT after every cluster allocation**, a
   deliberate crash-safety choice. At 1 sector per cluster (1.44MB), every
   512 bytes written costs a data write plus two FAT writes on cylinder 0,
-  so the head seeks on every sector. MS-DOS defers FAT writes until close.
-  The option is to defer flushes on FAT12 volumes until `file_close`, which
-  trades crash safety for speed and is your call.
+  so the head seeks on every sector. MS-DOS did not write the FAT through on
+  every allocation either: allocating marked the FAT sector dirty in the
+  BUFFERS cache (`FAT.ASM`'s `PACK` sets `BUFDIRTY`), and it reached the disk
+  when that buffer was reused for another sector (`BUF.ASM`'s `GETBUFFR` ->
+  `BUFWRITE`) or when something forced a flush -- which close did, for the
+  whole drive (`SYSCALL.ASM`'s `$FCB_CLOSE` -> `FLUSHBUF`). So DOS deferred
+  and coalesced FAT writes rather than holding them until close: with a
+  floppy-era `BUFFERS=2` the FAT sector was evicted and rewritten repeatedly
+  during a long write. When DOS did write a FAT buffer it wrote every FAT
+  copy, as this kernel does (`BUFWRTCNT` = the FAT count). Later, SMARTDRV
+  cached floppy *reads* but never did write-behind on removable media, for
+  the obvious reason. (Checked against the MS-DOS 2.0 source; the FCB close
+  path, not the handle one, which was not located.)
+  The option here is to defer flushes on FAT12 volumes until `file_close`,
+  which trades crash safety for speed and is your call.
 - **A real drive switch discards the FAT cache.** `file_read` and
   `file_write` switch drives on entry, so `COPY` between C: and A: (512-byte
   chunks) re-reads A:'s FAT sector for nearly every chunk. Tagging the cache
