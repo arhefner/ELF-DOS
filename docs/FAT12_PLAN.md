@@ -167,36 +167,59 @@ prompt is a safe point to swap. Options, cheapest first:
 3. A BIOS "media changed on unit N" query, checked in `_switch_drive` for
    removable units (discussed 2026-09-10, not designed yet).
 
-### Phase 4 (optional): floppy write and cross-drive speed
+### Phase 4: floppy write and cross-drive speed -- DONE
 
-These are not FAT12 problems, but a floppy is where they will dominate:
+Not FAT12 problems, but a floppy is where they dominate. Both changes are
+in the kernel; measured under Run/02 with per-operation I/O logging against
+a 1.44MB-geometry FAT12 floppy on unit 1.
 
-- **`file_write` flushes the FAT after every cluster allocation**, a
-  deliberate crash-safety choice. At 1 sector per cluster (1.44MB), every
-  512 bytes written costs a data write plus two FAT writes on cylinder 0,
-  so the head seeks on every sector. MS-DOS did not write the FAT through on
-  every allocation either: allocating marked the FAT sector dirty in the
-  BUFFERS cache (`FAT.ASM`'s `PACK` sets `BUFDIRTY`), and it reached the disk
-  when that buffer was reused for another sector (`BUF.ASM`'s `GETBUFFR` ->
-  `BUFWRITE`) or when something forced a flush -- which close did, for the
-  whole drive (`SYSCALL.ASM`'s `$FCB_CLOSE` -> `FLUSHBUF`). So DOS deferred
-  and coalesced FAT writes rather than holding them until close: with a
-  floppy-era `BUFFERS=2` the FAT sector was evicted and rewritten repeatedly
-  during a long write. When DOS did write a FAT buffer it wrote every FAT
-  copy, as this kernel does (`BUFWRTCNT` = the FAT count). Later, SMARTDRV
-  cached floppy *reads* but never did write-behind on removable media, for
-  the obvious reason. (Checked against the MS-DOS 2.0 source; the FCB close
-  path, not the handle one, which was not located.)
-  The option here is to defer flushes on FAT12 volumes until `file_close`,
-  which trades crash safety for speed and is your call.
-- **A real drive switch discards the FAT cache.** `file_read` and
-  `file_write` switch drives on entry, so `COPY` between C: and A: (512-byte
-  chunks) re-reads A:'s FAT sector for nearly every chunk. Tagging the cache
-  with its owning drive keeps it valid across a switch when the other drive
-  did not touch its FAT. That is about 20 bytes, and helps partially. A
-  second cache would cost 512 volatile bytes.
+**(a) The FAT is no longer flushed on every cluster allocation.**
+`fwrite_resolve_cluster` used to call `fat_flush` after each `fat_alloc`,
+so on a floppy at one sector per cluster every 512 bytes written cost a
+data write plus a write of *every* FAT copy back on cylinder 0 -- a seek
+per sector. The FAT now stays dirty in the cache and reaches the disk on
+eviction, on a drive switch, or at `file_close`, which flushes on the
+written-file path. This is what MS-DOS did: allocation marked its FAT
+buffer dirty (`FAT.ASM`'s `PACK`) and close flushed it (`SYSCALL.ASM`'s
+`$FCB_CLOSE` -> `FLUSHBUF`).
 
-These two items are from reading the code. They have not been measured.
+Crash safety is *better*, not worse: an interrupted write now leaves
+clusters the on-disk FAT still calls free, instead of clusters marked in
+use with no directory entry -- CHKDSK's "lost clusters". The directory
+entry was only ever written at close, so an unclosed file was lost either
+way. A read-only close deliberately does not flush, which also keeps its
+old register footprint (the routine documents no `Modifies` list).
+
+**(b) A drive switch no longer throws the cached FAT sector away.**
+It is tagged with its owning drive (`fat_cache_drive`) and
+`_fat_load_sector` checks that tag before counting a hit. The first
+attempt checked it in `_switch_drive` instead, which measured as exactly
+zero improvement -- at that moment the cache always belongs to the drive
+being switched *away* from, so it never matched.
+
+**Measured** (floppy = unit 1):
+
+| Workload | Before | After |
+|---|---|---|
+| Sequential write, same drive (RWBOUNDTEST, 256KB) | 1,547 writes | **533 writes (-65%)**, reads unchanged |
+| Copy within one drive (200KB, source and dest on A:) | 1,183 writes | 1,183 writes (no change) |
+| Cross-drive copies A:->C: and C:->A: | 2,363 reads | **2,071 reads (-12%)**, writes unchanged |
+
+Two honest limits fall out of those numbers:
+
+- **A cross-drive copy cannot benefit from (a).** `file_read`/`file_write`
+  switch drives on entry, and a switch *must* flush the dirty FAT while the
+  outgoing BPB is still active, or the sector would be written to an
+  address computed from the wrong geometry. So the deferred write is forced
+  out at each switch anyway.
+- **A copy within one drive does not benefit either**, because source and
+  destination chains usually sit in different FAT sectors, and the
+  single-sector cache alternates between them -- each eviction writes the
+  dirty one. Fixing that needs a second cached FAT sector, 512 volatile
+  bytes, which is not obviously worth it.
+
+The win is on plain sequential writes -- which is most of what writing to a
+floppy actually is.
 
 ## Costs
 

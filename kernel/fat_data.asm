@@ -73,12 +73,18 @@ fat_next_free:  dw      0
 ; _fat_load_sector hands RD back with RD.1 = FAT sector index, so the
 ; cluster's high byte has to be put back from memory.
 bpb_fat16:      db      1
+
+; fat_cache_drive: which drive the sector in fat_cache belongs to, or
+; $FF for none. _switch_drive uses it to keep a still-valid cache across
+; a switch instead of dropping it -- see its own header.
+fat_cache_drive: db     $FF
 f12_clust_hi:   db      0
 
                 public  fls_cluster
                 public  ffl_sector_idx
                 public  fat_next_free
                 public  bpb_fat16
+                public  fat_cache_drive
                 public  f12_clust_hi
 
                 endp

@@ -60,6 +60,7 @@
             extrn   fat_next_free
             extrn   bpb_dev
             extrn   bpb_fat16
+            extrn   fat_cache_drive
             extrn   f12_clust_hi
             extrn   _f12_locate
             extrn   _f12_second
@@ -174,7 +175,21 @@
             mov     rf, fls_cluster
             ldn     rf                  ; D = cluster high byte (sector index)
             sm                          ; D = cluster.1 - [R2]
-            lbz     fls_hit             ; zero: already cached
+            lbnz    fls_load            ; different sector: load it
+
+            ; Right sector -- but whose? The cache survives a drive
+            ; switch (see _switch_drive), so a sector belonging to
+            ; another drive can still be sitting here. Checking the
+            ; owner HERE rather than at switch time is what lets a
+            ; cached sector survive an excursion to another drive that
+            ; never touched its own FAT -- the cross-drive COPY case.
+            mov     rf, fat_cache_drive
+            ldn     rf
+            str     r2
+            mov     rf, active_bpb_drive
+            ldn     rf
+            sm                          ; D = active - owner
+            lbz     fls_hit             ; ours: already cached
 
 fls_load:
             ; flush the currently-cached sector first, if dirty --
@@ -282,6 +297,17 @@ fls_no_flush:
             ; freshly-loaded sector is clean
             mov     rf, fat_dirty
             ldi     0
+            str     rf
+
+            ; remember whose sector this is, so a later _switch_drive
+            ; can tell whether the cache is still usable (R7's LBA duty
+            ; ended at the f_ideread above, and it is already in this
+            ; proc's documented clobber list)
+            mov     rf, active_bpb_drive
+            ldn     rf
+            plo     r7
+            mov     rf, fat_cache_drive
+            glo     r7
             str     rf
 
 fls_hit:
@@ -905,12 +931,14 @@ flush_err:
 ; switch design was chosen over indexing drive_bpb_table directly:
 ; keeps ~110 existing BPB-field call sites completely untouched.
 ;
-; The FAT cache (fat_cache/fat_csec/fat_dirty) is NOT tracked per-drive
-; at all -- only one drive's FAT sector is ever cached in RAM, so a real
-; switch always flushes the OUTGOING drive's dirty cache first (if any,
-; since it depends on the BPB fields this routine is about to overwrite)
-; and forces the incoming drive to start with an empty cache
-; (fat_csec = $FFFF).
+; Only one drive's FAT sector is ever cached in RAM, so a real switch
+; always flushes the OUTGOING drive's dirty cache first (if any, since it
+; depends on the BPB fields this routine is about to overwrite). The
+; cache CONTENTS are then KEPT, tagged with their owning drive
+; (fat_cache_drive); _fat_load_sector checks that tag before treating a
+; sector as a hit. Keeping a clean, still-valid sector across a switch
+; saves re-reading it, which matters most when two drives are used
+; alternately, as COPY does.
 ;
 ; fat_csec used to sit inside the copied block, at what is now
 ; bpb_dev's offset, purely for layout uniformity -- and was overwritten
@@ -993,17 +1021,19 @@ swd_copy_loop:
             shlc
             str     rf
 
-            ; never trust the copied fat_csec -- always start the new
-            ; drive with an empty FAT cache (see header comment)
-            mov     rf, fat_csec
-            ldi     $FF
-            str     rf
-            inc     rf
-            str     rf                  ; fat_csec = $FFFF
-
+            ; The cached sector is NOT thrown away here (2026-09-11).
+            ; The flush above already wrote it out under its own, still
+            ; active BPB, so what is left is a clean copy of one drive's
+            ; FAT sector, tagged with that drive (fat_cache_drive).
+            ; _fat_load_sector checks the tag before counting a hit, so
+            ; keeping it costs nothing and saves re-reading it when the
+            ; other drive never touched its own FAT -- which is what a
+            ; cross-drive COPY does between chunks. Dropping it here
+            ; instead would be pointless: at this moment the cache
+            ; always belongs to the drive being switched AWAY from.
             mov     rf, fat_dirty
             ldi     0
-            str     rf                  ; new drive starts clean
+            str     rf                  ; clean: flushed above
 
             mov     rf, active_bpb_drive
             glo     r9

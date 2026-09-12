@@ -36,6 +36,7 @@
             extrn   _switch_drive
             extrn   fat_flush
             extrn   fat_csec
+            extrn   fat_cache_drive
             extrn   active_bpb_drive
             extrn   shell_drive
             extrn   shell_elba
@@ -661,6 +662,10 @@ kdi_active:
             str     rf
             inc     rf
             str     rf                  ; fat_csec = $FFFF (nothing cached)
+
+            mov     rf, fat_cache_drive
+            ldi     $FF
+            str     rf                  ; and no drive owns it
 
 kdi_keep_cache:
             mov     rf, active_bpb_drive

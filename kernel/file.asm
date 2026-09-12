@@ -3296,7 +3296,7 @@ fc_no_term:
                                         ; documents RD as clobbered
             call    _fclose_rewrite_size
             pop     rd                  ; (POP leaves DF alone)
-            lbdf    fclose_done         ; entry not rewritten: freeing
+            lbdf    fclose_flush        ; entry not rewritten: freeing
                                         ; anything now could leave it
                                         ; pointing at free clusters, so
                                         ; leave the chain as it is.
@@ -3306,6 +3306,22 @@ fc_no_term:
             ; --- free whatever the chain holds past the final size (see
             ; _fclose_trim_chain). Errors ignored, as above.
             call    _fclose_trim_chain
+
+fclose_flush:
+            ; A written file's chain reaches the disk HERE: file_write no
+            ; longer writes the FAT out per allocation (see
+            ; fwrite_resolve_cluster). The drive was made active at the
+            ; top of this routine, so the flush uses the right BPB.
+            ; Errors are ignored, as above.
+            ;
+            ; Only the written path flushes. A read-only close skips
+            ; straight to fclose_done, keeping the register footprint it
+            ; has always had -- this proc documents no Modifies list, so
+            ; a caller may well rely on RD still holding the FCB
+            ; pointer, and fat_flush would destroy it. On this path RD
+            ; is already gone (_fclose_rewrite_size and
+            ; _fclose_trim_chain both clobber it), so nothing changes.
+            call    fat_flush
 
 fclose_done:
             clc
@@ -6400,24 +6416,23 @@ fwrite_resolve_err:
             glo     r8
             str     rf                  ; FCB_CCLUST = new cluster
 
-            ; flush the FAT immediately after this fat_alloc, same
-            ; reasoning as fc_grow's own fix -- an unflushed
-            ; allocation can be silently reverted if the single-sector
-            ; FAT cache gets evicted for a different sector before
-            ; this one is written. fat_flush documents
-            ; R7/R8/R9/RB/RC/RD/RF as clobbered -- R9/RA/RB/RC are
-            ; this routine's own stable registers at this point, so
-            ; all four are protected here.
-            push    r9
-            push    ra
-            push    rb
-            push    rc
-            call    fat_flush
-            pop     rc
-            pop     rb
-            pop     ra
-            pop     r9
-            lbdf    fwrc_err
+            ; The FAT is deliberately NOT flushed here (2026-09-11).
+            ; It stays dirty in the cache and reaches the disk when the
+            ; cache is evicted for another FAT sector, when the drive is
+            ; switched, or at file_close, which now flushes. Flushing
+            ; per allocation meant that on a floppy at one sector per
+            ; cluster, every 512 bytes written cost a data write plus a
+            ; write of every FAT copy back on cylinder 0 -- a seek per
+            ; sector. MS-DOS did the same thing this now does:
+            ; allocating marked its FAT buffer dirty (FAT.ASM's PACK)
+            ; and close flushed it (SYSCALL.ASM's $FCB_CLOSE).
+            ;
+            ; Crash safety is not worse -- it is better. An interrupted
+            ; write now leaves clusters the on-disk FAT still calls
+            ; free, instead of clusters marked in use with no directory
+            ; entry pointing at them, which is exactly CHKDSK's "lost
+            ; clusters". The directory entry was only ever written at
+            ; close anyway, so an unclosed file was lost either way.
 
             lbr     fwrc_commit_csect
 
