@@ -54,34 +54,50 @@
 # (missing from both) or gets built twice (missing from the skip list
 # while still having its own explicit rule here).
 #
-# CAUGHT UP (this pass): this file had fallen behind the Linux
-# Makefile's own lib\-linked program set for a while -- badly enough
-# that the kernel itself would have failed to link at all (KOBJ was
-# missing lib\modload.prg/lib\icall.prg, both required by
-# kernel\batch.asm's own extrn mod_load/mod_release/icall), the loadable
-# batch-script module (bin\batch.mod) was never built here, and three
-# already-listed programs (ls, edlin, move) were missing a lib\*.prg
-# they now need, so linking them would have failed too. All fixed below,
-# together with the 9 programs (dir, label, pwd, del, touch, copy,
-# attrib, stat, chkdsk) and 2 test programs (big64test, corrupt) that
-# had no Makefile.win entry at all. This file's own header comment used
-# to carry a running note about exactly this gap -- removed now that
-# it's closed; if it opens again, that's the place to look.
+# CAUGHT UP AGAIN (2026-09-12): this file had drifted a third, much
+# larger time -- it still built the kernel as a single flat KOBJ list,
+# predating the split volatile/non-volatile memory model (see
+# include/memmap.inc and the Linux Makefile's own KVOL/KNV comment).
+# Every one of the kernel/*_data.asm files, kernel/kinit.asm,
+# kernel/nvhdr.asm, kernel/kvolend.asm, and lib/modload_data.asm was
+# missing from KOBJ entirely -- so a Windows kernel link would fail
+# outright with a page of "Symbol X not found" errors (kernel_init,
+# fat_next_free, active_bpb_drive, etc. -- everything the volatile
+# region's data procs are supposed to supply). $(FULL_BIN) also still
+# concatenated krnboot.bin+kernel.bin with a plain "copy /b", which is
+# wrong for a kernel that now links as one file spanning two disjoint
+# address regions with a large zero gap between them -- it needs
+# tools/split_kernel.py to slice out the two real halves and patch both
+# sector counts into krnboot's header, exactly as the Linux Makefile's
+# own $(FULL_BIN) rule already does.
 #
-# CAUGHT UP AGAIN (2026-09-06): this file had drifted a second time --
-# KOBJ still referenced kernel\glob.prg, a source file that no longer
-# exists in this repo (kernel/glob.asm was removed when file globbing
-# moved to lib/file_glob.asm; the Linux Makefile's own KOBJ never
-# carried it), which would have made every Windows kernel build fail
-# outright with a missing-file error from asm02. test\rwboundtest.asm
-# (needs lib\fmt32.prg) was also missing from TEST_SPECIAL_BINS and
-# build_test.bat's skip list, so it would have either failed to link
-# (auto-built without its lib dependency) if reached at all. Both fixed
-# below. Lesson for next time: whenever a kernel/*.asm or test/*.asm
-# file is added, removed, or gains/loses a lib\ dependency on Linux,
-# check this file and its two build_*.bat companions in the same
-# change -- they don't auto-discover the way the Linux Makefile's own
-# $(wildcard ...)-based KOBJ/TEST_SRCS do.
+# Also caught in the same pass: lib\drives.prg (the drive-letter <->
+# slot lookup added by the multi-drive work) was missing from the link
+# line of every program that needs it either directly or transitively
+# through a lib\ module it already links (ls, edlin, less, hexdump,
+# shell, termsize, printenv, export, unset, dir, label, pwd, mount,
+# chkdsk, envtest) -- each would have failed to link with unresolved
+# "drive_letter_of"/"drive_index_of" symbols. bin\umount had no entry
+# at all (missing from SPECIAL_BINS, its own explicit rule, and
+# build_progs.bat's skip list), so it fell through to the generic
+# single-file build path with no lib\ linkage and would have failed the
+# same way. All fixed below, matching the Linux Makefile's own KVOL/
+# KNV/link-line lists exactly (translated to backslash paths).
+#
+# Also note: invoking nmake through a POSIX/MSYS shell (git-bash, WSL's
+# bash, etc.) can silently mangle a bare "/F" into "F:/" before nmake
+# ever sees it (MSYS's own argv path-auto-conversion, triggered by
+# anything that looks like "/<single-letter>") -- if nmake reports
+# something like "fatal error U1073: don't know how to make 'F:/'" for
+# what looks like a trivial invocation, that is almost always this, not
+# a real makefile problem. Run nmake from cmd.exe or PowerShell, or use
+# a doubled slash ("//F"), to avoid it.
+#
+# Lesson for next time: whenever a kernel/*.asm or lib/*.asm file is
+# added, removed, or gains/loses a dependency on Linux, check this file
+# and its two build_*.bat companions in the same change -- they don't
+# auto-discover the way the Linux Makefile's own $(wildcard ...)-based
+# KVOL/KNV/PROG_SRCS/TEST_SRCS do.
 #
 
 ASM         = asm02
@@ -105,18 +121,38 @@ KRNBOOT_BIN = krnboot.bin
 KERNEL_BIN  = kernel.bin
 FULL_BIN    = kernel-full.bin
 
-# ---- Kernel object files (in kernel\ subdir, link order matters) ----
-# lib\modload.prg/lib\icall.prg (loadable-module support, needed by
-# kernel\batch.asm's own dispatcher) MUST be part of this list -- the
-# kernel link fails with unresolved symbols (mod_load, mod_release,
-# icall) without them, same as on Linux.
+# ---- Kernel object files -- link order is LOAD-BEARING ----
 #
-# kernel\glob.prg was removed here 2026-09-06 -- kernel/glob.asm doesn't
-# exist in this repo any more (superseded by lib/file_glob.asm, see the
-# Linux Makefile's own KOBJ, which never included it either). Keeping a
-# build rule for a nonexistent source file made every Windows kernel
-# build fail outright.
-KOBJ =  kernel\kernel.prg  \
+# The kernel is ONE link producing TWO address regions (see
+# include\memmap.inc). Order controls placement, because Link/02 has
+# no ".org": an absolute content line outside any proc sets its
+# placement cursor, and procs then lay out sequentially from there.
+# See the Linux Makefile's own KOBJ comment for the full explanation --
+# this mirrors it exactly, just with backslash paths.
+#
+#   KVOL  volatile, RAM at $0100. kernel.prg leads with absolute
+#         content at $0100 (EDF header + K_* jump table), then every
+#         module's _*_data proc follows. kvolend.prg MUST stay last --
+#         it marks the region's end for tools\split_kernel.py.
+#
+#   KNV   non-volatile, ROM-able at NVK_BASE. nvhdr.prg MUST stay
+#         first -- its absolute "org NVK_BASE" is what moves the
+#         linker into the second region. Everything after it is code.
+KVOL =  kernel\kernel.prg       \
+        kernel\kernel_data.prg  \
+        kernel\fat_data.prg     \
+        kernel\dir_data.prg     \
+        kernel\path_data.prg    \
+        kernel\rtc_data.prg     \
+        kernel\file_data.prg    \
+        kernel\loader_data.prg  \
+        kernel\batch_data.prg   \
+        kernel\redir_data.prg   \
+        lib\modload_data.prg    \
+        kernel\kvolend.prg
+
+KNV  =  kernel\nvhdr.prg   \
+        kernel\kinit.prg   \
         kernel\fat.prg     \
         kernel\dir.prg     \
         kernel\path.prg    \
@@ -128,10 +164,13 @@ KOBJ =  kernel\kernel.prg  \
         lib\modload.prg    \
         lib\icall.prg
 
+KOBJ =  $(KVOL) $(KNV)
+
 # ---- Common include dependencies ----
 INCS =  include\bios.inc    \
         include\opcodes.def \
-        include\kernel.inc
+        include\kernel.inc  \
+        include\memmap.inc
 
 # ---- The progs\*.asm that link against lib\ -- see build_progs.bat's
 # own exclusion list, which must be kept in sync with this set ----
@@ -139,7 +178,7 @@ SPECIAL_BINS = bin\printenv bin\export bin\unset \
         bin\ls bin\edlin bin\less bin\hexdump bin\move bin\xcopy bin\shell \
         bin\yr bin\ys bin\termsize bin\mr bin\ms \
         bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
-        bin\stat bin\chkdsk bin\mount
+        bin\stat bin\chkdsk bin\mount bin\umount
 
 # ---- The test\*.asm that link against lib\ -- see build_test.bat's
 # own exclusion list, which must be kept in sync with this set ----
@@ -162,6 +201,45 @@ boot\krnboot.prg: boot\krnboot.asm $(INCS)
 
 kernel\kernel.prg: kernel\kernel.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) kernel.asm
+
+kernel\kernel_data.prg: kernel\kernel_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) kernel_data.asm
+
+kernel\fat_data.prg: kernel\fat_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) fat_data.asm
+
+kernel\dir_data.prg: kernel\dir_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) dir_data.asm
+
+kernel\path_data.prg: kernel\path_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) path_data.asm
+
+kernel\rtc_data.prg: kernel\rtc_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) rtc_data.asm
+
+kernel\file_data.prg: kernel\file_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) file_data.asm
+
+kernel\loader_data.prg: kernel\loader_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) loader_data.asm
+
+kernel\batch_data.prg: kernel\batch_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) batch_data.asm
+
+kernel\redir_data.prg: kernel\redir_data.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) redir_data.asm
+
+kernel\kinit.prg: kernel\kinit.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) kinit.asm
+
+kernel\nvhdr.prg: kernel\nvhdr.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) nvhdr.asm
+
+kernel\kvolend.prg: kernel\kvolend.asm $(INCS)
+	cd kernel && $(ASM) $(ASMFLAGS) kvolend.asm
+
+lib\modload_data.prg: lib\modload_data.asm $(INCS) include\modformat.inc
+	cd lib && $(ASM) $(ASMFLAGS) modload_data.asm
 
 kernel\fat.prg: kernel\fat.asm $(INCS)
 	cd kernel && $(ASM) $(ASMFLAGS) fat.asm
@@ -273,29 +351,29 @@ lib\modload.prg: lib\modload.asm include\opcodes.def include\bios.inc include\ke
 test\envtest.prg: test\envtest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd test && $(ASM) $(ASMFLAGS) envtest.asm
 
-test\bin\envtest: test\envtest.prg lib\env.prg test\bin
-	$(LINK) $(LFLAGS) -o test\bin\envtest test\envtest.prg lib\env.prg
+test\bin\envtest: test\envtest.prg lib\env.prg lib\drives.prg test\bin
+	$(LINK) $(LFLAGS) -o test\bin\envtest test\envtest.prg lib\env.prg lib\drives.prg
 	-del /F /Q test\bin\envtest.lkb
 
 progs\printenv.prg: progs\printenv.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) printenv.asm
 
-bin\printenv: progs\printenv.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\printenv progs\printenv.prg lib\env.prg
+bin\printenv: progs\printenv.prg lib\env.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\printenv progs\printenv.prg lib\env.prg lib\drives.prg
 	-del /F /Q bin\printenv.lkb
 
 progs\export.prg: progs\export.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) export.asm
 
-bin\export: progs\export.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\export progs\export.prg lib\env.prg
+bin\export: progs\export.prg lib\env.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\export progs\export.prg lib\env.prg lib\drives.prg
 	-del /F /Q bin\export.lkb
 
 progs\unset.prg: progs\unset.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) unset.asm
 
-bin\unset: progs\unset.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\unset progs\unset.prg lib\env.prg
+bin\unset: progs\unset.prg lib\env.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\unset progs\unset.prg lib\env.prg lib\drives.prg
 	-del /F /Q bin\unset.lkb
 
 test\bumptest.prg: test\bumptest.asm include\kernel_api.inc include\bios.inc include\opcodes.def
@@ -343,15 +421,15 @@ test\bin\corrupt: test\corrupt.prg lib\ymodem.prg lib\fmt32.prg test\bin
 progs\ls.prg: progs\ls.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) ls.asm
 
-bin\ls: progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg bin
-	$(LINK) $(LFLAGS) -o bin\ls progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg
+bin\ls: progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\ls progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg lib\drives.prg
 	-del /F /Q bin\ls.lkb
 
 progs\edlin.prg: progs\edlin.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) edlin.asm
 
-bin\edlin: progs\edlin.prg lib\env.prg lib\lineedit.prg bin
-	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg lib\lineedit.prg
+bin\edlin: progs\edlin.prg lib\env.prg lib\lineedit.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg lib\lineedit.prg lib\drives.prg
 	-del /F /Q bin\edlin.lkb
 
 progs\less.prg: progs\less.asm include\kernel_api.inc include\bios.inc include\opcodes.def
@@ -378,16 +456,26 @@ bin\move: progs\move.prg lib\move.prg lib\file_glob.prg bin
 progs\shell.prg: progs\shell.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) shell.asm
 
-bin\shell: progs\shell.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\shell progs\shell.prg lib\env.prg
+bin\shell: progs\shell.prg lib\env.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\shell progs\shell.prg lib\env.prg lib\drives.prg
 	-del /F /Q bin\shell.lkb
 
 progs\yr.prg: progs\yr.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\ymodem.inc
 	cd progs && $(ASM) $(ASMFLAGS) yr.asm
 
-bin\mount: progs\mount.prg lib\fmt32.prg bin
-	$(LINK) $(LFLAGS) -o bin\mount progs\mount.prg lib\fmt32.prg
+progs\mount.prg: progs\mount.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) mount.asm
+
+bin\mount: progs\mount.prg lib\fmt32.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\mount progs\mount.prg lib\fmt32.prg lib\drives.prg
 	-del /F /Q bin\mount.lkb
+
+progs\umount.prg: progs\umount.asm include\kernel_api.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) umount.asm
+
+bin\umount: progs\umount.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\umount progs\umount.prg lib\drives.prg
+	-del /F /Q bin\umount.lkb
 
 bin\yr: progs\yr.prg lib\ymodem.prg lib\fmt32.prg bin
 	$(LINK) $(LFLAGS) -o bin\yr progs\yr.prg lib\ymodem.prg lib\fmt32.prg
@@ -403,8 +491,8 @@ bin\ys: progs\ys.prg lib\ymodem.prg lib\fmt32.prg lib\file_glob.prg bin
 progs\termsize.prg: progs\termsize.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\ymodem.inc
 	cd progs && $(ASM) $(ASMFLAGS) termsize.asm
 
-bin\termsize: progs\termsize.prg lib\ymodem.prg lib\fmt32.prg lib\env.prg bin
-	$(LINK) $(LFLAGS) -o bin\termsize progs\termsize.prg lib\ymodem.prg lib\fmt32.prg lib\env.prg
+bin\termsize: progs\termsize.prg lib\ymodem.prg lib\fmt32.prg lib\env.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\termsize progs\termsize.prg lib\ymodem.prg lib\fmt32.prg lib\env.prg lib\drives.prg
 	-del /F /Q bin\termsize.lkb
 
 progs\mr.prg: progs\mr.asm include\kernel_api.inc include\opcodes.def
@@ -424,22 +512,22 @@ bin\ms: progs\ms.prg lib\fmt32.prg lib\file_glob.prg bin
 progs\dir.prg: progs\dir.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\file_glob.inc include\vollabel.inc
 	cd progs && $(ASM) $(ASMFLAGS) dir.asm
 
-bin\dir: progs\dir.prg lib\fmt32.prg lib\file_glob.prg lib\vollabel.prg lib\pathstr.prg bin
-	$(LINK) $(LFLAGS) -o bin\dir progs\dir.prg lib\fmt32.prg lib\file_glob.prg lib\vollabel.prg lib\pathstr.prg
+bin\dir: progs\dir.prg lib\fmt32.prg lib\file_glob.prg lib\vollabel.prg lib\pathstr.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\dir progs\dir.prg lib\fmt32.prg lib\file_glob.prg lib\vollabel.prg lib\pathstr.prg lib\drives.prg
 	-del /F /Q bin\dir.lkb
 
 progs\label.prg: progs\label.asm include\kernel_api.inc include\opcodes.def include\vollabel.inc
 	cd progs && $(ASM) $(ASMFLAGS) label.asm
 
-bin\label: progs\label.prg lib\vollabel.prg bin
-	$(LINK) $(LFLAGS) -o bin\label progs\label.prg lib\vollabel.prg
+bin\label: progs\label.prg lib\vollabel.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\label progs\label.prg lib\vollabel.prg lib\drives.prg
 	-del /F /Q bin\label.lkb
 
 progs\pwd.prg: progs\pwd.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) pwd.asm
 
-bin\pwd: progs\pwd.prg lib\pathstr.prg bin
-	$(LINK) $(LFLAGS) -o bin\pwd progs\pwd.prg lib\pathstr.prg
+bin\pwd: progs\pwd.prg lib\pathstr.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\pwd progs\pwd.prg lib\pathstr.prg lib\drives.prg
 	-del /F /Q bin\pwd.lkb
 
 progs\del.prg: progs\del.asm include\kernel_api.inc include\opcodes.def include\file_glob.inc
@@ -480,8 +568,8 @@ bin\stat: progs\stat.prg lib\fmt32.prg bin
 progs\chkdsk.prg: progs\chkdsk.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) chkdsk.asm
 
-bin\chkdsk: progs\chkdsk.prg lib\fmt32.prg bin
-	$(LINK) $(LFLAGS) -o bin\chkdsk progs\chkdsk.prg lib\fmt32.prg
+bin\chkdsk: progs\chkdsk.prg lib\fmt32.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\chkdsk progs\chkdsk.prg lib\fmt32.prg lib\drives.prg
 	-del /F /Q bin\chkdsk.lkb
 
 #------------------------------------------------------------------
@@ -503,13 +591,22 @@ $(KERNEL_BIN): $(KOBJ)
 	python3 tools\check_kernel_margin.py
 
 #------------------------------------------------------------------
-# Concatenate bootstrap + kernel proper into the final install image --
-# same layout as the Linux Makefile's own FULL_BIN rule (krnboot.bin
-# then kernel.bin). copy /b does a binary-safe concatenation, the
-# Windows equivalent of "cat a b > c".
+# Build the final install image from the bootstrap and the two kernel
+# regions. The kernel links as ONE file spanning both regions with a
+# large zero gap between them (see include\memmap.inc), so it cannot be
+# written to disk as-is -- tools\split_kernel.py slices it at the
+# kvol_end marker, pads the volatile half to a sector boundary, and
+# concatenates krnboot + volatile + non-volatile, patching both sector
+# counts into krnboot's header as it goes. Same tool, same invocation
+# shape as the Linux Makefile's own $(FULL_BIN) rule -- it does its own
+# os.chdir()/relies on forward-slash-safe Python path handling, so it
+# needs no Windows-specific changes itself.
 #------------------------------------------------------------------
+KVOL_BIN    = kvol.bin
+KNV_BIN     = knv.bin
+
 $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
-	copy /b /y $(KRNBOOT_BIN)+$(KERNEL_BIN) $(FULL_BIN)
+	python3 tools\split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(KNV_BIN) $(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
 
 #------------------------------------------------------------------
 # Convenience targets
@@ -525,7 +622,7 @@ mbr: $(MBR_BIN)
 # everything else is auto-discovered and (re)built by build_progs.bat --
 # see this file's own header comment for why the split exists.
 progs: bin $(SPECIAL_BINS) bin\batch.mod
-	build_progs.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
+	.\build_progs.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
 
 # Build every test\*.asm into test\bin\<name> -- diagnostic/subsystem-
 # exercising programs, kept out of bin\ entirely so a normal install's
@@ -533,7 +630,7 @@ progs: bin $(SPECIAL_BINS) bin\batch.mod
 # TEST_SPECIAL_BINS ones via real nmake rules, everything else
 # auto-discovered by build_test.bat.
 test: test\bin $(TEST_SPECIAL_BINS)
-	build_test.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
+	.\build_test.bat "$(ASM)" "$(ASMFLAGS)" "$(LINK)" "$(LFLAGS)"
 
 # everything: all + progs + test. Use this after "clean", which removes
 # bin\ and test\bin\ while the default "all" rebuilds only the kernel --
@@ -558,13 +655,13 @@ sys\elfdos-sys.exe: sys\sys.c
 # to run at all if DEV wasn't given explicitly -- see this file's own
 # header comment for why there's no default to fall back to.
 install: $(FULL_BIN) $(MBR_BIN) sys\elfdos-sys.exe
-	check_dev.bat "$(DEV)" install
+	.\check_dev.bat "$(DEV)" install
 	$(SYS) -m $(MBR_BIN) -k $(FULL_BIN) $(DEV)
 
 # Kernel-only update: MBR already on disk, just refresh the kernel.
 # Faster for routine kernel development and testing cycles.
 update: $(FULL_BIN) sys\elfdos-sys.exe
-	check_dev.bat "$(DEV)" update
+	.\check_dev.bat "$(DEV)" update
 	$(SYS) -k $(FULL_BIN) $(DEV)
 
 # SDK package -- a single self-contained elfdos-sdk.zip a developer
@@ -593,6 +690,7 @@ clean:
 	-del /F /Q lib\*.prg lib\*.lst
 	-del /F /Q sys\elfdos-sys.exe sys\sys.obj
 	-del /F /Q $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
+	-del /F /Q $(KVOL_BIN) $(KNV_BIN) ksym.sym
 	-del /F /Q $(SDK_OUT)
 	-if exist bin rmdir /S /Q bin
 	-if exist test\bin rmdir /S /Q test\bin
