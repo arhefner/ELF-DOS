@@ -1,16 +1,13 @@
 # FAT12 support plan
 
-Status: **implemented on branch `fat12-plan`** (2026-09-11).
-Phases 0-3 are done: Phase 0 is on `main`, the rest on this branch, rebased
-on it. Verified by instruction-level simulation and under the Run/02
-emulator against real `mkfs.fat -F 12` volumes, including a partitionless
-floppy-geometry disk on a second unit. **Not hardware-tested.** Phase 4
-(floppy write speed) is deliberately not done: it trades crash safety for
-speed, which is the user's call.
+Status: **implemented on branch `fat12-plan`** (2026-09-11). Phases 0-4 are
+done: Phase 0 is on `main`, the rest on this branch, rebased on it.
 
-Target media: floppies on the new interface (1.44MB, 720K, 360K), plus small
-RAM, flash and serial disks, which `mkfs.fat` formats as FAT12 below roughly
-16MB.
+**CONFIRMED WORKING ON HARDWARE (2026-09-11)**: the user ran a card carrying
+a mix of FAT12 and FAT16 partitions. Not yet exercised on real hardware: a
+floppy drive, a drive on a unit other than 0 (so `MOUNT <unit> 0 A:`, and
+the unit-number fix behind it, are still emulator-only), and Phase 4's
+measured I/O reductions, which were counted under the emulator.
 
 ## What FAT12 changes, and what it does not
 
@@ -299,6 +296,43 @@ warm cache. SCRT costs are from the BIOS source: 18 instructions per call,
 - **FAT16 differential** against unmodified HEAD (13 commands): transcripts
   identical except CHKDSK's space lines, which are the 0b fix. `fsck.fat`
   is clean on both images.
+
+## Booting from a floppy, or another small disk
+
+Not done, and not required for using one: a floppy mounts fine as a second
+drive. This is what booting *from* one would take. Points 1-4 are properties
+of the code as it stands; point 5 is the open question.
+
+1. **The sector layout collides.** ELF-DOS occupies LBA 0 (MBR), 1-5
+   (`krnboot`, `KRNBOOT_SECTORS`), and roughly 32 sectors after that for the
+   kernel image -- about 16KB all told (`krnboot.bin` 2,560 bytes, volatile
+   ~2.7KB, non-volatile ~13.2KB). On a partitionless volume those same
+   sectors are the boot record, both FATs and the root directory. Either
+   format with enough reserved sectors to hold the boot chain
+   (`mkfs.fat -R 40`), or keep an MBR-partitioned layout on the disk and
+   start the partition past the kernel -- the second costs nothing but makes
+   the disk unreadable as a plain floppy elsewhere.
+2. **The boot sector would have to carry a BPB.** `boot/mbr.asm` is boot code
+   plus a partition table; a volume boot record needs the BPB at offset `$0B`
+   and its boot code fitted around it, or no other system can read the disk.
+3. **The boot unit is hardcoded.** `boot/mbr.asm` loads `krnboot` with
+   `R8.1 = 0`, and `krnboot` loads the kernel the same way. Booting from
+   anything but unit 0 means threading the boot device through that chain --
+   and the ROM would have to tell us which device it booted from, or the
+   unit has to be fixed per build.
+4. **`krnboot` assumes a partition table.** Its Phase 1 scans the four MBR
+   entries; a partitionless volume needs the "starts at sector 0" path that
+   MOUNT already implements for partition 0. Slot 0 must also end up as `C:`,
+   because `kshell_path` is the literal `"C:/bin/shell"`.
+5. **The ROM monitor has to be able to boot that device at all** -- load its
+   sector 0 and jump to it. That is a firmware and hardware question, not a
+   kernel one, and it decides whether any of the above is worth doing.
+
+**A small flash or RAM disk is much easier than a floppy.** If it is
+partitioned with an MBR, none of points 1-4 apply except the unit question,
+and a FAT12 partition on the boot device already works -- that is what the
+2026-09-11 hardware round exercised. Only a partitionless volume, or a
+device that is not unit 0, needs the work above.
 
 ## Hardware test plan (when implementing)
 
