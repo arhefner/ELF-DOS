@@ -69,7 +69,7 @@ part_dev() {
 
 [ "$(id -u)" -eq 0 ] || die "run as root:  sudo $0 $TARGET"
 
-for tool in sfdisk mkfs.fat blockdev lsblk findmnt umount; do
+for tool in sfdisk mkfs.fat wipefs blockdev lsblk findmnt umount; do
     command -v "$tool" >/dev/null ||
         die "$tool not found (it comes with util-linux or dosfstools)"
 done
@@ -214,6 +214,18 @@ while read -r name mnt; do
             die "could not unmount $name -- close anything using it and try again. Nothing was changed."
     fi
 done < <(lsblk -lnpo NAME,MOUNTPOINT "$TARGET")
+
+# Re-formatting a card that already has partitions makes sfdisk print
+# "Partition #N contains a vfat signature" on stderr. It is harmless --
+# sfdisk removes the signature itself -- but it reads like an error, and
+# stderr can't just be silenced because a real sfdisk failure goes there
+# too. Clearing the old signatures first leaves sfdisk nothing to report.
+while read -r name type; do
+    if [ "$type" = part ]; then
+        wipefs -a -q "$name" ||
+            die "could not clear the old filesystem signature from $name"
+    fi
+done < <(lsblk -lnpo NAME,TYPE "$TARGET")
 
 echo "Writing partition table..."
 {
