@@ -4,6 +4,7 @@
 # Targets:
 #   all        build kernel-full.bin (default)
 #   mbr        build mbr.bin only
+#   rom        report where to burn kernel-rom.bin (ROM-able kernel half)
 #   install    build everything and write to disk (MBR + kernel)
 #   update     build and write kernel only (MBR already installed)
 #   progs      build every progs/*.asm into bin/<name> (bare, no
@@ -131,7 +132,7 @@ PROG_EXES = $(patsubst progs/%.asm,bin/%,$(PROG_SRCS))
 TEST_SRCS = $(wildcard test/*.asm)
 TEST_EXES = $(patsubst test/%.asm,test/bin/%,$(TEST_SRCS))
 
-.PHONY: all everything mbr install update progs test sdk clean
+.PHONY: all everything mbr rom install update progs test sdk clean
 
 all: $(FULL_BIN)
 
@@ -479,11 +480,15 @@ $(KERNEL_BIN): $(KOBJ)
 # writing, so the bootstrap knows how many sectors follow it.
 #------------------------------------------------------------------
 
+# kvol.bin is a pure build intermediate. The non-volatile half is also the
+# ROM image -- it is all executable code, never written after load -- so it
+# is named for the job you would actually pick it up to do. "make rom"
+# reports the address to burn it at.
 KVOL_BIN    = kvol.bin
-KNV_BIN     = knv.bin
+ROM_BIN     = kernel-rom.bin
 
 $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
-	python3 tools/split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(KNV_BIN) \
+	python3 tools/split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(ROM_BIN) \
 		$(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
 
 #------------------------------------------------------------------
@@ -492,15 +497,21 @@ $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
 
 mbr: $(MBR_BIN)
 
+# Where to burn the ROM image, and how much room is left under NVK_TOP.
+rom: $(FULL_BIN)
+	@python3 tools/rom_info.py $(ROM_BIN)
+
 # Full install: write MBR boot code and kernel to disk.
 # Use this when setting up a new disk or after changing the MBR.
 install: $(FULL_BIN) $(MBR_BIN)
 	$(SYS) -m $(MBR_BIN) -k $(FULL_BIN) $(DEV)
+	@python3 tools/rom_info.py $(ROM_BIN)
 
 # Kernel-only update: MBR already on disk, just refresh the kernel.
 # Faster for routine kernel development and testing cycles.
 update: $(FULL_BIN)
 	$(SYS) -k $(FULL_BIN) $(DEV)
+	@python3 tools/rom_info.py $(ROM_BIN)
 
 # Build every progs/*.asm into bin/<name> (bare name, no extension --
 # matches the on-device /bin layout). Not installed by this Makefile --
@@ -621,7 +632,7 @@ clean:
 	      progs/*.prg progs/*.lst progs/*.build progs/*.lkb \
 	      test/*.prg test/*.lst test/*.build test/*.lkb \
 	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN) \
-	      $(KVOL_BIN) $(KNV_BIN) ksym.sym \
+	      $(KVOL_BIN) $(ROM_BIN) ksym.sym \
 	      $(SDK_OUT)
 	rm -rf test/bin
 	rm -rf bin

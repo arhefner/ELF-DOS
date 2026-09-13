@@ -253,6 +253,32 @@ On Windows, use `nmake /F Makefile.win install DEV=\\.\PhysicalDriveN` /
 number destroys data irrecoverably, so it's required explicitly every
 time).
 
+### Putting the kernel in ROM
+
+The kernel links as two regions (see `include/memmap.inc`): a small volatile
+half that must be RAM, and a larger non-volatile half that is all executable
+code and is never written after load - so it can be burned into ROM. Every
+build writes that half out on its own as `kernel-rom.bin`, and:
+
+```
+make rom                           # where to burn it, and headroom left
+```
+
+reports the address (`install`/`update` print the same thing afterwards):
+
+```
+  BURN AT   : $BC40
+  occupies  : $BC40 - $EF97  (13144 bytes, 26 sectors)
+  headroom  : 104 bytes free below NVK_TOP ($EFFF)
+```
+
+Burning is optional. The same bytes are also inside `kernel-full.bin`, and
+`krnboot` loads them from the card whenever it does not already find the
+`NVK` signature at that address - so a RAM-only machine boots from the card
+alone. Putting the image in ROM is what frees the RAM it would otherwise
+occupy. The address moves whenever `NVK_BASE` is re-tuned, which is why it
+is reported from the build rather than written down here.
+
 `bin/` (built via `make progs`) isn't installed by the Makefile - copy its
 whole contents onto the FAT16 partition's `/bin` yourself (e.g. with
 `mtools`'s `mcopy`). Every file in `bin/` is already bare-named (no

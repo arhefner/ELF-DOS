@@ -84,8 +84,17 @@
 ; Program RAM is the whole point of this layout, and overshooting is now
 ; a loud build failure rather than a silent hang, so thin headroom costs
 ; a rebuild rather than a hardware round. Expect to re-tune this after
-; any real kernel addition; drop to $BD00 (569 bytes clear) if the
-; re-tuning gets tiresome.
+; any real kernel addition.
+;
+; WHICH WAY TO MOVE IT: headroom is measured under NVK_TOP, so LOWERING
+; NVK_BASE buys headroom (at the cost of program RAM below it) and
+; raising it spends headroom to hand RAM back. An earlier version of this
+; note said "drop to $BD00 (569 bytes clear)" -- stale twice over by
+; 2026-09-12: $BD00 is ABOVE today's $BC40 (so not a drop at all), and
+; that 569 was measured against a kernel 657 bytes smaller. At the
+; current size $BD00 overflows NVK_TOP by 100 bytes and fails the build.
+; Measured today, if 104 bytes gets uncomfortable: $BB00 -> 412 bytes
+; clear, costing 320 bytes of program RAM.
 ;
 ; NOTE, so nobody re-derives it the hard way: on THIS machine the split
 ; is roughly RAM-neutral for programs. The old layout put the kernel

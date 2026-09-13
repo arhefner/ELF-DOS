@@ -12,6 +12,8 @@
 #   nmake /F Makefile.win update DEV=\\.\PhysicalDriveN
 #                                     build and write kernel only (MBR
 #                                     already installed)
+#   nmake /F Makefile.win rom        report where to burn kernel-rom.bin
+#                                     (the ROM-able half of the kernel)
 #   nmake /F Makefile.win sdk        package the external-developer SDK
 #                                     into elfdos-sdk.zip (see tools\
 #                                     build_sdk.ps1)
@@ -602,11 +604,15 @@ $(KERNEL_BIN): $(KOBJ)
 # os.chdir()/relies on forward-slash-safe Python path handling, so it
 # needs no Windows-specific changes itself.
 #------------------------------------------------------------------
+# kvol.bin is a pure build intermediate. The non-volatile half is also the
+# ROM image -- it is all executable code, never written after load -- so it
+# is named for the job you would actually pick it up to do. "nmake /F
+# Makefile.win rom" reports the address to burn it at.
 KVOL_BIN    = kvol.bin
-KNV_BIN     = knv.bin
+ROM_BIN     = kernel-rom.bin
 
 $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
-	python3 tools\split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(KNV_BIN) $(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
+	python3 tools\split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(ROM_BIN) $(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
 
 #------------------------------------------------------------------
 # Convenience targets
@@ -657,12 +663,18 @@ sys\elfdos-sys.exe: sys\sys.c
 install: $(FULL_BIN) $(MBR_BIN) sys\elfdos-sys.exe
 	.\check_dev.bat "$(DEV)" install
 	$(SYS) -m $(MBR_BIN) -k $(FULL_BIN) $(DEV)
+	python3 tools\rom_info.py $(ROM_BIN)
 
 # Kernel-only update: MBR already on disk, just refresh the kernel.
 # Faster for routine kernel development and testing cycles.
 update: $(FULL_BIN) sys\elfdos-sys.exe
 	.\check_dev.bat "$(DEV)" update
 	$(SYS) -k $(FULL_BIN) $(DEV)
+	python3 tools\rom_info.py $(ROM_BIN)
+
+# Where to burn the ROM image, and how much room is left under NVK_TOP.
+rom: $(FULL_BIN)
+	python3 tools\rom_info.py $(ROM_BIN)
 
 # SDK package -- a single self-contained elfdos-sdk.zip a developer
 # downloads and expands directly into their own project. Windows
@@ -690,7 +702,7 @@ clean:
 	-del /F /Q lib\*.prg lib\*.lst
 	-del /F /Q sys\elfdos-sys.exe sys\sys.obj
 	-del /F /Q $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
-	-del /F /Q $(KVOL_BIN) $(KNV_BIN) ksym.sym
+	-del /F /Q $(KVOL_BIN) $(ROM_BIN) ksym.sym
 	-del /F /Q $(SDK_OUT)
 	-if exist bin rmdir /S /Q bin
 	-if exist test\bin rmdir /S /Q test\bin
