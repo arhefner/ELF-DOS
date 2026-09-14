@@ -586,10 +586,10 @@ SDK_HEADERS = include/kernel_api.inc include/opcodes.def include/bios.inc
 
 # lib/ modules considered part of the public SDK surface (see
 # docs/DEVELOPER_GUIDE.md's own "Library Modules" table) -- their own
-# companion .inc, where one exists, ships alongside. env/fmt32/
+# companion .inc, where one exists, ships alongside. drives/env/fmt32/
 # heap_bump/heap_malloc/icall/move/pathstr have no companion .inc of
 # their own.
-SDK_LIB_MODULES = env file_glob fmt32 heap_bump heap_malloc icall \
+SDK_LIB_MODULES = drives env file_glob fmt32 heap_bump heap_malloc icall \
                   lineedit modload move pathstr vollabel ymodem
 SDK_LIB_ASM  = $(patsubst %,lib/%.asm,$(SDK_LIB_MODULES))
 SDK_LIB_INCS = include/file_glob.inc include/lineedit.inc \
