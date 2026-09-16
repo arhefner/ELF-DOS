@@ -643,6 +643,11 @@ stand-alone programs; they have no header of their own, and are
 assembled separately and linked into whichever program wants to use
 them.
 
+Some modules need another one linked alongside them. `env.asm` and
+`pathstr.asm` both call `drive_letter_of` from `drives.asm`, so a
+program using either must link `drives.asm` too. Leaving it out shows
+up as an unresolved `drive_letter_of` at link time.
+
 | Module | What it provides |
 |---|---|
 | `drives.asm` | Converting between a drive index and its letter, either way. |
