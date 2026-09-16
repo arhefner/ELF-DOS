@@ -584,13 +584,13 @@ $(MBR_BIN): boot\mbr.prg
 $(KRNBOOT_BIN): boot\krnboot.prg
 	$(LINK) $(LFLAGS) -o $(KRNBOOT_BIN) boot\krnboot.prg
 
-# python3 (any recent version, on PATH) runs the same margin guard the
+# py (any recent version, on PATH) runs the same margin guard the
 # Linux build does -- see tools\check_kernel_margin.py's own header.
 # Catches a real bug class (an uninitialized kernel buffer silently left
 # out of the linked binary) before it ever reaches hardware.
 $(KERNEL_BIN): $(KOBJ)
 	$(LINK) $(LFLAGS) -o $(KERNEL_BIN) $(KOBJ)
-	python3 tools\check_kernel_margin.py
+	py tools\check_kernel_margin.py
 
 #------------------------------------------------------------------
 # Build the final install image from the bootstrap and the two kernel
@@ -612,7 +612,7 @@ KVOL_BIN    = kvol.bin
 ROM_BIN     = kernel-rom.bin
 
 $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
-	python3 tools\split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(ROM_BIN) $(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
+	py tools\split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(ROM_BIN) $(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
 
 #------------------------------------------------------------------
 # Convenience targets
@@ -663,18 +663,18 @@ sys\elfdos-sys.exe: sys\sys.c
 install: $(FULL_BIN) $(MBR_BIN) sys\elfdos-sys.exe
 	.\check_dev.bat "$(DEV)" install
 	$(SYS) -m $(MBR_BIN) -k $(FULL_BIN) $(DEV)
-	python3 tools\rom_info.py $(ROM_BIN)
+	py tools\rom_info.py $(ROM_BIN)
 
 # Kernel-only update: MBR already on disk, just refresh the kernel.
 # Faster for routine kernel development and testing cycles.
 update: $(FULL_BIN) sys\elfdos-sys.exe
 	.\check_dev.bat "$(DEV)" update
 	$(SYS) -k $(FULL_BIN) $(DEV)
-	python3 tools\rom_info.py $(ROM_BIN)
+	py tools\rom_info.py $(ROM_BIN)
 
 # Where to burn the ROM image, and how much room is left under NVK_TOP.
 rom: $(FULL_BIN)
-	python3 tools\rom_info.py $(ROM_BIN)
+	py tools\rom_info.py $(ROM_BIN)
 
 # SDK package -- a single self-contained elfdos-sdk.zip a developer
 # downloads and expands directly into their own project. Windows
