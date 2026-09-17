@@ -4,3 +4,4 @@ copy C:/bin/rd C:/bin/rmdir -y
 copy C:/bin/md C:/bin/mkdir -y
 copy C:/bin/del C:/bin/rm -y
 copy C:/bin/attrib C:/bin/chmod -y
+copy C:/bin/copy C:/bin/cp -y
