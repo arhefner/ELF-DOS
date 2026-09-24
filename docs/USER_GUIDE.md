@@ -179,10 +179,10 @@ on some other disk you have mounted cannot quietly replace `COPY` or `DEL`
 with its own version. A program in the *current* directory, however, is
 found first, as in MS-DOS.
 
-**You do not have to type `.exe` or `.bat`.** If the name you type has no
-extension, ELF-DOS tries it in each directory first exactly as typed (the
-system commands are stored with no extension), then with `.exe`, then with
-`.bat`, before moving on to the next directory. So a batch file named
+**You do not have to type `.bat`.** If the name you type has no
+extension, ELF-DOS tries it in each directory first exactly as typed
+(programs are stored with no extension), then with `.bat`, before moving
+on to the next directory. So a batch file named
 `backup.bat` can be run by typing just `backup`. If you do type an
 extension, only that exact name is looked for.
 
@@ -194,8 +194,8 @@ C:/sub> ./mygame
 C:/sub> ../tools/build
 ```
 
-That runs exactly the file you named (still trying `.exe` and `.bat` if you
-left the extension off) and nothing else. The root directory has no `.`
+That runs exactly the file you named (still trying `.bat` if you left the
+extension off) and nothing else. The root directory has no `.`
 entry, so at the root write `/mygame` rather than `./mygame`.
 
 If a command name is not found anywhere, ELF-DOS says `Bad command or file

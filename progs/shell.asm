@@ -1759,8 +1759,8 @@ argv_at:
 ; no directory search. A bare name is searched for in the current
 ; directory, then "<shell_drive>:/bin/", then each PATH entry (see
 ; no_slash). Either way, a name whose last component has no extension
-; is also tried with ".exe" and then ".bat" (check_variants), as in
-; MS-DOS. Both copy loops are bounds-checked against
+; is also tried with ".bat" (check_variants), as in MS-DOS. Both copy
+; loops are bounds-checked against
 ; RUN_PATH_LEN so an unusually long name truncates safely instead of
 ; overrunning past RUN_PATH's own 64-byte allocation (which sits just
 ; below RUN_ARGV_TABLE -- an unbounded copy here would silently
@@ -1779,8 +1779,8 @@ have_slash:
             ; full path given -- copy it as-is into RUN_PATH, then
             ; confirm it exists. No directory search for an explicit
             ; path, but a final component with no extension still gets
-            ; the same ".exe"/".bat" variants a bare name does, as in
-            ; MS-DOS (check_variants, below).
+            ; the same ".bat" try a bare name does, as in MS-DOS
+            ; (check_variants, below).
             mov     rf, ra
             call    set_noext           ; RA untouched
             mov     rd, ra
@@ -1811,9 +1811,11 @@ no_slash:
             ; searched first, then <shell_drive>:/bin (still the
             ; implicit first PATH entry), then PATH left to right. In
             ; each directory a name with no extension is tried as
-            ; typed, then with ".exe", then with ".bat" (check_variants)
-            ; -- as typed first because ELF-DOS executables are still
-            ; bare-named on disk. This deliberately gives up part of
+            ; typed, then with ".bat" (check_variants). ELF-DOS
+            ; executables are bare-named on disk, so there is no ".exe"
+            ; step: it was dropped 2026-09-23, since every miss is a
+            ; full directory scan and nothing is ever named ".exe".
+            ; This deliberately gives up part of
             ; the guarantee described below: a program in the CURRENT
             ; directory can now shadow a system command, exactly as in
             ; MS-DOS. A /bin on some other drive still cannot.
@@ -2706,9 +2708,10 @@ chk_no:
 
 ;------------------------------------------------------------------
 ; check_variants: check_exists on RUN_PATH as built, then -- only if
-; the command name had no extension (sh_noext) -- on RUN_PATH + ".exe"
-; and RUN_PATH + ".bat", in that order, the MS-DOS per-directory order
-; with ELF-DOS's bare-named executables in front.
+; the command name had no extension (sh_noext) -- on RUN_PATH + ".bat".
+; MS-DOS's per-directory order, with ELF-DOS's bare-named executables
+; in place of .COM/.EXE (a ".exe" try was dropped 2026-09-23: nothing
+; is named that way, and each miss costs a whole directory scan).
 ; Args:    RF = RUN_PATH's terminating NUL, RC.0 = characters that may
 ;          still be written before RUN_PATH_LEN runs out (the budget
 ;          write_bin_name/sh_append_name/copy_path_loop leave behind;
@@ -2737,15 +2740,11 @@ check_variants:
             lbz     cv_fail             ; had an extension: as typed only
             mov     rf, sh_room
             ldn     rf
-            smi     4                   ; room for ".exe"/".bat"?
+            smi     4                   ; room for ".bat"?
             lbnf    cv_fail
 
-            mov     rd, sh_ext_exe
-            call    cv_try
-            lbnf    cv_found
             mov     rd, sh_ext_bat
-            call    cv_try
-            lbnf    cv_found
+            lbr     cv_try              ; tail call: its DF is ours
 cv_fail:
             stc
             rtn
@@ -2754,7 +2753,7 @@ cv_found:
             rtn
 
 ; cv_try: write the extension at RD (with its NUL) at sh_endpos, then
-; check_exists. The same 4 bytes are overwritten by the next try.
+; check_exists.
 cv_try:
             mov     rb, sh_endpos
             lda     rb
@@ -2871,7 +2870,6 @@ sh_name:    dw      0
 sh_noext:   db      0           ; 1 = command name has no extension
 sh_endpos:  dw      0           ; check_variants: RUN_PATH's NUL
 sh_room:    db      0           ; check_variants: bytes left for it
-sh_ext_exe: db      ".exe",0
 sh_ext_bat: db      ".bat",0
 
 ; PATH support (2026-09-09). SH_PATH_MAX mirrors lib/env.asm's
