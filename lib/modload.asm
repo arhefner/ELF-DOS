@@ -47,6 +47,7 @@
 
             extrn   ml_fcb_ptr
             extrn   _ml_close_fcb
+            extrn   _ml_fcb_rd
             extrn   ml_header
             extrn   ml_code_size
             extrn   ml_body_size
@@ -65,9 +66,11 @@
 ;          load address, RC = the himem reservation size that must be
 ;          passed back to mod_release later (NOT the same as the
 ;          module's own code_size -- includes the alignment padding).
-;          DF = 1 on any failure (bad magic, truncated file, I/O
-;          error, or insufficient RAM headroom) -- nothing is left
-;          reserved or open in that case.
+;          DF = 1 on any failure, with D = a MODLOAD_ERR_* code
+;          (include/modformat.inc): NOTFOUND if the file wouldn't open,
+;          NOMEM if there wasn't enough RAM headroom, BAD for anything
+;          else (bad magic, truncated file, I/O error). Nothing is left
+;          reserved or open in any failure case.
 ; Modifies: everything
 ;------------------------------------------------------------------
             proc    mod_load
@@ -92,11 +95,8 @@
             lbdf    ml_open_fail
 
             ; read the 6-byte header
-            mov     rb, ml_fcb_ptr
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = caller's FCB (reloaded)
+            call    _ml_fcb_rd          ; RD = caller's FCB
+                                        ; RD = caller's FCB (reloaded)
             mov     rf, ml_header
             ldi     0
             phi     rc
@@ -190,7 +190,7 @@ ml_size_ok:
             ; MOD_HEADER_LEN onward)
             call    ml_reserve_size     ; RC = code_size + PAD
             call    K_HIMEM_RESERVE
-            lbdf    ml_fail_close_only  ; not enough headroom -- reserve
+            lbdf    ml_fail_nomem       ; not enough headroom -- reserve
                                         ; guarantees nothing changed
 
             ; RD = raw_base (mem_top+1) -- align up to the next page
@@ -224,11 +224,8 @@ ml_size_ok:
             ; left unwritten; the module's own jump table (fixed
             ; offsets starting at MOD_HEADER_LEN) needs to land exactly
             ; where its own offsets expect
-            mov     rb, ml_fcb_ptr
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = caller's FCB
+            call    _ml_fcb_rd          ; RD = caller's FCB
+                                        ; RD = caller's FCB
             mov     rb, ml_base
             lda     rb
             phi     rf
@@ -276,11 +273,8 @@ ml_size_ok:
             lbnz    ml_fail_release_close
 
             ; read the 2-byte fixup_count
-            mov     rb, ml_fcb_ptr
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = caller's FCB
+            call    _ml_fcb_rd          ; RD = caller's FCB
+                                        ; RD = caller's FCB
             mov     rf, ml_fixup_count
             ldi     0
             phi     rc
@@ -294,8 +288,7 @@ ml_size_ok:
 
 ml_fixup_loop:
             ; fixup_count == 0 ?
-            mov     rb, ml_fixup_count
-            inc     rb
+            mov     rb, ml_fixup_count+1
             ldn     rb                  ; low byte
             lbnz    ml_fixup_have_more
             dec     rb
@@ -303,11 +296,8 @@ ml_fixup_loop:
             lbz     ml_fixup_done
 
 ml_fixup_have_more:
-            mov     rb, ml_fcb_ptr
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = caller's FCB
+            call    _ml_fcb_rd          ; RD = caller's FCB
+                                        ; RD = caller's FCB
             mov     rf, ml_fixup_entry
             ldi     0
             phi     rc
@@ -399,11 +389,16 @@ ml_fail_release_close:
             ; tail -- byte-for-byte identical, no branch needed
 
 ml_fail_close_only:
-            call    _ml_close_fcb
-            stc
+            ldi     MODLOAD_ERR_BAD
+            lskp                        ; skip the 2-byte ldi below
+ml_fail_nomem:
+            ldi     MODLOAD_ERR_NOMEM
+            call    _ml_close_fcb       ; preserves D (the code)
+            stc                         ; SMI 0: DF=1, D unchanged
             rtn
 
 ml_open_fail:
+            ldi     MODLOAD_ERR_NOTFOUND
             stc
             rtn
 
@@ -440,17 +435,18 @@ ml_reserve_size:
 ; into RD, call K_FILE_CLOSE" sequence duplicated at all 3 of its
 ; exit paths (success, and both failure tails).
 ; Args:    none
-; Returns: nothing (K_FILE_CLOSE's own DF/D aren't meaningful here)
+; Returns: D unchanged (2026-09-23: the failure tails load their
+;          MODLOAD_ERR_* code before calling this); DF is K_FILE_CLOSE's
 ; Modifies: RB, RD (plus whatever K_FILE_CLOSE itself modifies)
 ;------------------------------------------------------------------
             proc    _ml_close_fcb
 
-            mov     rb, ml_fcb_ptr
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = caller's FCB
+            stxd                        ; save D on the stack (X = R2)
+            call    _ml_fcb_rd          ; RD = caller's FCB
+                                        ; RD = caller's FCB
             call    K_FILE_CLOSE
+            irx
+            ldx                         ; restore D
             rtn
 
             endp
@@ -462,9 +458,25 @@ ml_reserve_size:
 ; Returns: nothing
 ; Modifies: R8, RA, RB, RF (whatever K_HIMEM_RELEASE itself modifies)
 ;------------------------------------------------------------------
+            proc    _ml_fcb_rd
+
+;------------------------------------------------------------------
+; _ml_fcb_rd: RD = the caller's FCB pointer (ml_fcb_ptr). Leaves
+; RB = ml_fcb_ptr+1 and D = RD.lo, DF untouched -- the same state the
+; inline 5-instruction reload it replaced left at each of its 5 sites.
+;------------------------------------------------------------------
+            mov     rb, ml_fcb_ptr
+            lda     rb
+            phi     rd
+            ldn     rb
+            plo     rd
+            rtn
+
+            endp
+
+;------------------------------------------------------------------
             proc    mod_release
 
-            call    K_HIMEM_RELEASE
-            rtn
+            lbr     K_HIMEM_RELEASE ; tail call
 
             endp

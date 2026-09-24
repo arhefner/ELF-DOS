@@ -213,6 +213,13 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             sex     r2                  ; restore X = R2 -- everything
                                         ; else in this codebase assumes
                                         ; X is always R2
+            lbnf    rsv_fail            ; 2026-09-23: DF=0 (borrow) means
+                                        ; RC > mem_top, and new_mem_top
+                                        ; wrapped past zero to a HUGE
+                                        ; value that the mem_base test
+                                        ; below then happily accepted --
+                                        ; an oversized request was
+                                        ; granted. SEX leaves DF alone.
                                         ; R8 = new_mem_top
 
             ; new_mem_top - mem_base -- SEX-protected, same reasoning
@@ -364,8 +371,7 @@ khr_fail:
 ; ----------------------------------------------------------------
             proc    kernel_himem_release
 
-            call    _himem_release
-            rtn
+            lbr     _himem_release  ; tail call
 
             endp
 
@@ -912,9 +918,8 @@ rt_release_done:
             phi     rf
             ldi     low (K_READ+1)
             plo     rf
-            call    _patch_io_vector
+            lbr     _patch_io_vector ; tail call
 
-            rtn
 
             endp
 

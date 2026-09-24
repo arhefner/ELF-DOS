@@ -64,6 +64,7 @@
             extrn   f12_clust_hi
             extrn   _f12_locate
             extrn   _f12_second
+            extrn   _lba_add_d
 
 ; ----------------------------------------------------------------
 ; fat_init: reset cache state at boot
@@ -133,6 +134,31 @@
             pop     rf
             rtn
 
+            endp
+
+;------------------------------------------------------------------
+; _lba_add_d: add D to the 24-bit LBA in R8.lo:R7.hi:R7.lo (the
+; f_ideread/f_idewrite layout) with full carry. Was inline at 5 sites
+; (fat.asm x2, dir.asm x2, file.asm), 2026-09-23 size pass. SCRT's
+; call restores D on entry (glo re before sep r3), so the addend
+; arrives intact; this routine's own str r2 lands on the free stack
+; byte below the return address.
+; Args:    D = addend, R7/R8.lo = LBA
+; Returns: LBA += D; DF = final carry (always 0 in practice)
+; Modifies: R7, R8.lo, M(R2), D, DF
+;------------------------------------------------------------------
+            proc    _lba_add_d
+            str     r2
+            glo     r7
+            add
+            plo     r7
+            ghi     r7
+            adci    0
+            phi     r7
+            glo     r8
+            adci    0
+            plo     r8
+            rtn
             endp
 
 ; ----------------------------------------------------------------
@@ -248,16 +274,7 @@ fls_no_flush:
 
             mov     rf, fls_cluster
             ldn     rf                  ; D = sector index
-            str     r2
-            glo     r7
-            add                         ; D = D + [R2], DF = carry
-            plo     r7
-            ghi     r7
-            adci    0
-            phi     r7
-            glo     r8
-            adci    0
-            plo     r8
+            call    _lba_add_d          ; R8.lo:R7 += D, DF = carry
 
             mov     rf, fat_cache
             call    f_ideread
@@ -628,8 +645,7 @@ fs_hint:
             ghi     rb
             lbnz    fs_hint_done        ; not a free: leave the hint alone
 
-            mov     rf, fat_next_free
-            inc     rf
+            mov     rf, fat_next_free+1
             ldn     rf                  ; D = hint.lo
             str     r2
             glo     rd
@@ -789,8 +805,7 @@ alloc_found:
             glo     rd
             str     rf                  ; fat_next_free = allocated cluster
 
-            mov     rf, fat_next_free
-            inc     rf                  ; rf -> fat_next_free's low byte
+            mov     rf, fat_next_free+1
             ldn     rf
             adi     1
             str     rf
@@ -882,16 +897,7 @@ flush_no_copy_off:
             ; add sector_index
             mov     rf, ffl_sector_idx
             ldn     rf
-            str     r2
-            glo     r7
-            add
-            plo     r7
-            ghi     r7
-            adci    0
-            phi     r7
-            glo     r8
-            adci    0
-            plo     r8
+            call    _lba_add_d          ; R8.lo:R7 += D, DF = carry
 
             mov     rf, fat_cache
             call    f_idewrite

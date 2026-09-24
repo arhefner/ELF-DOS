@@ -668,8 +668,8 @@ DRIVE_LETTER_OFF:  equ  CUR_DRIVE_OFF + 2      ; +1 for cur_drive,
 ; Args:    RF = pointer to a null-terminated path, already resolved
 ;          (and confirmed to exist) by the caller -- see
 ;          progs/shell.asm's own K_STAT-based existence check.
-; Returns: DF = 0 on success, DF = 1 if a batch is already active
-;          (nesting isn't supported) or the file couldn't be opened.
+; Returns: DF = 0 on success. DF = 1 on failure, with D = one of the
+;          BATCH_ERR_* codes below saying why.
 ;
 ; K_BATCH_READLINE: fetch the next line of the active batch script.
 ; Args:    none
@@ -679,6 +679,17 @@ DRIVE_LETTER_OFF:  equ  CUR_DRIVE_OFF + 2      ; +1 for cur_drive,
 ;          the very next call also returns DF=1 until a new
 ;          K_BATCH_START).
 K_BATCH_START:      equ     $016A       ; -> batch_start
+; K_BATCH_START's failure reasons, returned in D when DF=1 (2026-09-23).
+; Before this every failure looked the same, and the shell reported all
+; of them as "Nested batch not supported." -- including a missing
+; batch.mod, which is what a hardware user actually hit. Codes 2-4 are
+; mod_load's own MODLOAD_ERR_* values (include/modformat.inc), passed
+; through unchanged, so the two sets must stay numerically equal.
+BATCH_ERR_ACTIVE:   equ     1           ; a batch is already running
+BATCH_ERR_NOMOD:    equ     2           ; C:/bin/batch.mod not found
+BATCH_ERR_BADMOD:   equ     3           ; batch.mod unreadable/invalid
+BATCH_ERR_NOMEM:    equ     4           ; no room in RAM for batch.mod
+BATCH_ERR_OPEN:     equ     5           ; the .bat file wouldn't open
 K_BATCH_READLINE:   equ     $016D       ; -> batch_readline
 
 ; K_BATCH_GOTO: reposition the active batch script to just after a

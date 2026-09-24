@@ -387,6 +387,12 @@ BATCH_ARGS_ARGV_OFF: equ    128   ; 10 * 2-byte pointers into the text
                                   ; region above
 BATCH_ARGS_ARGC_OFF: equ    148   ; 1 byte: how many of the 10 slots
                                   ; are actually populated (0-10)
+; Restated from include/kernel_api.inc (see its own comment there).
+BATCH_ERR_ACTIVE:   equ     1           ; a batch is already running
+BATCH_ERR_NOMOD:    equ     2           ; C:/bin/batch.mod not found
+BATCH_ERR_BADMOD:   equ     3           ; batch.mod unreadable/invalid
+BATCH_ERR_NOMEM:    equ     4           ; no room in RAM for batch.mod
+BATCH_ERR_OPEN:     equ     5           ; the .bat file wouldn't open
 BATCH_ARGS_RESERVE_LEN: equ 149   ; total reservation size
 
 ; STACK_RESERVE_LEN: permanent margin at the very top of RAM, reserved

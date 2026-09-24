@@ -107,17 +107,19 @@
 ;          (and confirmed to exist) by the caller -- see
 ;          progs/shell.asm's own K_STAT check before calling this.
 ; Returns: DF = 0 on success (a batch is now active; the next call to
-;          K_BATCH_READLINE will return its first line), DF = 1 if a
-;          batch is already active (nesting isn't supported), the
-;          module couldn't be loaded (see batch_mod_load), or the
-;          .bat file itself couldn't be opened.
+;          K_BATCH_READLINE will return its first line). DF = 1 on
+;          failure, with D = a BATCH_ERR_* code (kernel.inc): ACTIVE if
+;          a batch is already running (nesting isn't supported), OPEN
+;          if the .bat file couldn't be opened, or mod_load's own
+;          NOMOD/BADMOD/NOMEM passed straight through when the module
+;          couldn't be loaded (see batch_mod_load).
 ; Modifies: everything
 ; ----------------------------------------------------------------
             proc    batch_start
 
             mov     rd, batch_mod_active
             ldn     rd
-            lbnz    bst_reject          ; already active: reject
+            lbnz    bst_active          ; already active: reject
                                         ; WITHOUT ever touching the
                                         ; module -- a batch is
                                         ; genuinely still running there
@@ -135,7 +137,9 @@
             call    batch_mod_load      ; DF=0/1 -- (re)loads the
                                         ; module fresh, wherever
                                         ; mod_load finds room; on DF=1
-                                        ; nothing was changed at all
+                                        ; nothing was changed at all,
+                                        ; and D = mod_load's own error
+                                        ; code, returned unchanged
             lbdf    bst_reject
 
             ; module is now resident -- compute the icall target
@@ -187,11 +191,12 @@
 
 bst_mod_open_failed:
             call    batch_mod_unclamp
-            stc
-            rtn
-
-bst_reject:
-            stc
+            ldi     BATCH_ERR_OPEN
+            lskp                        ; skip the 2-byte ldi below
+bst_active:
+            ldi     BATCH_ERR_ACTIVE
+bst_reject:                             ; D = the code already
+            stc                         ; SMI 0: DF=1, D unchanged
             rtn
 
 bst_path:      dw      0           ; local to this proc only -- see
@@ -211,8 +216,9 @@ bst_path:      dw      0           ; local to this proc only -- see
 ; Returns: DF = 0 on success: batch_mod_base/batch_mod_reserve_size
 ;          are populated (the module's real load address, and the
 ;          reservation size batch_mod_unclamp must pass back later).
-;          DF = 1 on any failure (mod_load already guarantees nothing
-;          was left reserved or open in that case).
+;          DF = 1 on any failure, D = mod_load's MODLOAD_ERR_* code
+;          (mod_load already guarantees nothing was left reserved or
+;          open in that case). bml_fail's stc leaves D alone.
 ; Modifies: everything
 ; ----------------------------------------------------------------
             proc    batch_mod_load
@@ -250,7 +256,12 @@ bml_fail:
             stc
             rtn
 
-batchmod_path:      db      "/bin/batch.mod",0
+; Drive-qualified (2026-09-23): a bare "/bin/batch.mod" resolved against
+; the CURRENT drive, so starting any batch file while standing on a drive
+; with no /bin failed, and the shell reports every K_BATCH_START failure
+; as "Nested batch not supported." 'C' for the same reason kinit.asm's
+; kshell_path is "C:/bin/shell": the system /bin lives on the boot drive.
+batchmod_path:      db      "C:/bin/batch.mod",0
 
             endp
 
@@ -270,8 +281,7 @@ batchmod_path:      db      "/bin/batch.mod",0
             phi     rc
             ldn     rf
             plo     rc
-            call    mod_release
-            rtn
+            lbr     mod_release     ; tail call
 
             endp
 
@@ -297,9 +307,8 @@ batchmod_path:      db      "/bin/batch.mod",0
 
             call    batch_mod_unclamp
 
-            call    _batch_args_release ; no-op if %N support was never
+            lbr     _batch_args_release ; no-op if %N support was never
                                         ; reserved for this batch
-            rtn
 
             endp
 

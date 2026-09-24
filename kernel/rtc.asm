@@ -127,8 +127,7 @@ pfd_year_ok:
             or
             plo     rd                  ; RD |= (month << 5)
 
-            mov     rf, cur_time
-            inc     rf
+            mov     rf, cur_time+1
             ldn     rf                  ; D = cur_time[1] (day, 1-31)
             str     r2
             glo     rd

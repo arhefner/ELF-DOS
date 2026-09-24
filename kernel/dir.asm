@@ -43,6 +43,7 @@
 ; cross-file references
             extrn   dir_buf
             extrn   _set_lba_dev
+            extrn   _lba_add_d
             extrn   fat_get
             extrn   bpb_spc
             extrn   bpb_spc_shift
@@ -262,8 +263,7 @@
             call    _set_lba_dev      ; R8.1 = block device unit
 
             mov     rf, dir_buf
-            call    f_ideread           ; DF = 0/1
-            rtn
+            lbr     f_ideread           ; DF = 0/1
 
             endp
 
@@ -623,16 +623,7 @@ dns_root_ok:
 
             ; add dir_sect (single byte, carry into R7.1 and R8.0)
             glo     rc                  ; D = dir_sect
-            str     r2
-            glo     r7
-            add                         ; R7.0 += dir_sect, DF = carry
-            plo     r7
-            ghi     r7
-            adci    0
-            phi     r7
-            glo     r8
-            adci    0
-            plo     r8
+            call    _lba_add_d          ; R8.lo:R7 += D, DF = carry
             lbr     dns_read
 
 ;------------------------------------------------------------------
@@ -743,16 +734,7 @@ dns_in_cluster:
             ; callee's clobber list, documented or not.
             mov     rf, dir_sect
             ldn     rf                  ; D = dir_sect (fresh, correct)
-            str     r2
-            glo     r7
-            add                         ; R7.0 += dir_sect, DF = carry
-            plo     r7
-            ghi     r7
-            adci    0
-            phi     r7
-            glo     r8
-            adci    0
-            plo     r8
+            call    _lba_add_d          ; R8.lo:R7 += D, DF = carry
 
 dns_read:
             ; record the LBA we're about to load, so dir_read can
@@ -855,8 +837,7 @@ clba_done:
             adc                         ; R8.0 += bpb_data_lba.hi + DF
             plo     r8
 
-            call    _set_lba_dev      ; R8.1 = block device unit
-            rtn
+            lbr     _set_lba_dev      ; R8.1 = block device unit
 
 ;==================================================================
 ; _dir_fmt83: format an 8.3 name from a raw directory entry

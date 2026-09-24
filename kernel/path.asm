@@ -124,8 +124,7 @@ presolve_copy_done:
             ; The colon is tested first: it is the cheap, unambiguous
             ; half, and a path whose second character is not ':' cannot
             ; be a drive prefix whatever the first one is.
-            mov     rf, path_buf
-            inc     rf
+            mov     rf, path_buf+1
             ldn     rf
             xri     ':'
             lbnz    presolve_no_prefix  ; no ':' following: not a prefix
@@ -175,9 +174,7 @@ presolve_found:
             str     rf                  ; presolve_drive = slot
 
             mov     rf, presolve_start
-            mov     ra, path_buf
-            inc     ra
-            inc     ra                  ; RA -> path_buf + 2
+            mov     ra, path_buf+2
             ghi     ra
             str     rf
             inc     rf

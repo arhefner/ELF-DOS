@@ -161,33 +161,42 @@ wildcard does not match anything, the command is given the text exactly as
 typed instead.
 
 **How ELF-DOS finds a command.** When you type a name on its own, ELF-DOS
-looks for it in `/bin` on the drive it booted from. Those are the system
-commands, and nothing can displace them - a `/bin` on some other disk you
-have mounted cannot quietly replace `COPY` or `DEL` with its own version.
+looks for it in three places, in this order, and runs the first match:
 
-If the name is not a system command, ELF-DOS then looks in each directory
-listed in the `PATH` environment variable, in order, and runs the first
-match:
+1. the current directory;
+2. `/bin` on the drive it booted from, where the system commands live;
+3. each directory listed in the `PATH` environment variable, in order.
 
 ```
 C:/> EXPORT PATH=D:/tools;E:/games
 ```
 
 Separate directories with a semicolon. `PATH` starts out unset, which
-simply means only the system commands are found. Because the system
-commands are searched first, a mistake in `PATH` can never leave you
-unable to type `EXPORT` to fix it.
+simply means only the current directory and the system commands are
+searched. Because the system commands come before `PATH`, a mistake in
+`PATH` can never leave you unable to type `EXPORT` to fix it, and a `/bin`
+on some other disk you have mounted cannot quietly replace `COPY` or `DEL`
+with its own version. A program in the *current* directory, however, is
+found first, as in MS-DOS.
 
-To run a program in the current directory, put `./` in front of its name:
+**You do not have to type `.exe` or `.bat`.** If the name you type has no
+extension, ELF-DOS tries it in each directory first exactly as typed (the
+system commands are stored with no extension), then with `.exe`, then with
+`.bat`, before moving on to the next directory. So a batch file named
+`backup.bat` can be run by typing just `backup`. If you do type an
+extension, only that exact name is looked for.
+
+To run a program without the search, give a path to it - any name
+containing a `/`:
 
 ```
-C:/> ./mygame
+C:/sub> ./mygame
+C:/sub> ../tools/build
 ```
 
-That skips the search entirely and runs exactly the file you named, which
-is also how you run something whose name happens to match a system command.
-Any name containing a `/` works this way - `../tools/build` runs that file
-and nothing else.
+That runs exactly the file you named (still trying `.exe` and `.bat` if you
+left the extension off) and nothing else. The root directory has no `.`
+entry, so at the root write `/mygame` rather than `./mygame`.
 
 If a command name is not found anywhere, ELF-DOS says `Bad command or file
 name`. That message is about the command itself; a message like `File not
@@ -407,10 +416,11 @@ line, `$` for the last line, or `#` for one past the last line.
 A batch file is a text file of commands, run one after another, the same
 way you would type them yourself. Its name must end in `.bat`. You can
 create one with `EDLIN` or by transferring a text file from another
-computer. To run it, type its name, exactly like any other command:
+computer. To run it, type its name, exactly like any other command - the
+`.bat` is optional:
 
 ```
-C:/> myscript.bat
+C:/> myscript
 ```
 
 ### A first batch file

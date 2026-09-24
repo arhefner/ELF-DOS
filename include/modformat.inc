@@ -47,3 +47,11 @@ MOD_SIZE_OFF:       equ     4       ; offset of the code_size field
 ; within the reservation -- worst case wastes this many bytes, never
 ; more. See lib/modload.asm's own header for the full reasoning.
 MOD_RESERVE_PAD:    equ     255
+
+; mod_load's failure reasons, returned in D when DF=1 (2026-09-23).
+; Numerically equal to include/kernel_api.inc's BATCH_ERR_NOMOD/BADMOD/
+; NOMEM on purpose: kernel/batch.asm passes this D straight through as
+; K_BATCH_START's own result. Change one set, change both.
+MODLOAD_ERR_NOTFOUND: equ   2           ; the module file wouldn't open
+MODLOAD_ERR_BAD:      equ   3           ; bad magic, truncated, I/O error
+MODLOAD_ERR_NOMEM:    equ   4           ; not enough himem headroom

@@ -504,7 +504,18 @@ ls_resolve_body:
             lbnz    ls_have_patharg
             ghi     rd
             lbnz    ls_have_patharg
-            lbr     ls_open             ; no path arg -- list current dir
+
+            ; No path arg -- list the current directory. Fetch it again
+            ; HERE rather than reuse the ls_cluster copy taken at
+            ; startup: K_DIR_OPEN reads whichever drive is currently
+            ; ACTIVE, and the COLUMNS lookup just above opened
+            ; C:/cfg/env.dat, which left C: active. So from any other
+            ; drive, that startup cluster (0, for a root) was listed as
+            ; C:'s root (hardware-found 2026-09-23). K_GETCURDIR makes
+            ; cur_drive active again as a side effect (see its own doc),
+            ; and nothing between here and K_DIR_OPEN touches a drive.
+            call    K_GETCURDIR         ; RD = current directory cluster
+            lbr     ls_use_cluster      ; stash it, then open
 
 ls_have_patharg:
             ; check is_glob first (2026-07-27) -- see the file header

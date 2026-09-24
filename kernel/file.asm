@@ -118,6 +118,7 @@
             extrn   fopen_badfcb
             extrn   _zero_dir_buf
             extrn   _fcb_advance_after_chunk
+            extrn   _fcb_add_chunk
             extrn   fcrw_slot
             extrn   fcrw_iobuf
             extrn   _fclose_rewrite_size
@@ -125,6 +126,8 @@
             extrn   _free_chain
             extrn   _fcb_seek_to
             extrn   _load_lba24
+            extrn   _lba_add_d
+            extrn   _copy3
             extrn   _dir_read_sector_from
             extrn   _dir_write_sector_from
             extrn   _fcb_load_boff
@@ -642,11 +645,10 @@ fst_ioerr:
             lbnz    fopen_err           ; it's a directory: reject
 
             ; --- populate the chosen FCB slot ---
-            mov     rf, fo_fcb
-            lda     rf                  ; D = fcb slot address high byte
-            phi     rb
-            ldn     rf                  ; D = fcb slot address low byte
-            plo     rb                  ; RB = fcb slot base pointer
+            call    fo_load_fcb         ; RB = caller's FCB
+                                        ; D = fcb slot address high byte
+                                        ; D = fcb slot address low byte
+                                        ; RB = fcb slot base pointer
 
             ; BUG FIX: the old sequence was "ldi FCB_F_OPEN" then
             ; "mov rf, fo_mode" -- but that mov itself clobbers D
@@ -712,14 +714,7 @@ fopen_flags_done:
             lda     rf
             str     rb
             inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
             inc     rb                  ; FCB_FSIZE written
 
             ; FCB_FPOS = 0 (4 bytes)
@@ -747,14 +742,7 @@ fopen_flags_done:
             ; entry was found in, remembered so file_close can
             ; rewrite its size field later if file_write grows it
             mov     rf, dir_cur_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
             inc     rb                  ; FCB_ELBA written
 
             ; FCB_EOFF = dir_last_off (2 bytes, big-endian)
@@ -820,11 +808,8 @@ fopen_flags_done:
             smi     1
             lbnz    fopen_check_append  ; not mode 1
 
-            mov     rf, fo_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = fcb slot base
+            call    fo_load_fcb         ; RB = caller's FCB
+                                        ; RB = fcb slot base
 
             ghi     rb
             phi     rf
@@ -860,11 +845,8 @@ fopen_check_append:
             smi     2
             lbnz    fopen_no_append     ; not append mode
 
-            mov     rf, fo_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = fcb slot base
+            call    fo_load_fcb         ; RB = caller's FCB
+                                        ; RB = fcb slot base
 
             ; --- load the full 32-bit FSIZE (2026-07-26, >64K support
             ; -- was low-word-only). RD:R8 = FSIZE (RD=high, R8=low). ---
@@ -915,11 +897,8 @@ fopen_append_have_size:
             ; layout, so no reversal needed). RB reloaded fresh here --
             ; _fcb_seek_to's own "Modifies: everything" contract means
             ; nothing survives the call.
-            mov     rf, fo_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = fcb slot base (reload)
+            call    fo_load_fcb         ; RB = caller's FCB
+                                        ; RB = fcb slot base (reload)
 
             ghi     rb
             phi     rf
@@ -991,11 +970,8 @@ fopen_notfound:
             ; nothing to read back from disk. Mode 2 (append) needs no
             ; special positioning here either: end-of-file on a
             ; brand-new empty file IS position 0. ---
-            mov     rf, fo_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = fcb slot base pointer
+            call    fo_load_fcb         ; RB = caller's FCB
+                                        ; RB = fcb slot base pointer
 
             ldi     FCB_F_OPEN
             ori     FCB_F_WRITE
@@ -1040,14 +1016,7 @@ fopen_notfound:
             inc     rb                  ; FCB_FPOS = 0
 
             mov     rf, fc_elba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
             inc     rb                  ; FCB_ELBA = fc_elba
 
             mov     rf, fc_eoff
@@ -1083,6 +1052,17 @@ fopen_err:
                                         ; fd_table), so there's nothing
                                         ; to free/unwind on any failure
                                         ; path that reaches here
+            rtn
+
+; fo_load_fcb: RB = the caller's FCB pointer file_open stashed in
+; fo_fcb. Leaves RF = fo_fcb+1 and D = RB.lo, DF untouched -- the same
+; state the inline 5-instruction reload it replaced left behind.
+fo_load_fcb:
+            mov     rf, fo_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
             rtn
 
             endp
@@ -1454,6 +1434,24 @@ gsn_build_ext_done:
 
             endp
 
+;------------------------------------------------------------------
+; _copy3: copy 3 bytes from RF to RB (an on-disk LBA, typically).
+; Leaves RF and RB each advanced by 2 (pointing at the last byte),
+; D = the last byte copied, DF untouched -- the exact state the inline
+; lda/str/inc x2 + ldn/str sequence it replaced left at its 12 sites.
+;------------------------------------------------------------------
+            proc    _copy3
+            lda     rf
+            str     rb
+            inc     rb
+            lda     rf
+            str     rb
+            inc     rb
+            ldn     rf
+            str     rb
+            rtn
+            endp
+
 ; ----------------------------------------------------------------
 ; _load_lba24: read a 3-byte (LBA_SIZE) big-endian-on-disk LBA field
 ; out of memory into the R7:R8 register pair, in the exact byte
@@ -1486,8 +1484,7 @@ gsn_build_ext_done:
             phi     r7
             ldn     rf
             plo     r7
-            call    _set_lba_dev      ; R8.1 = block device unit
-            rtn
+            lbr     _set_lba_dev      ; R8.1 = block device unit
 
             endp
 
@@ -1508,8 +1505,7 @@ gsn_build_ext_done:
 
             call    _load_lba24
             mov     rf, dir_buf
-            call    f_ideread
-            rtn
+            lbr     f_ideread       ; tail call
 
             endp
 
@@ -1528,8 +1524,7 @@ gsn_build_ext_done:
 
             call    _load_lba24
             mov     rf, dir_buf
-            call    f_idewrite
-            rtn
+            lbr     f_idewrite      ; tail call
 
             endp
 
@@ -1725,8 +1720,7 @@ gsn_build_ext_done:
             phi     rd
             ldn     rf
             plo     rd
-            call    _is_dot_or_dotdot
-            rtn
+            lbr     _is_dot_or_dotdot ; tail call
 
             endp
 
@@ -1838,16 +1832,7 @@ fslai_no_resolve:
             adi     FCB_CSECT
             plo     rf
             ldn     rf                  ; D = FCB_CSECT
-            str     r2
-            glo     r7
-            add
-            plo     r7
-            ghi     r7
-            adci    0
-            phi     r7
-            glo     r8
-            adci    0
-            plo     r8              ; R7:R8 = target sector's LBA
+            call    _lba_add_d          ; R8.lo:R7 += D, DF = carry
 
             call    _fcb_load_iobuf
             mov     rf, r9
@@ -1902,8 +1887,7 @@ fslai_err:
             phi     rf
             ldn     ra
             plo     rf
-            call    path_resolve
-            rtn
+            lbr     path_resolve    ; tail call
 
             endp
 
@@ -1983,14 +1967,7 @@ fslai_err:
 
             mov     rf, dir_cur_lba
             mov     rb, fc_saved_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
 
             mov     rf, dir_lfn_ok
             ldn     rf
@@ -2137,14 +2114,7 @@ csc_restore:
 
             mov     rf, fc_saved_lba
             mov     rb, dir_cur_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
 
             mov     rf, fc_saved_lfnok
             ldn     rf
@@ -2619,14 +2589,7 @@ fc_use_current:
 fc_copy_lba_write:
             mov     rf, dir_cur_lba
             mov     rb, fc_target_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
 
             lbr     fc_write_entries
 
@@ -2859,14 +2822,7 @@ fc_grow:
 
             mov     rf, dir_cur_lba
             mov     rb, fc_grow_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb                  ; fc_grow_lba = dir_cur_lba
+            call    _copy3              ; 3 bytes *RF -> *RB ; fc_grow_lba = dir_cur_lba
                                         ; (sector 0's own LBA, the
                                         ; starting point to walk
                                         ; forward from)
@@ -3743,8 +3699,7 @@ fct_done:
             ldn     rf                  ; D = cluster low byte
             plo     r9                  ; R9 = first cluster (0 = none)
 
-            call    _delete_located_entry
-            rtn
+            lbr     _delete_located_entry ; tail call
 
 fdel_err:
             stc                         ; DF = 1, error
@@ -4207,8 +4162,7 @@ sdn_parent: dw      0
             ; _scan_dir_for_name's own argument convention. DF comes
             ; back already correct for this routine's own contract:
             ; 0=found, 1=not found -- no translation needed.
-            call    _scan_dir_for_name
-            rtn
+            lbr     _scan_dir_for_name ; tail call
 
 fdd_err:
             stc                         ; DF = 1, error
@@ -4553,8 +4507,8 @@ dcr_restore:
             inc     rf
             str     rf
 
-            call    _file_create
-            rtn                         ; DF from _file_create passed
+            lbr     _file_create    ; tail call
+                                        ; DF from _file_create passed
                                         ; straight through
 
 dcr_err:
@@ -4665,14 +4619,7 @@ drm_have_target:
 
             mov     rf, dir_cur_lba
             mov     rb, drm_saved_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
 
             ; --- confirm the target directory is empty (only '.' and
             ; '..') before removing it ---
@@ -4711,14 +4658,7 @@ drm_restore:
 
             mov     rf, drm_saved_lba
             mov     rb, dir_cur_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
 
             mov     rf, dir_cur_lba
             call    _dir_read_sector_from ; dir_buf = parent's sector
@@ -4732,8 +4672,8 @@ drm_restore:
             plo     r9                  ; R9 = target's first cluster
                                         ; (reloaded fresh)
 
-            call    _delete_located_entry
-            rtn                         ; DF passed straight through
+            lbr     _delete_located_entry ; tail call
+                                        ; DF passed straight through
 
 drm_err:
             stc                         ; DF = 1, error
@@ -4908,14 +4848,7 @@ ren_check_sep_done:
 
             mov     rf, dir_cur_lba
             mov     rb, ren_old_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
 
             ; --- scan the parent AGAIN, fresh, for a NEW-name
             ; collision. If none, this naturally leaves dir.asm's live
@@ -4983,14 +4916,7 @@ ren_insert:
 
             mov     rf, ren_old_lba
             mov     rb, dir_cur_lba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
 
             mov     rf, dir_cur_lba
             call    _dir_read_sector_from ; dir_buf = OLD entry's
@@ -5006,10 +4932,10 @@ ren_insert:
             ldn     rf
             plo     r9
 
-            call    _mark_entry_deleted ; does NOT free the cluster
+            lbr     _mark_entry_deleted ; does NOT free the cluster
                                         ; chain -- the new entry now
                                         ; points at it
-            rtn                         ; DF passed straight through
+                                        ; DF passed straight through
 
 ren_err:
             stc                         ; DF = 1, error
@@ -5320,6 +5246,32 @@ ftc_err:
 ; Returns: RC = fr_request - RC, the number actually transferred
 ; Modifies: RF, RD, R9, RC
 ;------------------------------------------------------------------
+;------------------------------------------------------------------
+; _fcb_add_chunk: FCB_BOFF += chunk and FCB_FPOS += chunk (FPOS a
+; full 32-bit add: chunk is <= 512, so it only ever goes into the low
+; word, and ADD16's final DF carries into the high word via the
+; adci-0/adci-0 chain). Was duplicated instruction-for-instruction in
+; file_read and file_write right before each calls into its own
+; wrap/advance code (2026-09-23 size pass).
+; Args:    RB = FCB base, R7 = chunk just transferred
+; Returns: both fields updated; R9:R8 = the new FPOS
+; Modifies: R8, R9, RF, D, DF (as the _fcb_* accessors it calls)
+;------------------------------------------------------------------
+            proc    _fcb_add_chunk
+            call    _fcb_load_boff      ; R8 = FCB_BOFF
+            add16   r8, r7
+            call    _fcb_store_boff
+            call    _fcb_load_fpos32    ; R9:R8 = FCB_FPOS
+            add16   r8, r7              ; R8 += chunk; DF = carry-out
+            glo     r9
+            adci    0
+            plo     r9
+            ghi     r9
+            adci    0
+            phi     r9                  ; R9:R8 = FPOS + chunk
+            lbr     _fcb_store_fpos32   ; tail call
+            endp
+
 ;------------------------------------------------------------------
 ; _fcb_advance_after_chunk: after a chunk of bytes has been moved,
 ; charge it against the outstanding count and step the FCB's position
@@ -5721,30 +5673,7 @@ fread_copy_have:
 fread_copy_done:
 
             ; FCB_BOFF += chunk
-            call    _fcb_load_boff        ; R8 = FCB_BOFF (post-update)
-            add16   r8, r7
-            call    _fcb_store_boff
-
-            ; FCB_FPOS += chunk, full 32-bit (2026-07-26, >64K support)
-            ; -- chunk (R7) is always <=512 (one sector's worth), so it
-            ; only ever needs adding into the low word; ADD16's own
-            ; final DF is that 16-bit add's carry-out, propagated into
-            ; the high word (R9) via the standard adci-0/adci-0 chain
-            ; (first into R9's own low byte, then that byte's own
-            ; carry-out into R9's high byte) -- matches the idiom
-            ; already used elsewhere in this codebase (e.g. dir.asm).
-            call    _fcb_load_fpos32
-
-            add16   r8, r7              ; R8 += chunk; DF = carry-out
-
-            glo     r9
-            adci    0
-            plo     r9
-            ghi     r9
-            adci    0
-            phi     r9                  ; R9:R8 = FPOS + chunk
-
-            call    _fcb_store_fpos32
+            call    _fcb_add_chunk      ; BOFF += chunk, FPOS += chunk
 
             ; RC -= chunk
             call    _fcb_advance_after_chunk
@@ -6082,32 +6011,7 @@ fwrite_copy_done:
             lbdf    fwrite_ioerr
 
             ; FCB_BOFF += chunk
-            call    _fcb_load_boff
-            add16   r8, r7
-            call    _fcb_store_boff
-
-            ; FCB_FPOS += chunk, full 32-bit (2026-07-26, >64K support).
-            ; R7 (chunk) MUST survive this entire block untouched --
-            ; fwrite_no_grow's own "RC -= chunk" below still needs it,
-            ; on BOTH the grew and no-grow paths -- so R9:R8 hold the
-            ; new FPOS value only transiently (never simultaneously
-            ; with FSIZE); the grow-check just below reads both fields
-            ; back from memory via a backward byte-walk instead of
-            ; holding two full 32-bit values in registers at once.
-            call    _fcb_load_fpos32
-
-            add16   r8, r7              ; R8 += chunk; DF = carry-out
-                                        ; (ADD16 only READS r7, chunk
-                                        ; itself is untouched)
-
-            glo     r9
-            adci    0
-            plo     r9
-            ghi     r9
-            adci    0
-            phi     r9                  ; R9:R8 = new FPOS
-
-            call    _fcb_store_fpos32
+            call    _fcb_add_chunk      ; BOFF += chunk, FPOS += chunk
 
             ; if FCB_FPOS now reaches or exceeds FCB_FSIZE, the file
             ; grew -- update FCB_FSIZE and flag the directory entry
@@ -6605,20 +6509,14 @@ fsk_target_set:
             lbr     fsk_range_check
 
 fsk_target_cur:
-            mov     rf, fsk_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = FCB base
+            call    fsk_load_fcb        ; RB = FCB base
+                                        ; RB = FCB base
             call    _fcb_load_fpos32
             lbr     fsk_add_base
 
 fsk_target_end:
-            mov     rf, fsk_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = FCB base
+            call    fsk_load_fcb        ; RB = FCB base
+                                        ; RB = FCB base
             call    _fcb_load_fsize32
 
 fsk_add_base:
@@ -6700,11 +6598,8 @@ fsk_range_check:
             ; was already established above (fsk_target_set's explicit
             ; check, or fsk_add_base's carry-based validation), so
             ; only the upper bound needs checking here.
-            mov     rf, fsk_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = FCB base
+            call    fsk_load_fcb        ; RB = FCB base
+                                        ; RB = FCB base
             call    _fcb_load_fsize32
 
             mov     rf, fsk_target
@@ -6749,14 +6644,10 @@ fsk_range_check:
             lbnz    fsk_general
             ghi     rd
             lbnz    fsk_general
-            lbr     fsk_rewind
-
+                                        ; falls through: target == 0
 fsk_rewind:
-            mov     rf, fsk_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = FCB base
+            call    fsk_load_fcb        ; RB = FCB base
+                                        ; RB = FCB base
 
             ghi     rb
             phi     rf
@@ -6812,26 +6703,18 @@ fsk_general:
             ldn     rf
             plo     r8                  ; RD:R8 = fsk_target
 
-            mov     rf, fsk_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = FCB base
+            call    fsk_load_fcb        ; RB = FCB base
+                                        ; RB = FCB base
 
             call    _fcb_seek_to        ; -> DF=0/1, FCB_CCLUST/CSECT/
                                         ; BOFF set on success
             lbdf    fseek_io_err
-
-            lbr     fsk_set_fpos        ; shared FPOS/IOVALID/return
-                                        ; tail, unchanged -- already
-                                        ; used by fsk_rewind too
-
+                                        ; falls through into the shared
+                                        ; FPOS/IOVALID/return tail, also
+                                        ; used by fsk_rewind
 fsk_set_fpos:
-            mov     rf, fsk_fcb
-            lda     rf
-            phi     rb
-            ldn     rf
-            plo     rb                  ; RB = FCB base
+            call    fsk_load_fcb        ; RB = FCB base
+                                        ; RB = FCB base
 
             ; FCB_FPOS = fsk_target, straight 4-byte copy (2026-07-26,
             ; >64K support -- was low-word-only; both fields share the
@@ -6879,15 +6762,20 @@ fsk_set_fpos:
             rtn                         ; the new 32-bit position
 
 fseek_bad_whence:
-            stc
-            rtn
-
 fseek_bad_offset:
-            stc
-            rtn
-
 fseek_io_err:
             stc
+            rtn
+
+; fsk_load_fcb: RB = the FCB pointer file_seek stashed in fsk_fcb.
+; Leaves RF = fsk_fcb+1 and D = RB.lo, DF untouched -- the same state
+; the inline 5-instruction reload it replaced left behind.
+fsk_load_fcb:
+            mov     rf, fsk_fcb
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb
             rtn
 
             endp

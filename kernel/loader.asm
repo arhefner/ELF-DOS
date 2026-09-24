@@ -60,6 +60,7 @@
             extrn   prun_argv
             extrn   prun_argc
             extrn   saved_sp
+            extrn   _copy3
 
 ; ----------------------------------------------------------------
 ; _prog_finish_load: shared tail for both prog_run and
@@ -315,8 +316,7 @@ pfl_bad_magic:
             ldn     rf                  ; D = argc low byte
             plo     rc                  ; RC = argc (reloaded)
 
-            call    _prog_exec_now      ; D = exit code, DF = 0
-            rtn
+            lbr     _prog_exec_now      ; D = exit code, DF = 0
 
 prun_err:
             stc                         ; DF = 1, error
@@ -488,14 +488,7 @@ prun_err:
             inc     rb                  ; FCB_FPOS = 0 (4 bytes)
 
             mov     rf, shell_elba
-            lda     rf
-            str     rb
-            inc     rb
-            lda     rf
-            str     rb
-            inc     rb
-            ldn     rf
-            str     rb
+            call    _copy3              ; 3 bytes *RF -> *RB
             inc     rb                  ; FCB_ELBA = shell_elba (3 bytes)
 
             mov     rf, shell_eoff
@@ -524,16 +517,14 @@ prun_err:
             call    _prog_finish_load
             lbdf    prsh_fallback
 
-            call    _prog_exec_now      ; RA passed through as-is --
+            lbr     _prog_exec_now      ; RA passed through as-is --
                                         ; the shell itself never reads
                                         ; its own command tail
-            rtn
 
 prsh_fallback:
             mov     rf, kshell_path
-            call    prog_run            ; RA passed through as-is,
+            lbr     prog_run            ; RA passed through as-is,
                                         ; same reasoning
-            rtn
 
 kshell_path:    db      "C:/bin/shell",0
 

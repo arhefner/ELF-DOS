@@ -1756,12 +1756,11 @@ argv_at:
 ; handled entirely here rather than round-tripping through run_loop's
 ; own "Bad command." A name containing '/' is used as-is (a full
 ; path, loaded directly per the user's own instruction) and gets
-; exactly one existence check, no fallback. A bare name is tried
-; first against the active drive's own "/bin/", then -- only if that
-; fails, and only if the active drive isn't already the shell's own
-; drive -- against "<shell_drive>:/bin/" via K_GETSHELLDRIVE, so
-; ordinary commands work from any drive without needing /bin
-; duplicated everywhere. Both copy loops are bounds-checked against
+; no directory search. A bare name is searched for in the current
+; directory, then "<shell_drive>:/bin/", then each PATH entry (see
+; no_slash). Either way, a name whose last component has no extension
+; is also tried with ".exe" and then ".bat" (check_variants), as in
+; MS-DOS. Both copy loops are bounds-checked against
 ; RUN_PATH_LEN so an unusually long name truncates safely instead of
 ; overrunning past RUN_PATH's own 64-byte allocation (which sits just
 ; below RUN_ARGV_TABLE -- an unbounded copy here would silently
@@ -1778,8 +1777,12 @@ scan_slash:
 
 have_slash:
             ; full path given -- copy it as-is into RUN_PATH, then
-            ; confirm it exists (no fallback candidate for an
-            ; explicit path)
+            ; confirm it exists. No directory search for an explicit
+            ; path, but a final component with no extension still gets
+            ; the same ".exe"/".bat" variants a bare name does, as in
+            ; MS-DOS (check_variants, below).
+            mov     rf, ra
+            call    set_noext           ; RA untouched
             mov     rd, ra
             mov     rf, RUN_PATH
             ldi     RUN_PATH_LEN - 1    ; leave room for the forced NUL
@@ -1797,13 +1800,25 @@ force_term_path:
             ldi     0
             str     rf
 check_path:
-            call    check_exists
+            call    check_variants      ; RF = at the NUL, RC.0 = room
             lbnf    resolved
             lbr     not_found
 
 no_slash:
-            ; ---- bare name: system bin first, then PATH ----
+            ; ---- bare name: current directory, system bin, PATH ----
             ;
+            ; 2026-09-23: MS-DOS order. The current directory is
+            ; searched first, then <shell_drive>:/bin (still the
+            ; implicit first PATH entry), then PATH left to right. In
+            ; each directory a name with no extension is tried as
+            ; typed, then with ".exe", then with ".bat" (check_variants)
+            ; -- as typed first because ELF-DOS executables are still
+            ; bare-named on disk. This deliberately gives up part of
+            ; the guarantee described below: a program in the CURRENT
+            ; directory can now shadow a system command, exactly as in
+            ; MS-DOS. A /bin on some other drive still cannot.
+            ;
+            ; History, for the system-bin-before-PATH part:
             ; Until 2026-09-09 this searched the ACTIVE drive's /bin and
             ; only then the shell's own. That let a stale or foreign
             ; /bin on any mounted drive silently shadow a system
@@ -1834,7 +1849,22 @@ no_slash:
             glo     ra
             str     rb                  ; sh_name = RA
 
-            ; ---- candidate 1: <shell_drive>:/bin/<name> ----
+            mov     rf, ra
+            call    set_noext           ; sh_noext = no '.' in the name
+
+            ; ---- candidate 1: the current directory ----
+            ; A bare relative name, which path_resolve (inside K_STAT,
+            ; and again inside the kernel's prog_run or K_BATCH_START)
+            ; resolves against the current drive and directory. Nothing
+            ; between here and that load changes either.
+            mov     rf, RUN_PATH
+            ldi     RUN_PATH_LEN - 1
+            plo     rc
+            call    sh_append_name      ; RUN_PATH = name
+            call    check_variants
+            lbnf    resolved
+
+            ; ---- candidate 2: <shell_drive>:/bin/<name> ----
             call    K_GETSHELLDRIVE     ; D = shell_drive
             call    drive_letter_of     ; D = slot in, letter out.
                                         ; Before RF is set up below --
@@ -1851,11 +1881,11 @@ no_slash:
             ldi     RUN_PATH_LEN - 3    ; "X:" already written
             plo     rc
             call    write_bin_name      ; RUN_PATH = "X:/bin/" + name
-            call    check_exists
+            call    check_variants
             lbnf    resolved            ; a system command: done, and
                                         ; env.dat was never opened
 
-            ; ---- candidate 2..n: each PATH entry, left to right ----
+            ; ---- candidate 3..n: each PATH entry, left to right ----
             mov     rf, sh_pathvar
             call    env_getenv          ; RF = value, or 0 if unset
             ghi     rf
@@ -1993,7 +2023,7 @@ sh_save_cursor:
             dec     rc
 sh_have_sep:
             call    sh_append_name      ; RUN_PATH = "<entry>/" + name
-            call    check_exists
+            call    check_variants
             lbnf    resolved
             lbr     sh_path_loop
 
@@ -2018,7 +2048,7 @@ resolved:
 is_batch:
             mov     rf, RUN_PATH
             call    K_BATCH_START
-            lbdf    batch_nested
+            lbdf    batch_failed        ; D = BATCH_ERR_* reason
 
             ; %0-%9 batch-argument population (2026-07-25). Reserve
             ; the dynamic himem block and, on success, copy up to the
@@ -2145,9 +2175,42 @@ ibp_write_argc:
                                         ; first line via
                                         ; K_BATCH_READLINE
 
-batch_nested:
+; K_BATCH_START failed: D = a BATCH_ERR_* reason (2026-09-23). Until
+; then every failure printed "Nested batch not supported.", which is
+; what a missing C:/bin/batch.mod looked like on hardware.
+batch_failed:
+            smi     BATCH_ERR_ACTIVE
+            lbz     bf_active
+            smi     BATCH_ERR_NOMOD - BATCH_ERR_ACTIVE
+            lbz     bf_nomod
+            smi     BATCH_ERR_BADMOD - BATCH_ERR_NOMOD
+            lbz     bf_badmod
+            smi     BATCH_ERR_NOMEM - BATCH_ERR_BADMOD
+            lbz     bf_nomem
+            smi     BATCH_ERR_OPEN - BATCH_ERR_NOMEM
+            lbz     bf_open
+            call    K_INMSG             ; a code this shell predates
+            db      "Cannot start batch file.",13,10,0
+            lbr     start
+bf_active:
             call    K_INMSG
-            db      "Nested batch not supported.",13,10,0
+            db      "Nested batch files are not supported.",13,10,0
+            lbr     start
+bf_nomod:
+            call    K_INMSG
+            db      "Batch support is missing (C:/bin/batch.mod not found).",13,10,0
+            lbr     start
+bf_badmod:
+            call    K_INMSG
+            db      "Batch support is damaged (C:/bin/batch.mod unreadable).",13,10,0
+            lbr     start
+bf_nomem:
+            call    K_INMSG
+            db      "Not enough memory to run a batch file.",13,10,0
+            lbr     start
+bf_open:
+            call    K_INMSG
+            db      "Cannot open batch file.",13,10,0
             lbr     start
 
 ;------------------------------------------------------------------
@@ -2642,6 +2705,102 @@ chk_no:
             rtn
 
 ;------------------------------------------------------------------
+; check_variants: check_exists on RUN_PATH as built, then -- only if
+; the command name had no extension (sh_noext) -- on RUN_PATH + ".exe"
+; and RUN_PATH + ".bat", in that order, the MS-DOS per-directory order
+; with ELF-DOS's bare-named executables in front.
+; Args:    RF = RUN_PATH's terminating NUL, RC.0 = characters that may
+;          still be written before RUN_PATH_LEN runs out (the budget
+;          write_bin_name/sh_append_name/copy_path_loop leave behind;
+;          0 after a truncation, which also disables the variants)
+; Returns: DF = 0 with RUN_PATH naming an existing file, DF = 1 if no
+;          variant exists (RUN_PATH then holds the last one tried)
+; Modifies: everything check_exists does. Both inputs are stashed in
+;          memory first, since check_exists (K_STAT) clobbers broadly.
+;------------------------------------------------------------------
+check_variants:
+            mov     rb, sh_endpos
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; sh_endpos = RF
+            mov     rb, sh_room
+            glo     rc                  ; reload after the mov
+            str     rb                  ; sh_room = RC.0
+
+            call    check_exists        ; as typed
+            lbnf    cv_found
+
+            mov     rf, sh_noext
+            ldn     rf
+            lbz     cv_fail             ; had an extension: as typed only
+            mov     rf, sh_room
+            ldn     rf
+            smi     4                   ; room for ".exe"/".bat"?
+            lbnf    cv_fail
+
+            mov     rd, sh_ext_exe
+            call    cv_try
+            lbnf    cv_found
+            mov     rd, sh_ext_bat
+            call    cv_try
+            lbnf    cv_found
+cv_fail:
+            stc
+            rtn
+cv_found:
+            clc
+            rtn
+
+; cv_try: write the extension at RD (with its NUL) at sh_endpos, then
+; check_exists. The same 4 bytes are overwritten by the next try.
+cv_try:
+            mov     rb, sh_endpos
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = the name's NUL
+cvt_loop:
+            lda     rd
+            str     rf
+            inc     rf                  ; D still holds the byte
+            lbnz    cvt_loop            ; copied its NUL: done
+            lbr     check_exists        ; tail call: its DF is ours
+
+;------------------------------------------------------------------
+; set_noext: sh_noext = 1 if the last path component of the string
+; at RF contains no '.', else 0. A '.' before the last '/' belongs to
+; a directory ("../foo", "./foo") and does not count.
+; Args:    RF = NUL-terminated command name or path
+; Modifies: RF, R8.0, R9.0
+;------------------------------------------------------------------
+set_noext:
+            ldi     1
+            plo     r9                  ; no extension seen yet
+sne_loop:
+            lda     rf
+            lbz     sne_done
+            plo     r8
+            xri     '/'
+            lbnz    sne_notslash
+            ldi     1                   ; new component: start over
+            plo     r9
+            lbr     sne_loop
+sne_notslash:
+            glo     r8
+            xri     '.'
+            lbnz    sne_loop
+            ldi     0
+            plo     r9
+            lbr     sne_loop
+sne_done:
+            mov     rf, sh_noext
+            glo     r9                  ; reload after the mov
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
 ; check_batch_ext: does RUN_PATH end in ".bat" (case-insensitive)?
 ; Args:    none (reads RUN_PATH)
 ; Returns: DF = 0 if it does, DF = 1 otherwise
@@ -2709,6 +2868,11 @@ cbe_no:
 
 bin_prefix: db      "/bin/",0
 sh_name:    dw      0
+sh_noext:   db      0           ; 1 = command name has no extension
+sh_endpos:  dw      0           ; check_variants: RUN_PATH's NUL
+sh_room:    db      0           ; check_variants: bytes left for it
+sh_ext_exe: db      ".exe",0
+sh_ext_bat: db      ".bat",0
 
 ; PATH support (2026-09-09). SH_PATH_MAX mirrors lib/env.asm's
 ; own ENV_LINE_MAX -- restated rather than shared, the same way
