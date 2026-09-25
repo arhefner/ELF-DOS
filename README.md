@@ -125,7 +125,8 @@ behind everything summarized here.
 | `ECHO [-n] [args...]` | Print arguments, space-separated |
 | `MR` / `MS [-u\|-b] <file>` | Receive / send a single file over serial (XMODEM) |
 | `YR` / `YS [switches] <file...>` | Receive / send file(s) via YMODEM-CRC batch transfer |
-| `SYS <kernel-full.bin>` | Install a new kernel from the running system |
+| `SYS [unit] <kernel-full.bin \| mbr.bin>` | Install a new kernel, or MBR boot code, from the running system (default unit 0) |
+| `KSAVE [unit] [file]` | Save the installed kernel to a file SYS can restore (default unit 0, `kernel-full.bak`) |
 | `BAUD <rate>` | Set the console's baud rate |
 | `CLS` | Clear the screen |
 | `MON` | Drop into the ROM monitor |

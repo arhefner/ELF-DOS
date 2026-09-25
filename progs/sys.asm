@@ -1,7 +1,21 @@
 ;
 ; sys.asm - target-side kernel installer
 ;
-; Usage: SYS <kernel-full.bin>
+; Usage: SYS [unit] <kernel-full.bin | mbr.bin>
+;
+; The file's first bytes choose what is installed: 'KRN' is a kernel
+; (written to LBA 1 onward), 'MBR' is boot/mbr.asm's boot code, which
+; replaces only the first 446 bytes of sector 0 so the partition table
+; survives -- the same rule as host-side elfdos-sys -m. Installing both
+; on a fresh card is two runs: SYS n mbr.bin, then SYS n kernel-full.bin.
+;
+; unit (2026-09-25): block device 0-7, default 0 (the boot device). A
+; nonzero unit lets a second card be prepared from a running system.
+; Before writing, SYS reads the unit's partition table and refuses if
+; there is none, or if the image (LBA 1..sectors) would reach the start
+; of any used partition -- on a partitionless volume LBA 1 is the FAT.
+; It warns, but continues, if sector 0 lacks ELF-DOS's MBR boot code.
+; KSAVE (progs/ksave.asm) is the reverse and does the same checks.
 ;
 ; Writes a kernel-full.bin (the same file this project's own Makefile
 ; produces, and which host-side elfdos-sys writes with its "-k" flag)
@@ -62,6 +76,10 @@ SYSERR_READ2:       equ     6   ; write-pass read error, or file shorter
 SYSERR_WRITE:       equ     7   ; K_SECWRITE failed
 SYSERR_VERIFY_READ: equ     8   ; K_SECREAD (post-write verify) failed
 SYSERR_MISMATCH:    equ     9   ; written sector doesn't read back the same
+SYSERR_NOPTABLE:    equ     11  ; target unit has no partition table
+SYSERR_OVERLAP:     equ     12  ; image would reach a partition's start
+SYSERR_PTREAD:      equ     13  ; target unit's sector 0 unreadable
+SYSERR_MBRSIZE:     equ     14  ; MBR file not 6..446 bytes
 SYSERR_STAT:        equ     10  ; directory-entry lookup failed (not
                                 ; found, or is a directory) -- shouldn't
                                 ; happen given K_FILE_OPEN already
@@ -85,13 +103,43 @@ start:
             glo     rc
             smi     2
             lbnf    usage               ; argc < 2: no filename given
+            glo     rc
+            smi     4
+            lbdf    usage               ; argc > 3: too many arguments
 
             mov     rb, ra
             add16   rb, 2               ; RB = &argv[1]
+            glo     rc
+            smi     2
+            lbz     have_name_slot      ; SYS <file>: unit stays 0
+
+            ; SYS <unit> <file>: argv[1] must be one digit 0-7
             lda     rb
             phi     rf
             ldn     rb
-            plo     rf                  ; RF = argv[1] (filename)
+            plo     rf                  ; RF = argv[1]
+            inc     rb                  ; RB = &argv[2]
+            ldn     rf
+            smi     '0'
+            lbnf    usage               ; below '0'
+            smi     8
+            lbdf    usage               ; above '7'
+            inc     rf
+            ldn     rf
+            lbnz    usage               ; longer than one character
+            dec     rf
+            ldn     rf
+            smi     '0'
+            plo     r9                  ; R9.0 = unit
+            mov     rf, sys_unit
+            glo     r9
+            str     rf
+
+have_name_slot:
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = filename
 
             ; stash the filename pointer for sys_install's own later
             ; directory-entry lookup -- not guaranteed to survive the
@@ -142,18 +190,111 @@ start:
 
             glo     r8
             lbz     xfer_success
-            smi     SYSERR_CANCELLED
+            xri     SYSERR_CANCELLED
             lbz     xfer_cancelled
+            glo     r8
+            xri     SYSERR_NOPTABLE
+            lbz     xfer_noptable
+            glo     r8
+            xri     SYSERR_OVERLAP
+            lbz     xfer_overlap
+            glo     r8
+            xri     SYSERR_PTREAD
+            lbz     xfer_ptread
+            glo     r8
+            xri     SYSERR_MBRSIZE
+            lbz     xfer_mbrsize
+            glo     r8
+            xri     SYSERR_MAGIC
+            lbz     xfer_magic
+            glo     r8
+            xri     SYSERR_TOOSMALL
+            lbz     xfer_toosmall
 
-            ; some other, real failure -- reload the code (the smi
-            ; above clobbered D) and report it
+            ; some other, real failure -- reload the code and report it
             glo     r8
             lbr     xfer_failed
 
 xfer_success:
+            mov     rf, sys_did_mbr
+            ldn     rf
+            lbz     xfer_success_krn
+            call    K_INMSG
+            db      "MBR boot code installed on unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      ".",13,10,0
+            ldi     0
+            rtn
+xfer_success_krn:
+            mov     rf, sys_unit
+            ldn     rf
+            lbnz    xfer_success_other
             call    K_INMSG
             db      "Kernel installed. Run REBOOT to load it.",13,10,0
             ldi     0                   ; exit code 0 = success
+            rtn
+xfer_success_other:
+            call    K_INMSG
+            db      "Kernel installed on unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      ".",13,10,0
+            ldi     0
+            rtn
+
+; Refusals below all happen before the first sector is written.
+xfer_noptable:
+            call    K_INMSG
+            db      "No partition table on unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      " -- nothing written.",13,10,0
+            ldi     1
+            rtn
+
+xfer_overlap:
+            call    K_INMSG
+            db      "Kernel would overwrite a partition on unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      " -- nothing written.",13,10,0
+            ldi     1
+            rtn
+
+xfer_mbrsize:
+            call    K_INMSG
+            db      "MBR file must be 6 to 446 bytes -- nothing written.",13,10,0
+            ldi     1
+            rtn
+
+xfer_magic:
+            call    K_INMSG
+            db      "Not a kernel or MBR file -- nothing written.",13,10,0
+            ldi     1
+            rtn
+
+xfer_toosmall:
+            call    K_INMSG
+            db      "Kernel file is too small -- nothing written.",13,10,0
+            ldi     1
+            rtn
+
+xfer_ptread:
+            call    K_INMSG
+            db      "Cannot read unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      " -- nothing written.",13,10,0
+            ldi     1
+            rtn
+
+; print_unit: print sys_unit as one digit
+print_unit:
+            mov     rf, sys_unit
+            ldn     rf
+            adi     '0'
+            call    K_TYPE
             rtn
 
 xfer_cancelled:
@@ -169,12 +310,17 @@ xfer_failed:
             ; string per code -- see the equ's above for what each
             ; code means, and sys_install's own header comment for
             ; where each one is actually detected.
-            adi     '0'
-            plo     r8
+            plo     rd
+            ldi     0
+            phi     rd                  ; RD = code (f_uintout's input)
+            mov     rf, sys_err_buf
+            call    f_uintout           ; codes run past 9, so not adi '0'
+            ldi     0
+            str     rf
             call    K_INMSG
             db      "Install failed (error ",0
-            glo     r8
-            call    K_TYPE
+            mov     rf, sys_err_buf
+            call    K_MSG
             call    K_INMSG
             db      ").",13,10
             db      "Boot device not confirmed consistent --",13,10
@@ -190,7 +336,8 @@ open_error:
 
 usage:
             call    K_INMSG
-            db      "Usage: SYS <kernel-full.bin>",13,10,0
+            db      "Usage: SYS [unit] <kernel-full.bin | mbr.bin>",13,10
+            db      "  unit 0-7, default 0 (the boot device)",13,10,0
             ldi     1                   ; exit code 1 = error
             rtn
 
@@ -202,6 +349,11 @@ sys_fcb_struct: ds      FCB_LEN
 #endif
 sys_iobuf:      ds      FCB_IOBUF_LEN
 sys_path_ptr:   dw      0
+sys_unit:       db      0               ; target block device, 0-7
+sys_mbr_ok:     db      0               ; 1 = sector 0 holds ELF-DOS boot code
+sys_did_mbr:    db      0               ; 1 = the MBR path ran
+sys_read_len:   dw      0               ; bytes the first read returned
+sys_err_buf:    ds      6
 
 ;==================================================================
 ; sys_install: given an already-open kernel-full.bin file, resolve its
@@ -355,26 +507,6 @@ sys_stat_loop:
             str     rd
 
 ;------------------------------------------------------------------
-; "Too small" = under KRNBOOT_SECTORS*512 = 1536 bytes (can't even
-; hold a full bootstrap, let alone a real kernel proper) -- checked
-; directly against the exact size now that it's known, no short-read
-; ambiguity to resolve the way an earlier, read-through version of
-; this proc had to.
-;------------------------------------------------------------------
-            mov     rf, sys_size_hi
-            ldn     rf
-            smi     10                  ; DF=1 iff size.hi >= 10, i.e.
-                                        ; size >= 2560 ($0A00) -- 2560
-                                        ; is an exact multiple of 256,
-                                        ; same "compare just the high
-                                        ; byte" trick as the original
-                                        ; 512-byte check. Was 1536 (3
-                                        ; sectors) until krnboot grew to
-                                        ; KRNBOOT_SECTORS=5 for the
-                                        ; split memory model.
-            lbnf    sys_toosmall_err
-
-;------------------------------------------------------------------
 ; sys_sectors = ceil(size / 512).
 ;   floor(size/512) = size.hi >> 1 -- since 512 = 0x200, dividing the
 ;   whole 16-bit value by 512 is the same as shifting its high byte
@@ -437,6 +569,12 @@ sys_sectors_done:
             plo     rd                  ; RD = the FCB pointer
             call    K_FILE_READ         ; RC = bytes actually read, DF=0/1
             lbdf    sys_magic_read_err
+            mov     rf, sys_read_len    ; (mov leaves RC alone)
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf                  ; sys_read_len = bytes read
 
             ghi     rc
             lbnz    sys_check_magic     ; high byte nonzero: definitely
@@ -445,6 +583,18 @@ sys_sectors_done:
             smi     3
             lbnf    sys_magic_err       ; < 3 bytes: can't hold 'KRN'
 sys_check_magic:
+            ; 'MBR' = MBR boot code (mbr.bin), 'KRN' = a kernel
+            mov     rf, sys_buf
+            lda     rf
+            xri     'M'
+            lbnz    sys_not_mbr
+            lda     rf
+            xri     'B'
+            lbnz    sys_not_mbr
+            ldn     rf
+            xri     'R'
+            lbz     sys_mbr_path
+sys_not_mbr:
             mov     rf, sys_buf
             ldn     rf
             xri     'K'
@@ -457,6 +607,26 @@ sys_check_magic:
             ldn     rf
             xri     'N'
             lbnz    sys_magic_err
+
+;------------------------------------------------------------------
+; "Too small" = under KRNBOOT_SECTORS*512 = 1536 bytes (can't even
+; hold a full bootstrap, let alone a real kernel proper) -- checked
+; directly against the exact size now that it's known, no short-read
+; ambiguity to resolve the way an earlier, read-through version of
+; this proc had to.
+;------------------------------------------------------------------
+            mov     rf, sys_size_hi
+            ldn     rf
+            smi     10                  ; DF=1 iff size.hi >= 10, i.e.
+                                        ; size >= 2560 ($0A00) -- 2560
+                                        ; is an exact multiple of 256,
+                                        ; same "compare just the high
+                                        ; byte" trick as the original
+                                        ; 512-byte check. Was 1536 (3
+                                        ; sectors) until krnboot grew to
+                                        ; KRNBOOT_SECTORS=5 for the
+                                        ; split memory model.
+            lbnf    sys_toosmall_err
 
 ;------------------------------------------------------------------
 ; extra_sectors = sys_sectors - KRNBOOT_SECTORS (3) -- the value that
@@ -497,6 +667,9 @@ sys_extra_no_borrow:
             mov     rd, sys_extra_hi
             ghi     r7
             str     rd                  ; sys_extra_hi = high result
+
+            call    sys_check_ptable    ; D = 0, or a SYSERR_* code
+            lbnz    sys_exit
 
             call    sys_confirm         ; D = 0 (go) or 1 (cancelled)
             lbnz    sys_cancelled_err
@@ -638,9 +811,9 @@ w_not_first:
             mov     rf, sys_lba_lo
             ldn     rf
             plo     r7                  ; R7.0 = LBA bits 7-0
-            ldi     0
-            phi     r8                  ; R8.1 = 0 (drive/head, per
-                                        ; K_SECWRITE/K_SECREAD's contract)
+            mov     rf, sys_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = target unit
             mov     rf, sys_buf
             call    K_SECWRITE
             lbdf    sys_write_err
@@ -660,8 +833,9 @@ w_not_first:
             mov     rf, sys_lba_lo
             ldn     rf
             plo     r7
-            ldi     0
-            phi     r8
+            mov     rf, sys_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = target unit
             mov     rf, sys_verify_buf
             call    K_SECREAD
             lbdf    sys_verify_read_err
@@ -729,6 +903,9 @@ w_remain_no_borrow:
 sys_stat_err:
             ldi     SYSERR_STAT
             lbr     sys_exit
+sys_mbrsize_err:
+            ldi     SYSERR_MBRSIZE
+            lbr     sys_exit
 sys_toosmall_err:
             ldi     SYSERR_TOOSMALL
             lbr     sys_exit
@@ -764,6 +941,278 @@ sys_ok:     clc
 sys_ret:    rtn
 
 ;------------------------------------------------------------------
+; MBR path: the file starts 'MBR' (boot/mbr.asm's mbr.bin). Replaces
+; only the 446-byte boot code area of the unit's sector 0 -- the
+; partition table and $55 $AA are kept -- exactly as host-side
+; elfdos-sys -m does, except that this refuses a unit with no valid
+; partition table instead of creating an empty one. The file is
+; already in sys_buf (the magic-check read); its length is in
+; sys_read_len, and must be 6..446 bytes.
+;------------------------------------------------------------------
+sys_mbr_path:
+            mov     rf, sys_read_len
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = bytes read
+            ghi     r9
+            lbz     smp_len_hi0
+            xri     1
+            lbnz    sys_mbrsize_err     ; >= 512: too big
+            glo     r9
+            smi     $BF
+            lbdf    sys_mbrsize_err     ; > 446 ($1BE)
+            lbr     smp_len_ok
+smp_len_hi0:
+            glo     r9
+            smi     6
+            lbnf    sys_mbrsize_err     ; < 6: not even the header
+smp_len_ok:
+            ; nothing is written past sector 0: an overlap is impossible
+            mov     rf, sys_sectors_hi
+            ldi     0
+            str     rf
+            mov     rf, sys_sectors_lo
+            ldi     0
+            str     rf
+            call    sys_check_ptable    ; also leaves sector 0 in
+            lbnz    sys_exit            ; sys_verify_buf
+
+            call    sys_confirm_mbr     ; D = 0 (go) or 1 (cancelled)
+            lbnz    sys_cancelled_err
+
+            ; zero the boot code area (bytes 0..445)
+            mov     rf, sys_verify_buf
+            ldi     $01
+            phi     rc
+            ldi     $BE
+            plo     rc                  ; RC = 446
+smp_zero:
+            ldi     0
+            str     rf
+            inc     rf
+            dec     rc
+            glo     rc
+            lbnz    smp_zero
+            ghi     rc
+            lbnz    smp_zero
+
+            ; copy the new boot code over it
+            mov     rf, sys_read_len
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc                  ; RC = length (6..446)
+            mov     rf, sys_buf
+            mov     rd, sys_verify_buf
+smp_copy:
+            lda     rf
+            str     rd
+            inc     rd
+            dec     rc
+            glo     rc
+            lbnz    smp_copy
+            ghi     rc
+            lbnz    smp_copy
+
+            ; write sector 0
+            ldi     0
+            phi     r7
+            plo     r7
+            plo     r8
+            mov     rf, sys_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = target unit
+            mov     rf, sys_verify_buf
+            call    K_SECWRITE
+            lbdf    sys_write_err
+
+            ; read it back into sys_buf and compare all 512 bytes
+            ldi     0
+            phi     r7
+            plo     r7
+            plo     r8
+            mov     rf, sys_unit
+            ldn     rf
+            phi     r8
+            mov     rf, sys_buf
+            call    K_SECREAD
+            lbdf    sys_verify_read_err
+
+            mov     rf, sys_verify_buf
+            mov     r8, sys_buf
+            ldi     2
+            phi     rc
+            ldi     0
+            plo     rc
+            dec     rc                  ; RC = 511
+smp_verify:
+            lda     rf
+            stxd
+            lda     r8
+            irx
+            xor
+            lbnz    sys_mismatch_err
+            dec     rc
+            ghi     rc
+            xri     $ff
+            lbnz    smp_verify
+
+            mov     rf, sys_did_mbr
+            ldi     1
+            str     rf
+            ldi     0
+            lbr     sys_exit
+
+; sys_confirm_mbr: the MBR path's prompt; shares sys_confirm's Y/N read
+sys_confirm_mbr:
+            call    K_INMSG
+            db      "This will replace the boot code in unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      "'s MBR.",13,10
+            db      "Its partition table is kept.",13,10,0
+            lbr     sys_confirm_ask
+
+;------------------------------------------------------------------
+; Check the target unit's partition table before anything is written.
+; The image occupies LBA 1..sys_sectors, which must end below the start
+; of every used partition -- otherwise the install would overwrite the
+; front of a filesystem. A unit with no table at all (a partitionless
+; volume, e.g. a floppy mounted as MOUNT 1 0 A:) has no room for a
+; kernel: LBA 1 there is the volume's own FAT. Also notes whether
+; sector 0 carries ELF-DOS's MBR boot code (it begins "MBR"), so the
+; prompt can warn that the unit will not boot without it.
+;
+; Shared by the kernel and MBR paths (the MBR path sets sys_sectors to
+; 0 first, so the overlap test passes and only the table checks
+; apply). Also refuses sector 0 if it starts with a jump opcode ($EB
+; or $E9): that is a FAT boot sector, not a partition table -- it ends
+; in $55 $AA too, and its boot code sits where the entries would be, so
+; without this a partitionless volume could pass the entry checks.
+; Leaves sector 0 in sys_verify_buf.
+; Returns: D = 0 if OK, else SYSERR_PTREAD/NOPTABLE/OVERLAP.
+;------------------------------------------------------------------
+sys_check_ptable:
+            ldi     0
+            phi     r7
+            plo     r7
+            plo     r8                  ; LBA = 0
+            mov     rf, sys_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = unit
+            mov     rf, sys_verify_buf
+            call    K_SECREAD
+            lbdf    scp_ptread
+
+            ; NOT "mov rf, sys_verify_buf+510": Asm/02 v1.11 drops the
+            ; offset's low byte for a label in the same proc (the H
+            ; fixup keeps the bare label's low byte), giving +512 here.
+            ; A separate add16 is immune. See CLAUDE.md gotcha #25.
+            mov     rf, sys_verify_buf
+            add16   rf, 510
+            lda     rf
+            xri     $55
+            lbnz    scp_noptable
+            ldn     rf
+            xri     $AA
+            lbnz    scp_noptable
+
+            mov     rf, sys_verify_buf
+            ldn     rf
+            xri     $EB
+            lbz     scp_noptable        ; FAT boot sector (short jump)
+            ldn     rf
+            xri     $E9
+            lbz     scp_noptable        ; FAT boot sector (near jump)
+
+            mov     rf, sys_mbr_ok
+            ldi     0
+            str     rf
+            mov     rf, sys_verify_buf
+            lda     rf
+            xri     'M'
+            lbnz    sys_mbr_checked
+            lda     rf
+            xri     'B'
+            lbnz    sys_mbr_checked
+            ldn     rf
+            xri     'R'
+            lbnz    sys_mbr_checked
+            mov     rf, sys_mbr_ok
+            ldi     1
+            str     rf
+sys_mbr_checked:
+
+            mov     rf, sys_verify_buf  ; (+446 split out: gotcha #25)
+            add16   rf, 446
+            ldi     4
+            plo     r9                  ; R9.0 = entries left
+            ldi     0
+            plo     rc                  ; RC.0 = used entries seen
+sys_pt_loop:
+            add16   rf, 4               ; RF -> partition type
+            ldn     rf
+            plo     rb                  ; RB.0 = type
+            add16   rf, 4               ; RF -> start LBA (little-endian)
+            lda     rf
+            plo     r8                  ; R8.0 = start bits 7-0
+            lda     rf
+            phi     r8                  ; R8.1 = start bits 15-8
+            lda     rf
+            str     r2
+            ldn     rf
+            or
+            phi     rb                  ; RB.1 = bits 31-16, ORed
+            inc     rf
+            add16   rf, 4               ; RF -> next entry
+
+            glo     rb
+            lbz     sys_pt_next         ; type 0: unused
+            ghi     rb
+            lbnz    sys_pt_used         ; starts past LBA 65535: clear
+            ghi     r8
+            str     r2
+            glo     r8
+            or
+            lbz     sys_pt_next         ; start 0: not a real entry
+            ; sys_sectors < start, i.e. sys_sectors - start borrows
+            glo     r8
+            str     r2
+            mov     rd, sys_sectors_lo
+            ldn     rd
+            sm                          ; D = sectors.lo - start.lo
+            ghi     r8
+            str     r2                  ; (ghi/str/mov/ldn leave DF alone)
+            mov     rd, sys_sectors_hi
+            ldn     rd
+            smb                         ; D = sectors.hi - start.hi - borrow
+            lbdf    scp_overlap         ; no borrow: sectors >= start
+sys_pt_used:
+            glo     rc
+            adi     1
+            plo     rc
+sys_pt_next:
+            dec     r9
+            glo     r9
+            lbnz    sys_pt_loop
+
+            glo     rc
+            lbz     scp_noptable        ; a table with nothing in it
+
+            ldi     0
+            rtn
+scp_ptread:
+            ldi     SYSERR_PTREAD
+            rtn
+scp_noptable:
+            ldi     SYSERR_NOPTABLE
+            rtn
+scp_overlap:
+            ldi     SYSERR_OVERLAP
+            rtn
+
+;------------------------------------------------------------------
 ; sys_confirm: print the sector count and a clear warning, then
 ; require an explicit Y/N answer before the write pass is allowed to
 ; touch the disk. Same K_READ/K_TTY-based pattern as COPY's own
@@ -797,9 +1246,24 @@ sys_confirm:
             call    K_MSG
             call    K_INMSG
             db      " sector(s).",13,10
-            db      "This will OVERWRITE the boot device starting at",13,10
-            db      "LBA 1. A failed or interrupted write can leave",13,10
-            db      "the system unable to boot.",13,10
+            db      "This will OVERWRITE unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      " starting at LBA 1.",13,10
+            db      "A failed or interrupted write can leave that",13,10
+            db      "device unable to boot.",13,10,0
+
+            mov     rf, sys_mbr_ok
+            ldn     rf
+            lbnz    sys_confirm_ask
+            call    K_INMSG
+            db      "Note: unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      " has no ELF-DOS boot code in its MBR, so it",13,10
+            db      "will not boot until that is installed.",13,10,0
+sys_confirm_ask:
+            call    K_INMSG
             db      "Continue? (Y/N) ",0
 
             call    K_READ              ; D = character read (blocking)

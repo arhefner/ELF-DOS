@@ -685,6 +685,11 @@ boot_drive_present:
             add16       rf,rd
             ldn         rf                  ; D = sectors_per_cluster
             plo         r9
+            ; spc 0 means this is not a FAT volume (a zeroed, unformatted
+            ; or foreign partition). The log2 loop below looks for a 1
+            ; bit and would never find one -- a silent hang after the
+            ; banner. Treat it as absent, as progs/mount.asm does.
+            lbz         boot_drive_absent
 
             mov         rf,boot_spc
             glo         r9
