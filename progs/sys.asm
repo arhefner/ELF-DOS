@@ -15,6 +15,9 @@
 ; there is none, or if the image (LBA 1..sectors) would reach the start
 ; of any used partition -- on a partitionless volume LBA 1 is the FAT.
 ; It warns, but continues, if sector 0 lacks ELF-DOS's MBR boot code.
+; A lone digit 0-7 ("SYS 1") is a unit with the file missing and shows
+; usage, matching KSAVE's rule that a single digit is a unit; a file
+; really named "1" is given as ./1 (or /1 at a drive's root).
 ; KSAVE (progs/ksave.asm) is the reverse and does the same checks.
 ;
 ; Writes a kernel-full.bin (the same file this project's own Makefile
@@ -111,7 +114,27 @@ start:
             add16   rb, 2               ; RB = &argv[1]
             glo     rc
             smi     2
-            lbz     have_name_slot      ; SYS <file>: unit stays 0
+            lbnz    sys_two_args
+            ; SYS <x>: x is the file -- unless it is a lone digit 0-7,
+            ; which is a unit with the file missing ("sys 1"). Show
+            ; usage rather than look for a file named "1"; such a file
+            ; can still be given as ./1.
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = argv[1]
+            dec     rb                  ; RB = &argv[1] again
+            ldn     rf
+            smi     '0'
+            lbnf    have_name_slot      ; below '0': a filename
+            smi     8
+            lbdf    have_name_slot      ; above '7': a filename
+            inc     rf
+            ldn     rf
+            lbz     usage               ; exactly one digit: a unit
+            lbr     have_name_slot
+
+sys_two_args:
 
             ; SYS <unit> <file>: argv[1] must be one digit 0-7
             lda     rb
