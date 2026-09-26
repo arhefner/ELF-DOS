@@ -2,8 +2,8 @@
 ; mount.asm - attach an MBR partition to a drive letter at runtime
 ;
 ; MOUNT                              list the current drive mapping
-; MOUNT <partition> <letter>         mount MBR partition 1-4
-; MOUNT <unit> <partition> <letter>  ... from a specific block device
+; MOUNT <unit> <partition> <letter>  mount MBR partition 1-4 of a
+;                                    block device
 ;
 ; Partition 0 means "no partition table -- the volume starts at sector
 ; 0", which is how a floppy is laid out: MOUNT 1 0 A: mounts unit 1's
@@ -11,9 +11,12 @@
 ;
 ; The unit is a BIOS block-device number, 0-7. It is recorded in the
 ; drive's BPB (BPBBLK_DEV) at mount time and used for every subsequent
-; access to that drive -- see _set_lba_dev in kernel/fat.asm. Omitting
-; it means unit 0, which is the boot device and the only one a
-; single-device BIOS has.
+; access to that drive -- see _set_lba_dev in kernel/fat.asm. It is
+; required: a default would have to be either unit 0, which is not
+; necessarily the boot device on a multi-disk ROM, or the boot unit,
+; which would make the same MOUNT line (in an autoexec.bat, say) mount
+; a different device depending on which unit was booted. A single-
+; device BIOS has only unit 0.
 ;
 ; Replaces (at runtime) the fixed mapping boot/krnboot.asm's own
 ; partition-scan loop sets up at boot, where MBR entries 0-3 always
@@ -51,7 +54,7 @@
 ; strand the system with no way to run anything.
 ;
 ; Nothing stops the same partition being mounted under two letters at
-; once (MOUNT 4 E: then MOUNT 4 F:), and that is deliberate -- it is
+; once (MOUNT 0 4 E: then MOUNT 0 4 F:), and that is deliberate -- it is
 ; occasionally useful, and refusing it would mean scanning every other
 ; drive on every mount. It is safe but not free: the two letters keep
 ; independent current directories, and every switch between them
@@ -107,23 +110,16 @@ start:
             smi     2
             lbnf    mnt_do_list
 
-            ; Two accepted forms, distinguished by argc:
-            ;   MOUNT <partition> <letter>          (argc 3) unit 0
-            ;   MOUNT <unit> <partition> <letter>   (argc 4)
-            ; The short form is the common case on a single-device
-            ; machine and is the syntax that shipped first; the long
-            ; form names a block device explicitly.
-            mov     rf, mnt_argc
-            ldn     rf
-            smi     3
-            lbz     mnt_form_short
+            ; MOUNT <unit> <partition> <letter> (argc 4) is the only
+            ; mount form -- the unit is required (see the header). The
+            ; old MOUNT <partition> <letter> form, which meant unit 0,
+            ; gets the usage message rather than a guess.
             mov     rf, mnt_argc
             ldn     rf
             smi     4
             lbnz    mnt_usage
 
-            ; long form: argv[1] = unit, so the partition and letter
-            ; shift one place right
+            ; argv[1] = unit, argv[2] = partition, argv[3] = letter
             ldi     1
             call    mnt_argv_at             ; RF = argv[1]
             lda     rf
@@ -146,18 +142,9 @@ start:
             str     rf                      ; partition is argv[2]
             lbr     mnt_do_mount
 
-mnt_form_short:
-            mov     rf, mnt_unit
-            ldi     0
-            str     rf                      ; default device
-            mov     rf, mnt_argbase
-            ldi     1
-            str     rf                      ; partition is argv[1]
-            lbr     mnt_do_mount
-
 mnt_usage:
             call    K_INMSG
-            db      "Usage: MOUNT [[<unit 0-7>] <partition 1-4> <drive letter>]",13,10,0
+            db      "Usage: MOUNT [<unit 0-7> <partition 1-4> <drive letter>]",13,10,0
             ldi     1
             rtn
 
@@ -348,7 +335,7 @@ mnt_drive_ok:
 
             ; ---- pick the slot ----
             ; If this letter is already mounted, reuse ITS slot: that is
-            ; a remount, which is what "mount 3 e:" has always meant.
+            ; a remount, which is what "mount 0 3 e:" has always meant.
             ; Otherwise take the first free slot -- drive_letter[i] == 0.
             glo     rb
             call    drive_index_of

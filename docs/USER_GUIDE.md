@@ -63,10 +63,11 @@ F:     0     6,150,144
 
 Six drives can be mounted at once, and a letter is just a name: nothing
 stops you from calling a partition `W:` because it holds your work, or
-`M:` for music. To attach the second partition as `W:`:
+`M:` for music. `MOUNT` takes the device's unit number, the partition
+number, and the letter. To attach the second partition on unit 0 as `W:`:
 
 ```
-C:/> MOUNT 2 W:
+C:/> MOUNT 0 2 W:
 Mounted partition 2 as W:
 ```
 
@@ -81,11 +82,12 @@ Unmounted W:
 If you unmount the drive you are currently on, you are moved back to the
 drive ELF-DOS booted from.
 
-**Other devices.** Some machines have more than one storage device.
-`MOUNT` takes an optional unit number in front of the partition to say
-which one: `MOUNT 1 2 W:` means "unit 1, partition 2, as `W:`". Left out,
-the unit is 0 - the device ELF-DOS booted from, and the only one on most
-machines.
+**Other devices.** Some machines have more than one storage device, and
+the unit number says which one: `MOUNT 1 2 W:` means "unit 1, partition 2,
+as `W:`". Most machines have only unit 0. The unit is always required, so
+a `MOUNT` line means the same device whichever one the machine booted
+from; `MOUNT` lists each drive's unit, including the drives ELF-DOS set up
+from the boot device.
 
 Units run from 0 to 7, so up to eight devices can be attached to the
 machine. That is a separate limit from the six drive letters: the six is
@@ -271,7 +273,7 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | `STAT` | `STAT <path>` | Shows a file or directory's type, size, first cluster, and the date and time it was last written. |
 | `ATTRIB` | `ATTRIB [+H\|-H] <path...>` | Shows or changes a file's hidden attribute. With no `+H`/`-H`, shows whether each file is hidden. `+H` hides it; `-H` unhides it. |
 | `LABEL` | `LABEL [drive:] [text \| -d]` | Shows, sets, or removes a drive's volume label. `-d` deletes the label. |
-| `MOUNT` | `MOUNT [[unit] partition] [letter:]` | With no arguments, lists the drives in use. Otherwise attaches a partition to a drive letter. Partition `0` means "the whole device, no partition table," for floppies. See "Drives" above. |
+| `MOUNT` | `MOUNT [unit partition letter:]` | With no arguments, lists the drives in use. Otherwise attaches a partition of block device `unit` (0-7, always required) to a drive letter. Partition `0` means "the whole device, no partition table," for floppies. See "Drives" above. |
 | `UMOUNT` | `UMOUNT <letter:>` | Detaches a drive letter. The boot drive cannot be detached. |
 | `CHKDSK` | `CHKDSK [X:]` | Checks a drive for file system problems - lost clusters, files whose size does not match their data, and damaged directory entries - and prints a summary. This is a check only; it does not repair anything. |
 
