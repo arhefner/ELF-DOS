@@ -1386,6 +1386,17 @@ boot_io_read_bitbang:
             str         r8
 
 boot_io_done:
+            ; BOOT_UNIT: publish the unit this system booted from, for
+            ; programs whose default target is the boot device (SYS,
+            ; KSAVE). Written here, after every load, because the last
+            ; volatile-image sector may reach into the relay block.
+            mov         rf, boot_unit
+            ldn         rf
+            plo         r9
+            mov         rf, BOOT_UNIT
+            glo         r9
+            str         rf
+
             ; Phase 2: self-modify K_TYPE's/K_READ's own jump-table slots
             ; (kernel/kernel.asm, $011E/$0157) to a bare "LBR <real
             ; routine>", using the SAME value just computed into

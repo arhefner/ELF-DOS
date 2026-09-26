@@ -2,7 +2,7 @@
 ; ksave.asm - save the installed kernel to a file (the reverse of SYS)
 ;
 ; Usage: KSAVE [unit] [filename]
-;          unit      block device unit 0-7 (default 0, the boot device)
+;          unit      block device unit 0-7 (default: the boot unit)
 ;          filename  file to write (default kernel-full.bak)
 ;
 ; Reads the kernel image that SYS (or host-side elfdos-sys -k) wrote to
@@ -76,6 +76,14 @@ start:
             str     rf
             inc     rf
             glo     ra
+            str     rf
+
+            ; Default unit: the one the system booted from.
+            mov     rf, BOOT_UNIT
+            ldn     rf
+            plo     r9
+            mov     rf, ks_unit
+            glo     r9
             str     rf
 
             mov     rf, ks_argidx
@@ -568,7 +576,7 @@ bad_header:
 usage:
             call    K_INMSG
             db      "Usage: KSAVE [unit] [filename]",13,10
-            db      "  unit 0-7 (default 0), file default kernel-full.bak",13,10,0
+            db      "  unit 0-7 (default: the boot unit), file default kernel-full.bak",13,10,0
             ldi     1
             rtn
 

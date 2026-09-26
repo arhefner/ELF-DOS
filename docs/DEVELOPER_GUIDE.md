@@ -583,11 +583,12 @@ Reads or writes one raw 512-byte sector by its logical block address.
   23-16, `R7` high byte = bits 15-8, `R7` low byte = bits 7-0), `R8` high
   byte = the block device *unit* number, 0 to 7, `RF` = pointer to a
   512-byte buffer (the data to write, or where to put what's read).
-- Unit 0 is the device ELF-DOS booted from. When working on a drive's
+- The unit ELF-DOS booted from is the byte at `BOOT_UNIT` (usually 0,
+  but a multi-disk ROM can boot any unit). When working on a drive's
   own sectors (a volume label, a FAT, a directory), use the unit that
   drive lives on: a drive can be mounted from another device with
-  `MOUNT`, and writing unit 0 at that drive's addresses damages the boot
-  device instead. The unit is byte `BPBBLK_DEV` of the active drive's
+  `MOUNT`, and writing the boot unit at that drive's addresses damages
+  the boot device instead. The unit is byte `BPBBLK_DEV` of the active drive's
   parameter block (`BPB_DATA_PTR` in `kernel_api.inc`). A machine whose
   ROM supports only one device ignores the number entirely.
 - **Returns:** `DF` = 0/1. `R7`/`R8` are not preserved across the call.
@@ -630,6 +631,7 @@ Reads back the exit code of the last command that ran.
 | `DIR_STATE_LEN` | 9 | Size of the snapshot buffer `K_DIR_SAVE_STATE`/`K_DIR_RESTORE_STATE` use. |
 | `IO_TYPE_TARGET` | `PROG_BASE - 114` | Word naming the current console output routine. The kernel restores `K_TYPE` from it after every command, so a console hook must update it too; comparing it against `K_TYPE`'s address field also tells a hook whether output is redirected. |
 | `IO_READ_TARGET` | `PROG_BASE - 112` | The same, for console input and `K_READ`. |
+| `BOOT_UNIT` | `PROG_BASE - 115` | Byte: the block device unit the system booted from, where C:-F: live. Set at boot. |
 | `DRIVE_COUNT` | 6 | How many drives can be mounted at once. A drive index runs from 0 to `DRIVE_COUNT`-1 and says nothing about the drive's letter. |
 | `MBR_PART_COUNT` | 4 | Primary partitions in an MBR partition table. Deliberately separate from `DRIVE_COUNT`; a partition number is 1 to 4 however many drives exist. |
 | `ATTR_DIR` | `$10` | `DIRENT_ATTR` bit for a subdirectory. |

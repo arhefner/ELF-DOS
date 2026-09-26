@@ -327,8 +327,8 @@ length.
 | `VER` | `VER` | Prints the ELF-DOS version. |
 | `REBOOT` | `REBOOT` | Restarts the computer without turning it off. |
 | `MON` | `MON` | Drops into the built-in ROM monitor. |
-| `SYS` | `SYS [unit] <kernel-full.bin \| mbr.bin>` | Installs a new copy of ELF-DOS onto block device `unit` (0-7, default 0, the boot device). Given `mbr.bin`, it instead replaces the boot code in the device's MBR and keeps its partition table; a fresh card needs both (`SYS 1 mbr.bin`, then `SYS 1 kernel-full.bin`). Refuses a device with no partition table, or where the kernel would run into a partition. |
-| `KSAVE` | `KSAVE [unit] [filename]` | Saves the kernel installed on block device `unit` (0-7, default 0, the boot device) to a file (default `kernel-full.bak`) in the same format SYS installs, so `SYS kernel-full.bak` puts it back. |
+| `SYS` | `SYS [unit] <kernel-full.bin \| mbr.bin>` | Installs a new copy of ELF-DOS onto block device `unit` (0-7, default: the unit the system booted from). Given `mbr.bin`, it instead replaces the boot code in the device's MBR and keeps its partition table; a fresh card needs both (`SYS 1 mbr.bin`, then `SYS 1 kernel-full.bin`). Refuses a device with no partition table, or where the kernel would run into a partition. |
+| `KSAVE` | `KSAVE [unit] [filename]` | Saves the kernel installed on block device `unit` (0-7, default: the unit the system booted from) to a file (default `kernel-full.bak`) in the same format SYS installs, so `SYS kernel-full.bak` puts it back. |
 | `CLS` | `CLS` | Clears the screen. |
 
 ### Sending and receiving files

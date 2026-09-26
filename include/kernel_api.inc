@@ -140,6 +140,11 @@ RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
 IO_READ_TARGET:     equ     PROG_BASE-112   ; word: real f_uread/f_bread
 IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
 
+; BOOT_UNIT: the block device unit the system booted from (0-7), which
+; is where C:-F: live. Written by boot/krnboot.asm at boot. Programs
+; that act on the boot device (SYS, KSAVE) use it as their default unit.
+BOOT_UNIT:          equ     PROG_BASE-115   ; byte: boot block device unit
+
 ; K_GET_ERRORLEVEL: read the last command's exit code. A real jump-table
 ; call rather than a direct RUN_ERRORLEVEL read, unlike the shell's own
 ; internal access -- an ordinary program shouldn't bake a kernel/shell-

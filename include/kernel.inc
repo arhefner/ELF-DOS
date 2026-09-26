@@ -351,6 +351,11 @@ RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
 IO_READ_TARGET:     equ     PROG_BASE-112   ; word: current console read
 IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: current console type
 
+; BOOT_UNIT: the block device unit the system booted from, written by
+; boot/krnboot.asm (restated from kernel_api.inc, where programs get it).
+; Now the lowest relay address, so the relay floor is PROG_BASE-115.
+BOOT_UNIT:          equ     PROG_BASE-115   ; byte: boot block device unit
+
 ; K_TYPE/K_READ: the jump-table addresses (kernel/kernel.asm), restated
 ; here (matching kernel_api.inc's own identical constants -- "restated,
 ; not shared," same convention as every field above) so kernel-internal

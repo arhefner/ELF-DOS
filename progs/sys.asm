@@ -9,7 +9,7 @@
 ; survives -- the same rule as host-side elfdos-sys -m. Installing both
 ; on a fresh card is two runs: SYS n mbr.bin, then SYS n kernel-full.bin.
 ;
-; unit (2026-09-25): block device 0-7, default 0 (the boot device). A
+; unit (2026-09-25): block device 0-7, default the boot unit (BOOT_UNIT). A
 ; nonzero unit lets a second card be prepared from a running system.
 ; Before writing, SYS reads the unit's partition table and refuses if
 ; there is none, or if the image (LBA 1..sectors) would reach the start
@@ -100,6 +100,14 @@ SYSERR_STAT:        equ     10  ; directory-entry lookup failed (not
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
+            ; Default unit: the one the system booted from.
+            mov     rf, BOOT_UNIT
+            ldn     rf
+            plo     r9
+            mov     rf, sys_unit
+            glo     r9
+            str     rf
+
             ; RA = argv pointer, RC = argc (RC.0 alone is enough --
             ; argc never exceeds ARGV_MAX_ARGS). argv[0] is this
             ; program's own name; argv[1] is the filename argument.
@@ -360,7 +368,7 @@ open_error:
 usage:
             call    K_INMSG
             db      "Usage: SYS [unit] <kernel-full.bin | mbr.bin>",13,10
-            db      "  unit 0-7, default 0 (the boot device)",13,10,0
+            db      "  unit 0-7, default: the boot unit",13,10,0
             ldi     1                   ; exit code 1 = error
             rtn
 
