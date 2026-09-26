@@ -88,13 +88,25 @@
 ; Provides a visible signature when the sector is hex-dumped.
 ;--------------------------------------------------------------
             db          'M','B','R'     ; 3-byte magic signature
-            db          0,0,0           ; reserved, pad to 6 bytes
+mbr_unit:   db          0               ; boot unit, saved at entry
+            db          0,0             ; reserved, pad to 6 bytes
 
 ;--------------------------------------------------------------
 ; MBR entry point - $0106
-; On entry: SCRT initialized by ROM, small stack at $00FF
+; On entry: SCRT initialized by ROM, small stack at $00FF, and R8.1 =
+; the unit this sector was read from. BIOSes that support more than one
+; unit pass it there (with drive/head bits above it, such as $E0, which
+; the mask removes); single-unit BIOSes leave 0 or $E0 there, which is
+; unit 0. It is saved before any BIOS call, since some BIOSes' own
+; f_idereset clobbers R8, and handed to krnboot in R8.1 so that the
+; whole boot comes from the same unit.
 ;--------------------------------------------------------------
-mbr_main:   call        f_freemem       ; RF = address of highest RAM byte
+mbr_main:   mov         rf,mbr_unit     ; save boot unit (mov clobbers D,
+            ghi         r8              ;  so it must come first)
+            ani         $1F
+            str         rf
+
+            call        f_freemem       ; RF = address of highest RAM byte
             mov         r2,rf           ; move stack pointer to top of RAM
 
             call        f_idereset      ; reset IDE/SD card subsystem
@@ -105,7 +117,9 @@ mbr_main:   call        f_freemem       ; RF = address of highest RAM byte
             ldi         0
             phi         r7              ; R7.1 = LBA bits 15-8 = 0
             plo         r8              ; R8.0 = LBA bits 23-16 = 0
-            phi         r8              ; R8.1 = drive/head = 0
+            mov         rf,mbr_unit
+            ldn         rf
+            phi         r8              ; R8.1 = boot unit
 
             mov         ra,KERN_LOAD    ; RA = current destination,
                                         ; starts at $4400
@@ -123,6 +137,9 @@ mbr_load_loop:
             glo         rc
             lbnz        mbr_load_loop
 
+            mov         rf,mbr_unit     ; R8.1 = boot unit for krnboot,
+            ldn         rf              ;  reloaded rather than trusting
+            phi         r8              ;  the BIOS to have preserved it
             lbr         KERN_ENTRY      ; jump to $4406, kernel bootstrap
 
 ;--------------------------------------------------------------

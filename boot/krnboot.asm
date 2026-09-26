@@ -85,6 +85,13 @@
 #define     NV_CNT_ADDR $4409           ; non-volatile sector count in header
 #define     LAST_ADDR   $440B           ; bytes used in the last NV sector
 
+; Page-zero console vectors: a rewritable 3-byte lbr for console output
+; and input, set up by the BIOS at reset. These are the locations the
+; 1802/MAX BIOS (the multi-disk mBIOS) uses; earlier mBIOS versions had
+; them at $003C/$003F, where the current BIOS keeps other variables.
+#define     CON_TYPE_VEC $0036          ; console output vector
+#define     CON_READ_VEC $0039          ; console input vector
+
             org         $4400
 
 ;--------------------------------------------------------------
@@ -114,9 +121,18 @@
 
 ;--------------------------------------------------------------
 ; Bootstrap entry point (reached via the lbr at $4406)
-; On entry: SCRT initialized, stack at top of RAM (set by the MBR)
+; On entry: SCRT initialized, stack at top of RAM (set by the MBR),
+; R8.1 = the unit the MBR was loaded from. Everything this loads comes
+; from that unit, and its partitions become C:-F:. An older MBR that
+; does not pass the unit leaves R8.1 = 0 here, so it boots unit 0 as
+; before.
 ;--------------------------------------------------------------
 boot_main:
+            mov         rf,boot_unit    ; save boot unit (mov clobbers D,
+            ghi         r8              ;  so it must come first)
+            ani         $1F
+            str         rf
+
             ; read kernel sector count from our own header
             ldi         CNT_ADDR.1
             phi         rf
@@ -140,7 +156,9 @@ boot_go:    ldi         6
             ldi         0
             phi         r7              ; R7.1 = 0
             plo         r8              ; R8.0 = 0
-            phi         r8              ; R8.1 = 0
+            mov         rf,boot_unit
+            ldn         rf
+            phi         r8              ; R8.1 = boot unit
             mov         ra,KERN_BASE
             call        load_sectors    ; RC sectors -> [RA]; R7 advances
                                         ; past them, ready for the
@@ -525,8 +543,10 @@ boot_drive_loop:
             ldi         0
             plo         r7
             phi         r7
-            plo         r8
-            phi         r8                  ; LBA = 0
+            plo         r8                  ; LBA = 0
+            mov         rf,boot_unit
+            ldn         rf
+            phi         r8                  ; R8.1 = boot unit
 
             mov         rf,boot_scratch
             call        f_ideread
@@ -672,6 +692,9 @@ boot_drive_present:
             str         rf                  ; drive_present[idx] = 1
 
 ; ---- Step 3: read VBR (this partition's first sector) ----
+            mov         rf,boot_unit
+            ldn         rf
+            phi         r8                  ; R8.1 = boot unit
             mov         rf,boot_scratch
             call        f_ideread
             lbdf        boot_kern_err       ; read error
@@ -1124,10 +1147,9 @@ boot_drive_copy:
             str         rf
 
             ; bpb_dev (1 byte) -- the block device this partition lives
-            ; on. Always 0 here: every BIOS this runs on boots from unit
-            ; 0 (MiniROM's own anyboot zeroes R7/R8.0 and never touches
-            ; R8.1), and krnboot only ever scans the device it was
-            ; itself loaded from. MOUNT is what sets a nonzero unit.
+            ; on: the boot unit, since krnboot only ever scans the device
+            ; it was itself loaded from (passed by the MBR in R8.1, 0 with
+            ; an older MBR). MOUNT is what adds partitions on other units.
             ;
             ; Written explicitly rather than left to the zero-filled
             ; image: _switch_drive copies this into the active block and
@@ -1141,7 +1163,8 @@ boot_drive_copy:
             ldn         rd
             plo         rf
             add16       rf,BPBBLK_DEV
-            ldi         0
+            mov         rd,boot_unit        ; RD is reloaded just below
+            ldn         rd
             str         rf
 
             ; drive_letter[idx] = BOOT_DRIVE_FIRST + idx, giving C:, D:,
@@ -1235,9 +1258,9 @@ boot_letter_store:
 ;--------------------------------------------------------------
 ; IO_TYPE_TARGET/IO_READ_TARGET detection (see kernel.inc's own header
 ; comment on these two fixed words for the full design/motivation).
-; mBIOS stores a rewritable 3-byte lbr vector at $003C (type)/$003F
-; (read), already pointing at the correct real routine by the time
-; anything else runs -- if the byte there is $C0 (the LBR opcode), the
+; mBIOS stores a rewritable 3-byte lbr vector at CON_TYPE_VEC (type)
+; and CON_READ_VEC (read), already pointing at the correct real routine
+; by the time anything else runs -- if the byte there is $C0 (the LBR opcode), the
 ; 2 bytes right after it ARE the real target, copy them directly.
 ; Classic BIOS has no such vector, so a non-$C0 byte falls back to
 ; checking RE's high byte the SAME WAY classic BIOS's own type:/read:
@@ -1281,19 +1304,19 @@ boot_letter_store:
             str         rf                  ; boot_re_shifted = RE.1
                                             ; >> 1 (echo bit discarded)
 
-            ldi         high $003C
+            ldi         high CON_TYPE_VEC
             phi         rf
-            ldi         low $003C
+            ldi         low CON_TYPE_VEC
             plo         rf
-            ldn         rf                  ; D = byte at $003C
+            ldn         rf                  ; D = byte at CON_TYPE_VEC
             xri         $C0
             lbnz        boot_io_type_fallback
 
             mov         r8, IO_TYPE_TARGET  ; R8 = dest, set BEFORE the
                                             ; reads below (gotcha #4)
-            inc         rf                  ; RF = $003D
+            inc         rf                  ; RF = CON_TYPE_VEC+1
             lda         rf                  ; D = vector's high byte,
-                                            ; RF -> $003E
+                                            ; RF -> CON_TYPE_VEC+2
             str         r8
             inc         r8
             lda         rf                  ; D = vector's low byte
@@ -1322,19 +1345,19 @@ boot_io_type_bitbang:
             str         r8
 
 boot_io_read_check:
-            ldi         high $003F
+            ldi         high CON_READ_VEC
             phi         rf
-            ldi         low $003F
+            ldi         low CON_READ_VEC
             plo         rf
-            ldn         rf                  ; D = byte at $003F
+            ldn         rf                  ; D = byte at CON_READ_VEC
             xri         $C0
             lbnz        boot_io_read_fallback
 
             mov         r8, IO_READ_TARGET  ; R8 = dest, set BEFORE the
                                             ; reads below (gotcha #4)
-            inc         rf                  ; RF = $0040
+            inc         rf                  ; RF = CON_READ_VEC+1
             lda         rf                  ; D = vector's high byte,
-                                            ; RF -> $0041
+                                            ; RF -> CON_READ_VEC+2
             str         r8
             inc         r8
             lda         rf                  ; D = vector's low byte
@@ -1465,6 +1488,7 @@ boot_ver_buf:       ds      6           ; decimal scratch (max "65535"+null)
 ; RE.1 with the local-echo bit (bit 0) shifted off, computed once and
 ; reused for both the type and read fallback checks.
 boot_re_shifted:    db      0
+boot_unit:          db      0           ; unit booted from (R8.1 at entry)
 
 boot_scratch:       ds      512
 

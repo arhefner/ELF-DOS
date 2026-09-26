@@ -317,8 +317,9 @@ RUN_ERRORLEVEL:     equ     PROG_BASE-110   ; byte: last command's exit
 ; IO_TYPE_TARGET/IO_READ_TARGET: the real console I/O routine's address,
 ; auto-detected ONCE at boot by boot/krnboot.asm's own boot_init2 (see
 ; its own header comment for the full mBIOS-vs-classic-BIOS detection
-; logic) -- mBIOS stores a rewritable lbr vector at $003C (type)/$003F
-; (read) already pointing at the correct real routine; classic BIOS has
+; logic) -- mBIOS stores a rewritable lbr vector at $0036 (type)/$0039
+; (read), $003C/$003F in earlier versions, already pointing at the
+; correct real routine (krnboot's CON_TYPE_VEC/CON_READ_VEC); classic BIOS has
 ; no such vector, so krnboot falls back to checking RE's high byte the
 ; same way classic BIOS's own type:/read: entry points do.
 ;
