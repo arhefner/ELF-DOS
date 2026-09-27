@@ -37,6 +37,7 @@ for %%f in (progs\*.asm) do (
     set "skip="
     if /I "!name!"=="template"   set "skip=1"
     if /I "!name!"=="printenv"   set "skip=1"
+    if /I "!name!"=="which"      set "skip=1"
     if /I "!name!"=="export"     set "skip=1"
     if /I "!name!"=="unset"      set "skip=1"
     if /I "!name!"=="ls"         set "skip=1"

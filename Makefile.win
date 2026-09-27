@@ -176,7 +176,7 @@ INCS =  include\bios.inc    \
 
 # ---- The progs\*.asm that link against lib\ -- see build_progs.bat's
 # own exclusion list, which must be kept in sync with this set ----
-SPECIAL_BINS = bin\printenv bin\export bin\unset \
+SPECIAL_BINS = bin\printenv bin\which bin\export bin\unset \
         bin\ls bin\edlin bin\less bin\hexdump bin\move bin\xcopy bin\shell \
         bin\yr bin\ys bin\termsize bin\mr bin\ms \
         bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
@@ -359,6 +359,13 @@ test\bin\envtest: test\envtest.prg lib\env.prg lib\drives.prg test\bin
 
 progs\printenv.prg: progs\printenv.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) printenv.asm
+
+progs\which.prg: progs\which.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) which.asm
+
+bin\which: progs\which.prg lib\env.prg lib\pathstr.prg lib\drives.prg bin
+	$(LINK) $(LFLAGS) -o bin\which progs\which.prg lib\env.prg lib\pathstr.prg lib\drives.prg
+	-del /F /Q bin\which.lkb
 
 bin\printenv: progs\printenv.prg lib\env.prg lib\drives.prg bin
 	$(LINK) $(LFLAGS) -o bin\printenv progs\printenv.prg lib\env.prg lib\drives.prg

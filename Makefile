@@ -367,6 +367,10 @@ bin/printenv: progs/printenv.prg lib/env.prg lib/drives.prg | bin
 	$(LINK) $(LFLAGS) -o bin/printenv progs/printenv.prg lib/env.prg lib/drives.prg
 	rm -f bin/printenv.lkb
 
+bin/which: progs/which.prg lib/env.prg lib/pathstr.prg lib/drives.prg | bin
+	$(LINK) $(LFLAGS) -o bin/which progs/which.prg lib/env.prg lib/pathstr.prg lib/drives.prg
+	rm -f bin/which.lkb
+
 bin/export: progs/export.prg lib/env.prg lib/drives.prg | bin
 	$(LINK) $(LFLAGS) -o bin/export progs/export.prg lib/env.prg lib/drives.prg
 	rm -f bin/export.lkb

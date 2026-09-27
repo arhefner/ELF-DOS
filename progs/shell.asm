@@ -1765,6 +1765,8 @@ argv_at:
 ; overrunning past RUN_PATH's own 64-byte allocation (which sits just
 ; below RUN_ARGV_TABLE -- an unbounded copy here would silently
 ; corrupt the argument table already written by the tokenizer above).
+; progs/which.asm repeats this search to report what a name resolves
+; to -- change it too if the search order here ever changes.
 ;------------------------------------------------------------------
             mov     rf, ra
 scan_slash:
