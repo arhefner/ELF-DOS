@@ -72,6 +72,8 @@
 ;                  path -- "name_copy[0..prefix_len) + matched name",
 ;                  written fresh by each glob_next call, same 64-byte
 ;                  bound/truncation policy)
+;   offset 141:    flags         (glob_init's D argument, 2026-09-28:
+;                  GLOB_HIDDEN = also match hidden/system entries)
 ;
 ; Register-liveness discipline: K_DIR_OPEN/K_DIR_READ have no
 ; documented "Modifies" list in include/kernel_api.inc at all -- this
@@ -98,6 +100,8 @@ GLOB_CTX_NAME:         equ     13
 GLOB_CTX_NAME_MAX:     equ     63          ; 63 chars + 1 NUL = 64 bytes
 GLOB_CTX_RESULT:       equ     77          ; 13 + 64
 GLOB_CTX_RESULT_MAX:   equ     63
+GLOB_CTX_FLAGS:        equ     141         ; 77 + 64
+GLOB_SKIP_ATTRS:       equ     ATTR_HIDDEN|$04 ; hidden or system
 
             extrn   glob_match
             extrn   gi_ctx
@@ -158,11 +162,21 @@ ig_no:
 ;          pointless)
 ;          RD = pointer to a caller-owned GLOB_CTX_LEN-byte context
 ;          block (need not be pre-zeroed)
+;          D  = flags (2026-09-28): 0 skips hidden and system entries,
+;          as MS-DOS wildcards did; GLOB_HIDDEN matches them too. Set
+;          it with ldi AFTER loading RF/RD -- a mov clobbers D.
 ; Returns: DF = 0 on success, DF = 1 if the directory prefix doesn't
 ;          resolve (bad intermediate path component)
 ; Modifies: everything (R7-RD)
 ; ----------------------------------------------------------------
             proc    glob_init
+
+            plo     r7                  ; R7.0 = flags (D, before any
+                                        ; mov can clobber it)
+            mov     r8, rd
+            add16   r8, GLOB_CTX_FLAGS
+            glo     r7
+            str     r8                  ; context.flags = D on entry
 
             mov     r8, gi_ctx
             ghi     rd
@@ -461,6 +475,24 @@ gn_loop:
             mov     rd, gn_dotdot
             call    f_strcmp
             lbz     gn_loop             ; skip ".."
+
+            ; hidden/system entry: skipped unless glob_init was given
+            ; GLOB_HIDDEN (MS-DOS wildcards never matched them)
+            mov     rf, gn_dirent
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte
+            ani     GLOB_SKIP_ATTRS
+            lbz     gn_visible
+            mov     r8, gn_ctx
+            lda     r8
+            phi     rf
+            ldn     r8
+            plo     rf                  ; RF = context base
+            add16   rf, GLOB_CTX_FLAGS
+            ldn     rf                  ; D = flags
+            ani     GLOB_HIDDEN
+            lbz     gn_loop             ; hidden, not wanted: skip
+gn_visible:
 
             mov     r8, gn_ctx
             lda     r8

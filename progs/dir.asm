@@ -252,6 +252,7 @@ dir_vol_after:
             plo     rd
             mov     rf, rd
             mov     rd, dir_glob_ctx
+            ldi     0                   ; flags: skip hidden/system
             call    glob_init
             lbdf    not_found           ; bad prefix path -- same
                                         ; message as any other bad path
@@ -848,6 +849,7 @@ dma_loop:
             plo     rd
             mov     rf, rd
             mov     rd, dir_glob_ctx
+            ldi     0                   ; flags: skip hidden/system
             call    glob_init
             lbdf    dma_bad_path        ; bad prefix path: this argv
                                         ; entry's own error

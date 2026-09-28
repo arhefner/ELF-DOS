@@ -430,6 +430,11 @@ ATTR_HIDDEN:    equ     $02         ; DIRENT_ATTR bit set for hidden
                                     ; from kernel.inc, same "decoupled,
                                     ; not #included" reasoning as
                                     ; ATTR_DIR above
+ATTR_RDONLY:    equ     $01         ; DIRENT_ATTR bit set for read-only
+                                    ; files (2026-09-28): K_FILE_OPEN
+                                    ; refuses mode 1/2 and K_FILE_DELETE
+                                    ; refuses the file; reading and
+                                    ; renaming are allowed, as in MS-DOS
 
 ; ---- BIOS passthroughs (see include/bios.inc for each one's convention) ----
 ; Calling through here rather than directly into BIOS means a program

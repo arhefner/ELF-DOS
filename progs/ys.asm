@@ -389,6 +389,7 @@ ysrb_loop:
             plo     rd
             mov     rf, rd
             mov     rd, ys_glob_ctx
+            ldi     0                   ; flags: skip hidden/system
             call    glob_init
             lbdf    ysrb_bad_path       ; bad prefix path: this
                                         ; argv entry's own error

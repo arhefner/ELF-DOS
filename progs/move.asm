@@ -299,6 +299,7 @@ move_loop_sources:
             plo     rd
             mov     rf, rd
             mov     rd, move_glob_ctx
+            ldi     0                   ; flags: skip hidden/system
             call    glob_init
             lbdf    move_src_bad_path   ; bad prefix path: this argv
                                         ; entry's own error
@@ -637,6 +638,30 @@ mo_done:
             rtn
 
 ;------------------------------------------------------------------
+; path_is_readonly: is RF an existing, read-only file? (2026-09-28)
+; Uses dstchk_result as scratch (only live inside check_dst_is_dir).
+; Args:    RF = path
+; Returns: D != 0 if the path exists, is not a directory, and has
+;          ATTR_RDONLY set; D = 0 otherwise
+; Modifies: everything (calls K_STAT)
+;------------------------------------------------------------------
+path_is_readonly:
+            mov     rd, dstchk_result
+            call    K_STAT
+            lbdf    pir_no              ; doesn't exist
+            mov     rf, dstchk_result+DIRENT_ATTR
+            ldn     rf
+            ani     ATTR_DIR|ATTR_RDONLY
+            xri     ATTR_RDONLY         ; D = 0 only for "read-only file"
+            lbz     pir_yes
+pir_no:
+            ldi     0
+            rtn
+pir_yes:
+            ldi     1
+            rtn
+
+;------------------------------------------------------------------
 ; move_fallback_copy_delete: genuine cross-directory/cross-drive
 ; relocation -- copy src_ptr's data to real_dst, then delete src_ptr.
 ; Single-file only (a directory source is rejected via the ordinary
@@ -651,6 +676,23 @@ mo_done:
 ; Modifies: everything (R7-RD)
 ;------------------------------------------------------------------
 move_fallback_copy_delete:
+            ; read-only source: it could be copied but never deleted,
+            ; leaving a duplicate -- refuse up front (MS-DOS "Access
+            ; denied"). A same-directory rename never gets here: that
+            ; is allowed on a read-only file, as in MS-DOS.
+            mov     rf, src_ptr
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    path_is_readonly
+            lbz     mfc_src_not_ro
+            call    K_INMSG
+            db      "Access denied.",13,10,0
+            stc
+            rtn
+mfc_src_not_ro:
 ;------------------------------------------------------------------
 ; If real_dst already exists, confirm the overwrite before touching
 ; anything. Checked before either file is opened, so a "no" here
@@ -676,6 +718,22 @@ move_fallback_copy_delete:
 
             mov     rd, mv_dst_fcb
             call    K_FILE_CLOSE
+
+            ; read-only destination: refuse before asking anything
+            ; (MS-DOS "Access denied")
+            mov     rf, real_dst
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    path_is_readonly
+            lbz     mfc_dst_not_ro
+            call    K_INMSG
+            db      "Access denied.",13,10,0
+            stc
+            rtn
+mfc_dst_not_ro:
 
             call    K_INMSG
             db      "Overwrite ",0

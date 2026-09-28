@@ -104,7 +104,7 @@ behind everything summarized here.
 | `HEXDUMP [-c] <file>` | `hexdump -C`-style hex/ASCII view of a file, paged like `LESS` (`-c` prints it straight through) |
 | `COPY [-y] <src> <dst>` | Copy file(s); into a directory, wildcards, overwrite prompt |
 | `MOVE <src> <dst>` | Move/rename file(s) (fast rename when possible) |
-| `XCOPY [switches] <src> <dst>` | Recursive directory copy (`-s`/`-e`/`-y`/`-d`/`-c`/`-v`/`-h`) |
+| `XCOPY [switches] <src> <dst>` | Recursive directory copy (`-s`/`-e`/`-y`/`-d`/`-c`/`-v`/`-h`/`-r`) |
 | `DEL <file...>` | Delete file(s) (wildcards supported) |
 | `REN <path> <newname>` | Rename a file or directory |
 | `MD <path>` / `RD <path>` | Create / remove an empty subdirectory |
@@ -112,7 +112,7 @@ behind everything summarized here.
 | `MOUNT [[unit] part] [letter:]` | List mounted drives, or attach a partition to a letter |
 | `UMOUNT <letter:>` | Detach a drive letter |
 | `TOUCH <file...>` | Update a file's last-write time to now |
-| `ATTRIB [+H\|-H] <path...>` | Show or set the hidden attribute |
+| `ATTRIB [+R\|-R] [+H\|-H] <path...>` | Show or set the read-only and hidden attributes |
 | `LABEL [drive:] [text\|-d]` | Show, set, or clear a volume label |
 | `CHKDSK [drive:]` | Check a volume for filesystem consistency errors |
 | `EDLIN <file>` | `edlin`-style line editor (list/insert/delete/search/replace/move/copy) |
@@ -151,8 +151,8 @@ See `CLAUDE.md` for the fuller running notes and roadmap.
 - An executable-permission bit - attempted and hardware-tested, but the
   user judged it not worth the added complexity in practice; the work is
   preserved on the (unmerged) `exe_flag` branch.
-- Further DOS-style file attributes beyond hidden (`ATTRIB` only toggles
-  `+H`/`-H` today).
+- The system and archive attributes (`ATTRIB` handles read-only and
+  hidden).
 
 ## Architecture
 

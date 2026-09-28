@@ -213,7 +213,8 @@ Opens a file for reading, or for reading and writing.
 - **Returns:** `DF` = 0/1. `D` is not meaningful on return. The caller
   already has the FCB pointer it passed in. `DF` = 1 also covers an FCB
   that straddles a page boundary (see above), which is a caller bug
-  rather than a filesystem condition.
+  rather than a filesystem condition, and an existing file with
+  `ATTR_RDONLY` set opened in any mode other than 0 (read).
 
 **`K_FILE_CLOSE`**
 Closes a file previously opened with `K_FILE_OPEN`.
@@ -241,10 +242,12 @@ File positions, offsets, and sizes are tracked as full 32-bit values.
   position is left unchanged in that case.
 
 **`K_FILE_DELETE`**
-Deletes a file. Refuses to delete a directory.
+Deletes a file. Refuses to delete a directory or a read-only file.
 - **Args:** `RF` = path.
-- **Returns:** `DF` = 0/1 (not found, is a directory, or an invalid
-  path component are all errors).
+- **Returns:** `DF` = 0/1 (not found, is a directory, has `ATTR_RDONLY`
+  set, or an invalid path component are all errors). `D` doesn't say
+  which; a program that wants to print "Access denied" can `K_STAT` the
+  path after a failure and test the bit, as `DEL` does.
 
 **`K_FILE_RENAME`**
 Renames a file or directory. The new name must stay within the same
@@ -306,7 +309,8 @@ Returns the next entry in a directory listing started by `K_DIR_OPEN`.
 
   `DIRENT_LEN` (139) is the total buffer size to declare. `ATTR_DIR`
   (`$10`) is set in `DIRENT_ATTR` for a subdirectory; `ATTR_HIDDEN`
-  (`$02`) is set for a hidden entry.
+  (`$02`) is set for a hidden entry; `ATTR_RDONLY` (`$01`) for a
+  read-only file.
 
 **`K_DIR_SAVE_STATE`** / **`K_DIR_RESTORE_STATE`**
 `K_DIR_OPEN`/`K_DIR_READ` share one scan position, so only one directory
@@ -636,6 +640,7 @@ Reads back the exit code of the last command that ran.
 | `MBR_PART_COUNT` | 4 | Primary partitions in an MBR partition table. Deliberately separate from `DRIVE_COUNT`; a partition number is 1 to 4 however many drives exist. |
 | `ATTR_DIR` | `$10` | `DIRENT_ATTR` bit for a subdirectory. |
 | `ATTR_HIDDEN` | `$02` | `DIRENT_ATTR` bit for a hidden entry. |
+| `ATTR_RDONLY` | `$01` | `DIRENT_ATTR` bit for a read-only file. `K_FILE_OPEN` refuses modes 1 and 2 and `K_FILE_DELETE` refuses the file; reading and renaming are allowed. Ignored on a directory. |
 
 ## Library Modules
 
@@ -654,7 +659,7 @@ up as an unresolved `drive_letter_of` at link time.
 |---|---|
 | `drives.asm` | Converting between a drive index and its letter, either way. |
 | `env.asm` | Reading, setting, and removing environment variables. A whole `NAME=VALUE` line is limited to `ENV_LINE_MAX` (128) bytes. |
-| `file_glob.asm` | Wildcard (`*`/`?`) matching that can be paused and resumed one match at a time. |
+| `file_glob.asm` | Wildcard (`*`/`?`) matching that can be paused and resumed one match at a time. `glob_init` takes a flags byte in `D`: 0 skips hidden and system entries, as MS-DOS wildcards did; `GLOB_HIDDEN` (`include/file_glob.inc`) matches them too. Load it with `ldi` after setting `RF`/`RD`, since a `mov` clobbers `D`. |
 | `fmt32.asm` | Formatting a large (32-bit) number with comma grouping. |
 | `heap_bump.asm` | A simple, fast memory allocator with no per-item `free`. |
 | `heap_malloc.asm` | A general-purpose allocator, with `free` and coalescing of freed blocks. |

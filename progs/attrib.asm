@@ -1,42 +1,34 @@
 ;
-; attrib.asm - show or change the hidden attribute on one or more files
+; attrib.asm - show or change the read-only and hidden attributes
 ;
-; Usage: ATTRIB [+H|-H] <path...>
+; Usage: ATTRIB [+R|-R] [+H|-H] <path...>
 ;
-; Bare "ATTRIB <path...>" (no +H/-H) shows each path's current hidden
-; state, one line per path: "H  <path>" (hidden) or "-  <path>" (not).
-; "ATTRIB +H <path...>" sets the hidden bit; "ATTRIB -H <path...>"
-; clears it -- silent on success for every argument, per this project's
-; "no news is good news" convention (matches DEL/COPY/MD/RD/REN).
+; Bare "ATTRIB <path...>" shows each path's current attributes, one
+; line per path: two columns, R (read-only) and H (hidden), each shown
+; as its letter or "-", then the path -- e.g. "R-  <path>".
+; Any number of leading +R/-R/+H/-H flags (case-insensitive, one per
+; argv token, in any order) set or clear those bits on every path that
+; follows -- silent on success, per this project's "no news is good
+; news" convention (matches DEL/COPY/MD/RD/REN). A token that isn't
+; exactly one of those four ends the flags and is the first path.
 ; Multiple paths are handled independently: a failure on one prints
 ; its own "Not found: " and the rest still run (matching DEL's own
 ; precedent); the final exit code reflects whether ANY argument failed.
 ;
+; Read-only (2026-09-28) works as in MS-DOS: the kernel refuses to open
+; a read-only file for write or append, or to delete it; reading and
+; renaming it are allowed. The bit on a directory is ignored.
+;
 ; Wildcard support (2026-07-27, redesigned): each argv entry is
 ; checked via lib/file_glob.asm's is_glob -- a plain path is processed
-; directly, exactly as before; a "*"/"?" pattern is expanded via
-; glob_init/glob_next and every match processed the same way,
-; individually. This replaces the old design (the shell's own
-; tokenizer pre-expanding "attrib +h *.bak" into one argv entry per
-; match before ATTRIB ever ran) -- see lib/file_glob.asm's own header
-; for why: the old design had a hard ARGV_MAX_ARGS=16 ceiling. A
-; pattern matching zero files falls back to attempting the literal,
-; unexpanded text (nullglob-off) -- it will then simply report "Not
-; found" like any other missing literal path.
+; directly; a "*"/"?" pattern is expanded via glob_init/glob_next and
+; every match processed the same way, individually. A pattern matching
+; zero files falls back to attempting the literal, unexpanded text
+; (nullglob-off) -- it will then simply report "Not found" like any
+; other missing literal path.
 ;
-; Built on the new K_FILE_SETATTR kernel primitive (a general set/
-; clear-mask attribute-byte rewrite) for apply mode and the existing
-; K_STAT for show mode. Deliberately scoped to just the hidden bit for
-; now -- K_FILE_SETATTR itself is general, so a future +R/-R or +S/-S
-; would only need more argument parsing here, no kernel change.
-;
-; "+H"/"-H" (case-insensitive -- "+h"/"-h" work identically, 2026-07-23)
-; is matched as an exact 2-character-plus-NUL token in argv[1] (same
-; shape as progs/mr.asm's own "-u"/"-b" check) -- not combined-cluster
-; parsing like LS's "-lF", since a signed single-letter switch doesn't
-; cluster the same way. Anything else in argv[1] (including no argv[1]
-; at all matching the pattern) means show mode, with argv[1] itself
-; treated as the first path.
+; Built on K_FILE_SETATTR (a general set/clear-mask attribute-byte
+; rewrite) for apply mode and K_STAT for show mode.
 ;
 
 #include    include/opcodes.def
@@ -68,94 +60,6 @@ start:
             smi     2
             lbnf    usage               ; argc < 2: nothing at all
 
-            mov     rb, ra
-            add16   rb, 2               ; RB = &argv[1]
-            lda     rb
-            phi     rd
-            ldn     rb
-            plo     rd                  ; RD = argv[1] pointer
-
-            mov     rf, rd
-            ldn     rf                  ; D = argv[1][0]
-            plo     r8                  ; R8.0 = the sign char (temp --
-                                        ; plo doesn't touch D, so D
-                                        ; still holds the char for the
-                                        ; xri right below)
-            xri     '+'
-            lbz     maybe_h
-
-            glo     r8
-            xri     '-'
-            lbnz    mode_show           ; neither '+' nor '-': argv[1]
-                                        ; is a path, show mode
-
-maybe_h:
-            mov     rf, rd
-            inc     rf
-            ldn     rf                  ; D = argv[1][1]
-            ani     $DF                 ; fold lowercase to uppercase
-                                        ; (same idiom already used
-                                        ; elsewhere in this project,
-                                        ; e.g. shell.asm's REM/drive-
-                                        ; letter checks -- only 'H'/'h'
-                                        ; collapse to 'H' under this
-                                        ; mask, confirmed no other
-                                        ; character aliases to it)
-            xri     'H'
-            lbnz    mode_show           ; not "+H"/"-H" (case-insensitive)
-
-            mov     rf, rd
-            inc     rf
-            inc     rf
-            ldn     rf                  ; D = argv[1][2] -- must be NUL
-                                        ; for "+H"/"-H" to be exactly
-                                        ; this whole token
-            lbnz    mode_show
-
-            ; confirmed exactly "+H" or "-H" -- requires a path after it
-            glo     rc
-            smi     3
-            lbnf    usage               ; flag given but argc < 3
-
-            mov     rf, attrib_mode
-            ldi     ATTRIB_MODE_APPLY
-            str     rf
-            mov     rf, attrib_start_i
-            ldi     2
-            str     rf
-
-            glo     r8                  ; D = the sign character (still
-                                        ; intact in R8.0 -- nothing
-                                        ; since has touched it)
-            xri     '+'
-            lbnz    is_minus_h
-
-            mov     rf, attrib_setmask
-            ldi     ATTR_HIDDEN
-            str     rf
-            mov     rf, attrib_clearmask
-            ldi     0
-            str     rf
-            lbr     have_mode
-
-is_minus_h:
-            mov     rf, attrib_setmask
-            ldi     0
-            str     rf
-            mov     rf, attrib_clearmask
-            ldi     ATTR_HIDDEN
-            str     rf
-            lbr     have_mode
-
-mode_show:
-            mov     rf, attrib_mode
-            ldi     ATTRIB_MODE_SHOW
-            str     rf
-            mov     rf, attrib_start_i
-            ldi     1
-            str     rf
-
-have_mode:
             ; stash argv/argc to memory -- K_FILE_SETATTR/K_STAT's own
             ; clobber footprint isn't confirmed beyond DF, same
             ; defensive pattern DEL/DIR's own multi-argument loops
@@ -166,9 +70,106 @@ have_mode:
             inc     rf
             glo     ra
             str     rf
-
             mov     rf, attrib_argc
             glo     rc
+            str     rf
+
+            ; --- leading flags: any number of +R/-R/+H/-H tokens ---
+            ; No calls in this loop, so its state lives in registers:
+            ; R9.0 = set mask, R9.1 = clear mask, R7.0 = argv index,
+            ; RA walks the argv table, RC.0 = argc.
+            ldi     0
+            plo     r9
+            phi     r9
+            ldi     1
+            plo     r7
+            inc     ra
+            inc     ra                  ; RA = &argv[1]
+
+af_loop:
+            glo     r7
+            str     r2
+            glo     rc
+            xor
+            lbz     af_end              ; ran out of arguments
+
+            lda     ra
+            phi     rd
+            lda     ra
+            plo     rd                  ; RD = argv[i], RA = &argv[i+1]
+
+            ldn     rd                  ; D = first character
+            plo     r8                  ; R8.0 = sign (plo keeps D)
+            xri     '+'
+            lbz     af_sign
+            glo     r8
+            xri     '-'
+            lbnz    af_end              ; not a flag: first path
+
+af_sign:
+            inc     rd
+            inc     rd
+            ldn     rd                  ; must be exactly 2 characters
+            lbnz    af_end
+            dec     rd
+            ldn     rd
+            ani     $DF                 ; fold to uppercase ('h'/'r' only
+                                        ; alias to 'H'/'R' under this mask)
+            plo     rb                  ; RB.0 = letter
+            xri     'H'
+            lbnz    af_not_h
+            ldi     ATTR_HIDDEN
+            lbr     af_have_bit
+af_not_h:
+            glo     rb
+            xri     'R'
+            lbnz    af_end              ; "+X" for another letter: a path
+            ldi     ATTR_RDONLY
+af_have_bit:
+            plo     rb                  ; RB.0 = the attribute bit
+            str     r2                  ; M(X) = bit
+            glo     r8
+            xri     '+'
+            lbnz    af_minus
+            glo     r9
+            or
+            plo     r9                  ; set mask |= bit
+            lbr     af_next
+af_minus:
+            ghi     r9
+            or
+            phi     r9                  ; clear mask |= bit
+af_next:
+            inc     r7
+            lbr     af_loop
+
+af_end:
+            mov     rf, attrib_setmask
+            glo     r9
+            str     rf
+            mov     rf, attrib_clearmask
+            ghi     r9
+            str     rf
+            mov     rf, attrib_start_i
+            glo     r7
+            str     rf
+
+            glo     r7
+            str     r2
+            glo     rc
+            xor
+            lbz     usage               ; flags but no path
+
+            glo     r9
+            str     r2
+            ghi     r9
+            or                          ; D = set | clear
+            lbz     af_show             ; no flags: show mode
+            ldi     ATTRIB_MODE_APPLY
+af_show:                                ; D = 0 = ATTRIB_MODE_SHOW here
+            plo     r8
+            mov     rf, attrib_mode
+            glo     r8
             str     rf
 
             mov     rf, attrib_any_error
@@ -235,6 +236,7 @@ attrib_loop:
             plo     rd
             mov     rf, rd
             mov     rd, attrib_glob_ctx
+            ldi     GLOB_HIDDEN         ; ATTRIB sees hidden files too, as in MS-DOS
             call    glob_init
             lbdf    attrib_glob_bad_path
 
@@ -327,7 +329,7 @@ attrib_exit_err:
 
 usage:
             call    K_INMSG
-            db      "Usage: ATTRIB [+H|-H] <path...>",13,10,0
+            db      "Usage: ATTRIB [+R|-R] [+H|-H] <path...>",13,10,0
             ldi     1                   ; exit code 1 = error
             rtn
 
@@ -367,6 +369,20 @@ attrib_process_one:
             mov     rf, attrib_statbuf
             add16   rf, DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
+            ani     ATTR_RDONLY
+            lbz     apo_show_not_ro
+            call    K_INMSG
+            db      "R",0
+            lbr     apo_show_h
+apo_show_not_ro:
+            call    K_INMSG
+            db      "-",0
+
+apo_show_h:
+            mov     rf, attrib_statbuf
+            add16   rf, DIRENT_ATTR
+            ldn     rf                  ; D = attribute byte (reloaded --
+                                        ; nothing survives K_INMSG here)
             ani     ATTR_HIDDEN
             lbz     apo_show_notset
 

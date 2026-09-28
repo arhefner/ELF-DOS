@@ -160,7 +160,9 @@ match more than one file, the same as in MS-DOS. `*` matches any run of
 characters; `?` matches any one character. Wildcards are understood by
 `DIR`, `LS`, `COPY`, `MOVE`, `DEL`, `ATTRIB`, `XCOPY`, and `YS`. If a
 wildcard does not match anything, the command is given the text exactly as
-typed instead.
+typed instead. As in MS-DOS, a wildcard skips hidden and system files, so
+`DEL *.*` leaves them alone; `ATTRIB` and `LS -a` still match them, and a
+hidden file named in full is always found.
 
 **How ELF-DOS finds a command.** When you type a name on its own, ELF-DOS
 looks for it in three places, in this order, and runs the first match:
@@ -271,7 +273,7 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | `CD` | `CD <path>` | Changes the current directory. `CD ..` goes up one level; `CD /` goes to the root. |
 | `PWD` | `PWD` | Prints the full path of the current directory. |
 | `STAT` | `STAT <path>` | Shows a file or directory's type, size, first cluster, and the date and time it was last written. |
-| `ATTRIB` | `ATTRIB [+H\|-H] <path...>` | Shows or changes a file's hidden attribute. With no `+H`/`-H`, shows whether each file is hidden. `+H` hides it; `-H` unhides it. |
+| `ATTRIB` | `ATTRIB [+R\|-R] [+H\|-H] <path...>` | Shows or changes a file's read-only and hidden attributes. With no flags, shows each file's attributes as two columns, `R` and `H` (or `-` when not set). `+R`/`-R` sets or clears read-only; `+H`/`-H` hides or unhides. Flags can be combined (`ATTRIB +R +H file`). A read-only file can be read and renamed but not changed, overwritten, appended to, or deleted: `DEL`, `COPY`, `MOVE`, `XCOPY`, and output redirection (`>`/`>>`) report "Access denied." The attribute has no effect on a directory. |
 | `LABEL` | `LABEL [drive:] [text \| -d]` | Shows, sets, or removes a drive's volume label. `-d` deletes the label. |
 | `MOUNT` | `MOUNT [unit partition letter:]` | With no arguments, lists the drives in use. Otherwise attaches a partition of block device `unit` (0-7, always required) to a drive letter. Partition `0` means "the whole device, no partition table," for floppies. See "Drives" above. |
 | `UMOUNT` | `UMOUNT <letter:>` | Detaches a drive letter. The boot drive cannot be detached. |
@@ -290,7 +292,7 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | `REN` | `REN <path> <newname>` | Renames a file or directory. It must stay in the same directory — use `MOVE` to move it elsewhere. |
 | `DEL` | `DEL <filename...>` | Deletes one or more files. It will not delete a directory — use `RD` for that. |
 | `TOUCH` | `TOUCH <filename...>` | Updates a file's last-modified time to right now, without changing its contents. It will not create a new file. |
-| `XCOPY` | `XCOPY [-s] [-e] [-y] [-d] [-c] <source> <destination>` | Copies files, and optionally whole directory trees. `-s` includes subdirectories. `-e` keeps empty subdirectories that get copied along the way. `-d` only copies files that are newer than what's already at the destination. `-c` keeps going if one file fails, instead of stopping. `-y` skips overwrite prompts. |
+| `XCOPY` | `XCOPY [-s] [-e] [-y] [-d] [-c] [-r] <source> <destination>` | Copies files, and optionally whole directory trees. `-s` includes subdirectories. `-e` keeps empty subdirectories that get copied along the way. `-d` only copies files that are newer than what's already at the destination. `-c` keeps going if one file fails, instead of stopping. `-y` skips overwrite prompts. `-r` overwrites read-only files at the destination (still asking first unless `-y`); without it they are reported as "Access denied." The copy is not read-only afterwards. |
 
 ### Directories
 

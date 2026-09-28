@@ -479,6 +479,7 @@ mss_loop:
             plo     rd
             mov     rf, rd
             mov     rd, ms_glob_ctx
+            ldi     0                   ; flags: skip hidden/system
             call    glob_init           ; DF = 0/1
             lbdf    mss_glob_bad_path
 

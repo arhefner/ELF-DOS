@@ -43,7 +43,6 @@
             extrn   fmt_size32
 
 ; ---- raw on-disk constants (kernel.inc is not includable from progs/) ----
-ATTR_RDONLY:    equ     $01
 ATTR_HIDDEN2:   equ     $02         ; also in kernel_api.inc as ATTR_HIDDEN
 ATTR_SYSTEM:    equ     $04
 ATTR_VOLID:     equ     $08

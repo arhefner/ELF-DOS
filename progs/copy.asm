@@ -461,6 +461,7 @@ copy_loop_sources:
             plo     rd
             mov     rf, rd
             mov     rd, copy_glob_ctx
+            ldi     0                   ; flags: skip hidden/system
             call    glob_init
             lbdf    copy_src_bad_path
 
@@ -652,6 +653,30 @@ cdd_no:
             rtn
 
 ;------------------------------------------------------------------
+; path_is_readonly: is RF an existing, read-only file? (2026-09-28)
+; Uses dstchk_result as scratch (only live inside check_dst_is_dir).
+; Args:    RF = path
+; Returns: D != 0 if the path exists, is not a directory, and has
+;          ATTR_RDONLY set; D = 0 otherwise
+; Modifies: everything (calls K_STAT)
+;------------------------------------------------------------------
+path_is_readonly:
+            mov     rd, dstchk_result
+            call    K_STAT
+            lbdf    pir_no              ; doesn't exist
+            mov     rf, dstchk_result+DIRENT_ATTR
+            ldn     rf
+            ani     ATTR_DIR|ATTR_RDONLY
+            xri     ATTR_RDONLY         ; D = 0 only for "read-only file"
+            lbz     pir_yes
+pir_no:
+            ldi     0
+            rtn
+pir_yes:
+            ldi     1
+            rtn
+
+;------------------------------------------------------------------
 ; copy_one: copy src_ptr to its final destination -- dst_ptr + '/' +
 ; basename(src_ptr) if dst_is_dir_flag is set, else dst_ptr itself
 ; unchanged. Prompts for overwrite confirmation if the resolved
@@ -779,6 +804,22 @@ co_check_overwrite:
 
             mov     rd, dst_fcb
             call    K_FILE_CLOSE
+
+            ; read-only destination: refuse before asking anything
+            ; (MS-DOS "Access denied")
+            mov     rf, real_dst
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd
+            call    path_is_readonly
+            lbz     co_dst_not_ro
+            call    K_INMSG
+            db      "Access denied.",13,10,0
+            stc
+            rtn
+co_dst_not_ro:
 
             mov     rf, copy_yflag
             ldn     rf

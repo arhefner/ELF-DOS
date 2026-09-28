@@ -128,6 +128,7 @@ tch_loop:
             plo     rd
             mov     rf, rd              ; RF = tch_cur_name (dereferenced)
             mov     rd, tch_glob_ctx
+            ldi     0                   ; flags: skip hidden/system
             call    glob_init
             lbdf    tch_bad_path        ; bad prefix path: this argv
                                         ; entry's own error

@@ -2,7 +2,7 @@
 ; xcopy.asm - recursive directory copy, with MS-DOS XCOPY-flavored
 ; switches within this project's own constraints
 ;
-; Usage: XCOPY [-h] [-v] [-y] [-s] [-e] [-i] [-c] [-d] <source> <dest>
+; Usage: XCOPY [-h] [-v] [-y] [-s] [-e] [-i] [-c] [-d] [-r] <source> <dest>
 ;
 ; <source> may be a file (single-file copy, same shape as COPY) or a
 ; directory. This matches real MS-DOS XCOPY's own flexibility -- the
@@ -55,6 +55,14 @@
 ;       plain 16-bit values, so this needs no date-string parsing --
 ;       an explicit "-d:date" cutoff argument is deliberately not
 ;       implemented.
+;   -r  Overwrite read-only destination files (matches real /R,
+;       2026-09-28). Without it, a read-only destination is reported as
+;       "Access denied: <path>" and counts as an error for -c. With it,
+;       the overwrite prompt still applies unless -y is also given; the
+;       read-only bit is cleared (K_FILE_SETATTR) only once the answer
+;       is yes and the source has opened, so declining or a missing
+;       source leaves the destination untouched. The copy is left
+;       without the bit -- XCOPY doesn't copy attributes.
 ; Clustered like LS's own flags ("-hv" and "-h -v" behave identically).
 ;
 ; Directory-tree copy design: two-pass, non-kernel-scan-reentrant.
@@ -333,7 +341,7 @@ xc_exit_err:
 
 usage_error:
             call    K_INMSG
-            db      "Usage: XCOPY [-h] [-v] [-y] <source> <destination>",13,10,0
+            db      "Usage: XCOPY [-h] [-v] [-y] [-s] [-e] [-i] [-c] [-d] [-r] <source> <destination>",13,10,0
             ldi     1
             rtn
 
@@ -383,6 +391,9 @@ xc_scan_options:
             ldi     0
             str     rf
             mov     rf, xc_dmode
+            ldi     0
+            str     rf
+            mov     rf, xc_rmode
             ldi     0
             str     rf
             mov     rf, xc_num_paths
@@ -497,8 +508,17 @@ xso_opt_notc:
 xso_opt_notd:
             ldn     rf
             xri     'd'
-            lbnz    xso_optchar_next
+            lbnz    xso_opt_notr
             mov     rb, xc_dmode
+            ldi     1
+            str     rb
+            lbr     xso_optchar_next
+
+xso_opt_notr:
+            ldn     rf
+            xri     'r'
+            lbnz    xso_optchar_next
+            mov     rb, xc_rmode
             ldi     1
             str     rb
 
@@ -1723,6 +1743,10 @@ xsn_no:
 ; Modifies: everything (R7-RD)
 ;------------------------------------------------------------------
 xc_copy_one_file:
+            mov     rb, xc_cp_clear_ro
+            ldi     0
+            str     rb                  ; set below only for -r on a
+                                        ; read-only destination
             mov     rb, xc_cp_src
             ghi     rf
             str     rb
@@ -1773,6 +1797,48 @@ xc_copy_one_file:
             rtn
 
 xcp_check_overwrite:
+            ; read-only destination (2026-09-28): refuse before any
+            ; prompt, and even with -y -- the kernel would refuse the
+            ; write-open anyway, this just says why (MS-DOS "Access
+            ; denied"). Named, since inside a tree walk the plain
+            ; "Cannot create destination." doesn't say which file.
+            mov     rb, xc_cp_dst
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf
+            mov     rd, xc_stat_dirent2
+            call    K_STAT
+            lbdf    xcp_not_ro          ; doesn't exist
+            mov     rf, xc_stat_dirent2+DIRENT_ATTR
+            ldn     rf
+            ani     ATTR_DIR|ATTR_RDONLY
+            xri     ATTR_RDONLY
+            lbnz    xcp_not_ro          ; not a read-only file
+            mov     rf, xc_rmode
+            ldn     rf
+            lbz     xcp_ro_denied       ; no -r: refuse
+            mov     rf, xc_cp_clear_ro
+            ldi     1
+            str     rf                  ; -r: clear the bit later, just
+                                        ; before the write-open
+            lbr     xcp_not_ro
+
+xcp_ro_denied:
+            call    K_INMSG
+            db      "Access denied: ",0
+            mov     rb, xc_cp_dst
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+            stc
+            rtn
+
+xcp_not_ro:
             mov     rf, xc_ymode
             ldn     rf
             lbnz    xcp_open_source     ; -y: never prompt
@@ -1831,6 +1897,25 @@ xcp_open_source:
             call    K_FILE_OPEN
             lbdf    xcp_src_not_found
 
+            ; -r on a read-only destination: clear the bit now -- the
+            ; prompt (if any) was answered yes and the source is open,
+            ; so the copy is really going ahead
+            mov     rf, xc_cp_clear_ro
+            ldn     rf
+            lbz     xcp_open_dst
+            mov     rb, xc_cp_dst
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf                  ; RF = destination path
+            ldi     ATTR_RDONLY
+            phi     rc                  ; RC.1 = bits to clear
+            ldi     0
+            plo     rc                  ; RC.0 = bits to set
+            call    K_FILE_SETATTR
+            lbdf    xcp_dst_open_error  ; closes the source, reports
+
+xcp_open_dst:
             mov     rb, xc_cp_dst
             lda     rb
             phi     rf
@@ -2090,6 +2175,8 @@ xc_emode:            db      0
 xc_imode:            db      0
 xc_cmode:            db      0
 xc_dmode:            db      0
+xc_rmode:            db      0
+xc_cp_clear_ro:      db      0
 xc_src_arg:          dw      0
 xc_dest_arg:         dw      0
 real_dst:            dw      0

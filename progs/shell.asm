@@ -2046,6 +2046,35 @@ resolved:
             call    check_batch_ext
             lbnf    is_batch
 
+            ; output redirected into an existing read-only file
+            ; (2026-09-28): the kernel would refuse the write-open
+            ; inside prog_run and report it only as "Invalid program
+            ; file." -- catch it here and say what MS-DOS said.
+            ; stat_result is free again by now (check_exists is done).
+            mov     rf, RUN_REDIR_OUT
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = output target, 0 = none
+            ghi     rd
+            lbnz    rsv_have_out
+            glo     rd
+            lbz     rsv_go              ; no output redirect
+rsv_have_out:
+            mov     rf, rd              ; RF = target path
+            mov     rd, stat_result
+            call    K_STAT
+            lbdf    rsv_go              ; doesn't exist (or NUL): fine
+            mov     rf, stat_result+DIRENT_ATTR
+            ldn     rf
+            ani     ATTR_DIR|ATTR_RDONLY
+            xri     ATTR_RDONLY
+            lbnz    rsv_go              ; not a read-only file
+            call    K_INMSG
+            db      "Access denied.",13,10,0
+            lbr     start
+
+rsv_go:
             ldi     0                   ; exit code 0
             rtn
 

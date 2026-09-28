@@ -135,6 +135,7 @@ del_loop:
             plo     rd
             mov     rf, rd              ; RF = del_cur_name (dereferenced)
             mov     rd, del_glob_ctx
+            ldi     0                   ; flags: skip hidden/system
             call    glob_init
             lbdf    del_bad_path        ; bad prefix path: this argv
                                         ; entry's own error
@@ -235,11 +236,42 @@ usage:
 ; Modifies: everything (calls K_FILE_DELETE)
 ;------------------------------------------------------------------
 del_one_file:
+            mov     rb, del_one_path
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb                  ; del_one_path = RF (for the
+                                        ; read-only check on failure)
             call    K_FILE_DELETE       ; DF = 0/1
             lbnf    dof_ok
 
+            ; failed: if the file exists and is read-only, say so, the
+            ; way MS-DOS does ("Access denied")
+            mov     rf, del_one_path
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, rd              ; RF = path
+            mov     rd, del_statbuf
+            call    K_STAT
+            lbdf    dof_generic         ; not found at all
+            mov     rf, del_statbuf+DIRENT_ATTR
+            ldn     rf
+            ani     ATTR_DIR
+            lbnz    dof_generic         ; a directory
+            ldn     rf
+            ani     ATTR_RDONLY
+            lbz     dof_generic
+            call    K_INMSG
+            db      "Access denied.",13,10,0
+            lbr     dof_fail
+
+dof_generic:
             call    K_INMSG
             db      "Cannot delete file (not found, or is a directory).",13,10,0
+dof_fail:
             mov     rf, del_any_error
             ldi     $FF
             str     rf
@@ -253,5 +285,7 @@ del_any_error:  db      0
 del_cur_name:   dw      0
 del_glob_found: db      0
 del_glob_ctx:   ds      GLOB_CTX_LEN
+del_one_path:   dw      0
+del_statbuf:    ds      DIRENT_LEN
 
             end     start

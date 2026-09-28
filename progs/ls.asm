@@ -541,6 +541,8 @@ ls_have_patharg:
                                         ; it above)
             mov     rf, rd
             mov     rd, ls_glob_ctx
+            mov     r8, ls_amode
+            ldn     r8                  ; D = flags: -a (1) = GLOB_HIDDEN
             call    glob_init
             lbdf    ls_not_found        ; bad prefix path -- same
                                         ; message as any other bad path
@@ -1315,6 +1317,8 @@ lms_loop:
             plo     rd
             mov     rf, rd
             mov     rd, ls_glob_ctx
+            mov     r8, ls_amode
+            ldn     r8                  ; D = flags: -a (1) = GLOB_HIDDEN
             call    glob_init
             lbdf    lms_bad_path        ; bad prefix path: this path
                                         ; entry's own error

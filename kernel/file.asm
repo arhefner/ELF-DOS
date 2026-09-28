@@ -644,6 +644,17 @@ fst_ioerr:
             ani     ATTR_DIR
             lbnz    fopen_err           ; it's a directory: reject
 
+            ; read-only file: only mode 0 (read) may open it -- mode 1
+            ; (overwrite) and mode 2 (append) are refused, as in MS-DOS.
+            ; RF still points at the attribute byte (ldn doesn't move it)
+            ldn     rf                  ; D = attribute byte
+            ani     ATTR_RDONLY
+            lbz     fopen_rw_ok
+            mov     rf, fo_mode
+            ldn     rf                  ; D = mode
+            lbnz    fopen_err           ; write/append on read-only
+fopen_rw_ok:
+
             ; --- populate the chosen FCB slot ---
             call    fo_load_fcb         ; RB = caller's FCB
                                         ; D = fcb slot address high byte
@@ -3687,8 +3698,9 @@ fct_done:
             ; must NOT be a directory
             mov     rf, file_dirent+DIRENT_ATTR
             ldn     rf                  ; D = attribute byte
-            ani     ATTR_DIR
-            lbnz    fdel_err            ; it's a directory: reject
+            ani     ATTR_DIR|ATTR_RDONLY
+            lbnz    fdel_err            ; a directory, or read-only:
+                                        ; reject (MS-DOS "Access denied")
 
             ; capture the first cluster now, from file_dirent (a copy,
             ; independent of dir_buf) -- safe to read even after
