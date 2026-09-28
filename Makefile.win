@@ -663,6 +663,11 @@ everything: all mbr progs test
 sys\elfdos-sys.exe: sys\sys.c
 	cd sys && $(SYSCC) $(SYSCFLAGS) /Fe:elfdos-sys.exe sys.c
 
+# "nmake /F Makefile.win elfdos-sys": the same target name as the Linux
+# Makefile's. Not "sys" -- that names an existing directory, which nmake
+# would take as an up-to-date target and never build.
+elfdos-sys: sys\elfdos-sys.exe
+
 # Full install: write MBR boot code and kernel to disk. Use this when
 # setting up a new disk or after changing the MBR. check_dev.bat refuses
 # to run at all if DEV wasn't given explicitly -- see this file's own

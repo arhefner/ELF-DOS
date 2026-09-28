@@ -232,6 +232,7 @@ make            # build kernel-full.bin (bootstrap + kernel)
 make progs      # build every progs/*.asm into bin/<name> (bare, no
                 # extension -- mirrors the on-device /bin layout)
 make test       # build every test/*.asm into test/bin/<name>
+make elfdos-sys # build the host-side installer, sys/elfdos-sys
 make clean      # remove all generated build artifacts
 ```
 
@@ -250,7 +251,8 @@ make install DEV=/dev/mmcblkx      # write MBR + kernel (new/blank disk)
 make update DEV=/dev/mmcblkx       # refresh kernel only (MBR already installed)
 ```
 
-On Windows, use `nmake /F Makefile.win install DEV=\\.\PhysicalDriveN` /
+`install`/`update` build the installer first if needed. On Windows, use
+`nmake /F Makefile.win install DEV=\\.\PhysicalDriveN` /
 `update` instead (no default `DEV` value there - a wrong physical drive
 number destroys data irrecoverably, so it's required explicitly every
 time).

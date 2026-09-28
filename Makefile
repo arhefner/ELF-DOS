@@ -132,7 +132,7 @@ PROG_EXES = $(patsubst progs/%.asm,bin/%,$(PROG_SRCS))
 TEST_SRCS = $(wildcard test/*.asm)
 TEST_EXES = $(patsubst test/%.asm,test/bin/%,$(TEST_SRCS))
 
-.PHONY: all everything mbr rom install update progs test sdk clean
+.PHONY: all everything mbr rom install update elfdos-sys progs test sdk clean
 
 all: $(FULL_BIN)
 
@@ -505,15 +505,23 @@ mbr: $(MBR_BIN)
 rom: $(FULL_BIN)
 	@python3 tools/rom_info.py $(ROM_BIN)
 
+# The host-side installer (sys/sys.c), built by sys/Makefile. "make
+# elfdos-sys" builds just this; the same target name exists in
+# Makefile.win, where it builds sys\elfdos-sys.exe.
+elfdos-sys: $(SYS)
+
+$(SYS): sys/sys.c
+	$(MAKE) -C sys
+
 # Full install: write MBR boot code and kernel to disk.
 # Use this when setting up a new disk or after changing the MBR.
-install: $(FULL_BIN) $(MBR_BIN)
+install: $(FULL_BIN) $(MBR_BIN) $(SYS)
 	$(SYS) -m $(MBR_BIN) -k $(FULL_BIN) $(DEV)
 	@python3 tools/rom_info.py $(ROM_BIN)
 
 # Kernel-only update: MBR already on disk, just refresh the kernel.
 # Faster for routine kernel development and testing cycles.
-update: $(FULL_BIN)
+update: $(FULL_BIN) $(SYS)
 	$(SYS) -k $(FULL_BIN) $(DEV)
 	@python3 tools/rom_info.py $(ROM_BIN)
 
@@ -641,3 +649,4 @@ clean:
 	rm -rf test/bin
 	rm -rf bin
 	rm -rf build
+	$(MAKE) -C sys clean
