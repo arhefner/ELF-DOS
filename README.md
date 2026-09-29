@@ -149,8 +149,8 @@ See `CLAUDE.md` for the fuller running notes and roadmap.
 - `CHKDSK -f` (automatic repair) - check-only for now.
 - Nested batch scripts (a `.bat` calling another `.bat`).
 - An executable-permission bit - attempted and hardware-tested, but the
-  user judged it not worth the added complexity in practice; the work is
-  preserved on the (unmerged) `exe_flag` branch.
+  user judged it not worth the added complexity in practice, and the
+  branch holding it has since been deleted.
 - The system and archive attributes (`ATTRIB` handles read-only and
   hidden).
 
