@@ -137,6 +137,21 @@ mbr_load_loop:
             glo         rc
             lbnz        mbr_load_loop
 
+            ; A read can report success and still return the wrong
+            ; bytes (a second card fighting on the SD bus did this on
+            ; hardware), and jumping into garbage hangs silently. So
+            ; check the bootstrap's own signature before going there.
+            mov         rf,KERN_LOAD
+            lda         rf
+            xri         'K'
+            lbnz        mbr_nokrn
+            lda         rf
+            xri         'R'
+            lbnz        mbr_nokrn
+            ldn         rf
+            xri         'N'
+            lbnz        mbr_nokrn
+
             mov         rf,mbr_unit     ; R8.1 = boot unit for krnboot,
             ldn         rf              ;  reloaded rather than trusting
             phi         r8              ;  the BIOS to have preserved it
@@ -149,7 +164,12 @@ mbr_load_loop:
 ;--------------------------------------------------------------
 mbr_err:    call        f_setbd         ; ensure baud rate is configured
             call        f_inmsg
-            db          "Boot error",13,10,0
+            db          "Boot error: cannot read the disk",13,10,0
 mbr_halt:   lbr         mbr_halt        ; hang -- nothing to return to
+
+mbr_nokrn:  call        f_setbd
+            call        f_inmsg
+            db          "Boot error: no ELF-DOS kernel on this disk",13,10,0
+            lbr         mbr_halt
 
             end         mbr_main
