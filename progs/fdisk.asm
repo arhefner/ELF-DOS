@@ -1203,16 +1203,19 @@ ns_parse:
             lbdf    ns_bad
             call    rest_blank
             lbnz    ns_bad
-            ghi     rd                      ; 1 to MAX_DISK_MB
+            ghi     rd                      ; at least 1
             str     r2
             glo     rd
             or
             lbz     ns_bad
-            glo     rd
-            smi     low (MAX_DISK_MB+1)
+            glo     rd                      ; more than 8GB is fine, but
+            smi     low (MAX_DISK_MB+1)     ; only the first 8GB is used
             ghi     rd
             smbi    high (MAX_DISK_MB+1)
-            lbdf    ns_bad
+            lbnf    ns_have
+            call    K_INMSG
+            db      "ELF-DOS can use only the first 8,192 MB of a disk; using that.",13,10,0
+            mov     rd, MAX_DISK_MB
 ns_have:
             mov     rf, f_disk
             call    set16
@@ -1231,7 +1234,7 @@ ns_mul:
             rtn
 ns_bad:
             call    K_INMSG
-            db      "Enter a size from 1 to 8192 MB.",13,10,0
+            db      "Enter the size in MB, from 1 to 65535.",13,10,0
             lbr     ns_ask
 ns_eof:
             stc
@@ -1377,9 +1380,9 @@ rb_yes:
             rtn
 
 ;------------------------------------------------------------------
-; parse_number: a decimal number of 1-4 digits after optional spaces,
+; parse_number: a decimal number, 0-65535, after optional spaces,
 ; starting at f_inbuf. RD = the value, RF = the first character after
-; it; DF=1 if there is no number or more than 4 digits.
+; it; DF=1 if there is no number or it is larger than 65535.
 ; Modifies R9, RC, RD, RF, D
 ;------------------------------------------------------------------
 parse_number:
@@ -1394,9 +1397,11 @@ pn_loop:
             lbnf    pn_end
             smi     10
             lbdf    pn_end
-            glo     rc
-            xri     4
-            lbz     pn_bad                  ; a fifth digit
+            glo     rd                      ; RD*10 must fit: RD < 6554
+            smi     low 6554
+            ghi     rd
+            smbi    high 6554
+            lbdf    pn_bad
             inc     rc
             mov     r9, rd                  ; RD = RD*10 + digit
             shl16   r9                      ; R9 = RD*2
@@ -1413,6 +1418,7 @@ pn_loop:
             ghi     rd
             adci    0
             phi     rd
+            lbdf    pn_bad                  ; 65530 + digit carried out
             lbr     pn_loop
 pn_end:
             glo     rc
