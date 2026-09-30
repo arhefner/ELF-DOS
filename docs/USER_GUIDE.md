@@ -489,7 +489,7 @@ length.
 | `TIME` | `TIME [HH:MM[:SS]]` | Shows or sets the time. Seconds are optional. |
 | `BAUD` | `BAUD <rate>` | Sets the console's baud rate (300 through 57600). |
 | `VER` | `VER` | Prints the ELF-DOS version. |
-| `REBOOT` | `REBOOT [unit]` | Restarts ELF-DOS without turning the computer off, from block device `unit` (0-7, default: the unit it booted from). Refuses a unit that has no ELF-DOS kernel or boot code on it. |
+| `REBOOT` | `REBOOT [unit]` | Restarts the computer without turning it off, booting block device `unit` (0-7, default: the unit ELF-DOS booted from) the way the ROM would, so it can also start an Elf/OS disk. Refuses a unit whose first sector is blank, or an ELF-DOS disk whose kernel is missing. |
 | `MON` | `MON` | Drops into the built-in ROM monitor. |
 | `SYS` | `SYS [unit] <kernel-full.bin \| mbr.bin>` | Installs a new copy of ELF-DOS onto block device `unit` (0-7, default: the unit the system booted from). Given `mbr.bin`, it instead replaces the boot code in the device's MBR and keeps its partition table; a fresh card needs both (`SYS 1 mbr.bin`, then `SYS 1 kernel-full.bin`). Refuses a device with no partition table, or where the kernel would run into a partition. |
 | `KSAVE` | `KSAVE [unit] [filename]` | Saves the kernel installed on block device `unit` (0-7, default: the unit the system booted from) to a file (default `kernel-full.bak`) in the same format SYS installs, so `SYS kernel-full.bak` puts it back. |

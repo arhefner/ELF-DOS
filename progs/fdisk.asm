@@ -1997,13 +1997,19 @@ print_unit:
             mov     rf, f_unit
             ldn     rf
             adi     '0'
-            lbr     K_TYPE
+            call    K_TYPE                  ; not lbr: see print_idx
+            rtn
 
 print_idx:
             mov     rf, f_idx
             ldn     rf
             adi     '1'
-            lbr     K_TYPE
+            call    K_TYPE                  ; NOT a tail jump: BIOS console
+            rtn                             ; output (the MBIOS's btype)
+                                            ; takes the character from
+                                            ; RE.0, where SCRT's call puts
+                                            ; D -- after an lbr it holds
+                                            ; whatever the last call left
 
 ;------------------------------------------------------------------
 ; print_mb: the sector count at [RF], in MB. print16: RD, in decimal.

@@ -2429,7 +2429,9 @@ ra_eof:
 print_letter:
             mov     rf, f_letter
             ldn     rf
-            lbr     K_TYPE                  ; tail call
+            call    K_TYPE                  ; NOT a tail jump: the BIOS
+            rtn                             ; takes the character from RE.0,
+                                            ; which only a call sets
 
 ;==================================================================
 ; Sector I/O. The LBA always comes from f_lba (4 bytes, big-endian,

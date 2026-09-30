@@ -134,7 +134,7 @@ behind everything summarized here.
 | `CLS` | Clear the screen |
 | `MON` | Drop into the ROM monitor |
 | `VER` | Print the ELF-DOS version |
-| `REBOOT [unit]` | Warm-reboot from a unit (default: the one booted from), reloading MBR/krnboot/kernel from disk |
+| `REBOOT [unit]` | Warm-reboot from a unit (default: the one booted from), as the ROM's disk boot would -- ELF-DOS, Elf/OS or any boot sector |
 
 `YR`/`YS` are currently known to be broken (build-verified only, not yet
 working on real hardware) - see `CLAUDE.md`'s roadmap notes.

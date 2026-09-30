@@ -16,13 +16,19 @@
 ; as at power-on: it moves the stack to the top of RAM, resets the disk
 ; subsystem, and loads krnboot and the kernel from the same unit.
 ;
-; Before anything is overwritten, the unit is checked: LBA 1 must carry
-; a kernel ('KRN', the header SYS writes) and sector 0 ELF-DOS's boot
-; code ('MBR'), so a unit without them is refused with a message instead
-; of being jumped into. Sector 0 is read into this program's own buffer
-; first and only copied to $0100 once everything checks out: $0100 is
-; the kernel's volatile region, jump table included, so no kernel call
-; can be made after the copy.
+; It boots whatever the unit's sector 0 holds, as a BIOS would: an
+; ELF-DOS disk, or an Elf/OS disk, or any other boot sector. Two checks
+; turn a hopeless case into a message instead of a jump into garbage:
+; sector 0 must not be blank (all $00 or all $FF), and if it is ELF-DOS's
+; MBR (the 'MBR' signature at bytes 0-2), LBA 1 must carry a kernel
+; ('KRN', the header SYS writes). Sector 0 is read into this program's
+; own buffer first and only copied to $0100 once it checks out: $0100
+; is the kernel's volatile region, jump table included, so no kernel
+; call can be made after the copy.
+;
+; The registers are left as EDOS-mbios's anyboot leaves them after its
+; read of sector 0: RF = $0300 (just past the sector), R7 = R8.0 = 0
+; (LBA 0), R8.1 = $E0 + unit, R2 = $00FF, X = 2.
 ;
 ; SCRT (R4/R5) is left as the BIOS set it up at power-on, which is what
 ; the MBR expects. Nothing is re-probed: like f_boot, this is not a
@@ -80,37 +86,79 @@ start:
             str     rf
 
 have_unit:
-            ; ---- LBA 1: a kernel? ----
+            ; ---- LBA 1: an ELF-DOS kernel? (only matters for an ELF-DOS
+            ; disk; a failed read here is not an error by itself) ----
+            mov     rf, rb_haskrn
+            ldi     0
+            str     rf
             ldi     1
             call    read_sector
-            lbdf    unreadable
+            lbdf    lba1_done
             mov     rf, rb_buf
             lda     rf
             xri     'K'
-            lbnz    no_kernel
+            lbnz    lba1_done
             lda     rf
             xri     'R'
-            lbnz    no_kernel
+            lbnz    lba1_done
             ldn     rf
             xri     'N'
-            lbnz    no_kernel
+            lbnz    lba1_done
+            mov     rf, rb_haskrn
+            ldi     1
+            str     rf
+lba1_done:
 
-            ; ---- LBA 0: ELF-DOS's boot code? (read last: it stays in
-            ; the buffer to be copied) ----
+            ; ---- LBA 0, read last: it stays in the buffer to be copied ----
             ldi     0
             call    read_sector
             lbdf    unreadable
+
+            ; ELF-DOS's MBR? Then it needs its kernel.
             mov     rf, rb_buf
             lda     rf
             xri     'M'
-            lbnz    no_mbr
+            lbnz    not_elfdos
             lda     rf
             xri     'B'
-            lbnz    no_mbr
+            lbnz    not_elfdos
             ldn     rf
             xri     'R'
-            lbnz    no_mbr
-
+            lbnz    not_elfdos
+            mov     rf, rb_haskrn
+            ldn     rf
+            lbz     no_kernel
+            lbr     bootable
+not_elfdos:
+            ; Anything else boots, unless the sector is blank: all $00
+            ; or all $FF. R9.0 = OR of the bytes, R9.1 = AND.
+            mov     rf, rb_buf
+            mov     rc, 512
+            ldi     0
+            plo     r9
+            ldi     $FF
+            phi     r9
+blank_scan:
+            ldn     rf
+            str     r2
+            glo     r9
+            or
+            plo     r9
+            ghi     r9
+            and
+            phi     r9
+            inc     rf
+            dec     rc
+            glo     rc
+            lbnz    blank_scan
+            ghi     rc
+            lbnz    blank_scan
+            glo     r9
+            lbz     no_boot
+            ghi     r9
+            xri     $FF
+            lbz     no_boot
+bootable:
             call    K_INMSG
             db      "Rebooting from unit ",0
             call    print_unit
@@ -137,6 +185,12 @@ copy:
             ghi     rc
             lbnz    copy
 
+            ; as anyboot leaves them: RF past the sector, LBA 0
+            mov     rf, BOOT_SECTOR + 512
+            ldi     0
+            phi     r7
+            plo     r7
+            plo     r8
             mov     r2, BOOT_STACK      ; the BIOS's boot-time stack
             sex     r2
             lbr     BOOT_ENTRY
@@ -159,7 +213,11 @@ print_unit:
             mov     rf, rb_unit
             ldn     rf
             adi     '0'
-            lbr     K_TYPE
+            call    K_TYPE              ; NOT a tail jump: BIOS console
+            rtn                         ; output takes the character from
+                                        ; RE.0, which only a call sets
+                                        ; (an lbr left "unit " printing
+                                        ; a stray byte on hardware)
 
 usage:
             call    K_INMSG
@@ -185,19 +243,17 @@ no_kernel:
             ldi     1
             rtn
 
-no_mbr:
+no_boot:
             call    K_INMSG
             db      "Unit ",0
             call    print_unit
             call    K_INMSG
-            db      " has no ELF-DOS boot code (install it with SYS ",0
-            call    print_unit
-            call    K_INMSG
-            db      " mbr.bin).",13,10,0
+            db      " has nothing to boot (sector 0 is blank).",13,10,0
             ldi     1
             rtn
 
 rb_unit:    db      0
+rb_haskrn:  db      0           ; LBA 1 carries 'KRN'
 rb_buf:     ds      512
 
             end     start
