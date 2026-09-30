@@ -490,7 +490,6 @@ length.
 | `BAUD` | `BAUD <rate>` | Sets the console's baud rate (300 through 57600). |
 | `VER` | `VER` | Prints the ELF-DOS version. |
 | `REBOOT` | `REBOOT [unit]` | Restarts the computer without turning it off, booting block device `unit` (0-7, default: the unit ELF-DOS booted from) the way the ROM would, so it can also start an Elf/OS disk. Refuses a unit whose first sector is blank, or an ELF-DOS disk whose kernel is missing. |
-| `MON` | `MON` | Drops into the built-in ROM monitor. |
 | `SYS` | `SYS [unit] <file \| name>` | Installs ELF-DOS onto block device `unit` (0-7, default: the unit the system booted from). Given `kernel-full.bin`, installs the kernel; given `mbr.bin`, replaces the boot code in the device's MBR and keeps its partition table. Given a name that is not a file, installs the pair `KSAVE` writes, `name.krn` and `name.mbr`: both are checked before anything is written, and you are asked once. Refuses a device with no partition table, or where the kernel would run into a partition. |
 | `KSAVE` | `KSAVE [unit] [name]` | Saves the system installed on block device `unit` (0-7, default: the unit the system booted from) as two files: `name.krn`, the kernel, and `name.mbr`, the MBR's boot code (default name `elfdos`). They are a matched pair - the boot code knows the kernel's layout - so `SYS name` puts both back. The partition table is not saved. |
 | `CLS` | `CLS` | Clears the screen. |

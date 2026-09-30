@@ -132,7 +132,6 @@ behind everything summarized here.
 | `KSAVE [unit] [name]` | Save the installed kernel and MBR boot code as `name.krn` + `name.mbr`, which `SYS name` restores (default: the boot unit, `elfdos`) |
 | `BAUD <rate>` | Set the console's baud rate |
 | `CLS` | Clear the screen |
-| `MON` | Drop into the ROM monitor |
 | `VER` | Print the ELF-DOS version |
 | `REBOOT [unit]` | Warm-reboot from a unit (default: the one booted from), as the ROM's disk boot would -- ELF-DOS, Elf/OS or any boot sector |
 
