@@ -355,6 +355,14 @@ bin/mount: progs/mount.prg lib/fmt32.prg lib/drives.prg | bin
 	$(LINK) $(LFLAGS) -o bin/mount progs/mount.prg lib/fmt32.prg lib/drives.prg
 	rm -f bin/mount.lkb
 
+bin/fdisk: progs/fdisk.prg lib/fmt32.prg lib/pos32.prg lib/lineedit.prg | bin
+	$(LINK) $(LFLAGS) -o bin/fdisk progs/fdisk.prg lib/fmt32.prg lib/pos32.prg lib/lineedit.prg
+	rm -f bin/fdisk.lkb
+
+bin/format: progs/format.prg lib/fmt32.prg lib/drives.prg lib/lineedit.prg | bin
+	$(LINK) $(LFLAGS) -o bin/format progs/format.prg lib/fmt32.prg lib/drives.prg lib/lineedit.prg
+	rm -f bin/format.lkb
+
 bin/umount: progs/umount.prg lib/drives.prg | bin
 	$(LINK) $(LFLAGS) -o bin/umount progs/umount.prg lib/drives.prg
 	rm -f bin/umount.lkb

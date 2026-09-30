@@ -397,7 +397,7 @@ Drops the cached state belonging to one drive, so its entry in the drive
 table can be replaced or cleared. Flushes and then discards the FAT cache
 if that drive is the active one, and forces the next drive switch to
 reload the table rather than assume it is already current. Used by
-`MOUNT` and `UMOUNT`.
+`MOUNT`, `UMOUNT` and `FORMAT`.
 - **Args:** `D` = drive index.
 - **Returns:** `DF` = 0 always.
 - **Call this *before* changing the drive's table entry, never after.**

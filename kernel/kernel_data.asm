@@ -191,8 +191,11 @@ active_bpb_drive:   db      $FF
 ; derivable from the slot index (they used to be exactly 'C' + index).
 ;
 ; INVARIANT, and the reason two apparently redundant tables are kept:
-; drive_letter[i] != 0 exactly when drive_present[i] != 0. Only MOUNT
-; and UMOUNT write either, and each writes both together in one block.
+; drive_present[i] != 0 implies drive_letter[i] != 0. The reverse no
+; longer holds (2026-09-28): MOUNT gives an UNFORMATTED partition a
+; letter but leaves drive_present at 0, so the letter resolves but every
+; file access fails cleanly, and FORMAT sets drive_present once it has
+; written a filesystem. Only MOUNT, UMOUNT and FORMAT write either.
 ; drive_present is kept rather than derived because _switch_drive and
 ; kernel_setdrive read it on the hot path and would otherwise need
 ; changing -- they contain no drive-letter arithmetic at all today, and

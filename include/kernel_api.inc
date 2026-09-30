@@ -656,7 +656,11 @@ CUR_DRIVE_OFF:     equ  DRIVE_CUR_DIR_OFF + DRIVE_COUNT*2   ; 1 byte
 ; slot, 0 = free. Since 2026-09-09 a slot's letter is no longer 'C' +
 ; its index -- any slot may carry any letter A-Z -- so this table is the
 ; only way to convert either direction. lib/drives.asm wraps it; prefer
-; that to reading it directly.
+; that to reading it directly. A lettered slot is not necessarily
+; usable: MOUNT gives an UNFORMATTED partition a letter but leaves its
+; drive_present byte 0 (only BPBBLK_PART1_LBA/BPBBLK_DEV are filled in),
+; and FORMAT sets drive_present once it has written a filesystem.
+; Check drive_present before reading any other field of the entry.
 DRIVE_LETTER_OFF:  equ  CUR_DRIVE_OFF + 2      ; +1 for cur_drive,
                                                 ; +1 for active_bpb_drive
                                                 ; (which is deliberately

@@ -180,7 +180,7 @@ SPECIAL_BINS = bin\printenv bin\which bin\export bin\unset \
         bin\ls bin\edlin bin\less bin\hexdump bin\move bin\xcopy bin\shell \
         bin\yr bin\ys bin\termsize bin\mr bin\ms \
         bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
-        bin\stat bin\chkdsk bin\mount bin\umount
+        bin\stat bin\chkdsk bin\mount bin\umount bin\format bin\fdisk
 
 # ---- The test\*.asm that link against lib\ -- see build_test.bat's
 # own exclusion list, which must be kept in sync with this set ----
@@ -478,6 +478,20 @@ progs\mount.prg: progs\mount.asm include\kernel_api.inc include\bios.inc include
 bin\mount: progs\mount.prg lib\fmt32.prg lib\drives.prg bin
 	$(LINK) $(LFLAGS) -o bin\mount progs\mount.prg lib\fmt32.prg lib\drives.prg
 	-del /F /Q bin\mount.lkb
+
+progs\fdisk.prg: progs\fdisk.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\lineedit.inc
+	cd progs && $(ASM) $(ASMFLAGS) fdisk.asm
+
+bin\fdisk: progs\fdisk.prg lib\fmt32.prg lib\pos32.prg lib\lineedit.prg bin
+	$(LINK) $(LFLAGS) -o bin\fdisk progs\fdisk.prg lib\fmt32.prg lib\pos32.prg lib\lineedit.prg
+	-del /F /Q bin\fdisk.lkb
+
+progs\format.prg: progs\format.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\lineedit.inc
+	cd progs && $(ASM) $(ASMFLAGS) format.asm
+
+bin\format: progs\format.prg lib\fmt32.prg lib\drives.prg lib\lineedit.prg bin
+	$(LINK) $(LFLAGS) -o bin\format progs\format.prg lib\fmt32.prg lib\drives.prg lib\lineedit.prg
+	-del /F /Q bin\format.lkb
 
 progs\umount.prg: progs\umount.asm include\kernel_api.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) umount.asm

@@ -63,6 +63,8 @@ for %%f in (progs\*.asm) do (
     if /I "!name!"=="chkdsk"     set "skip=1"
     if /I "!name!"=="mount"      set "skip=1"
     if /I "!name!"=="umount"     set "skip=1"
+    if /I "!name!"=="format"     set "skip=1"
+    if /I "!name!"=="fdisk"      set "skip=1"
 
     if not defined skip (
         echo Building !name!...

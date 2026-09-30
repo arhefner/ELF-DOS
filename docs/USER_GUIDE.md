@@ -108,7 +108,23 @@ ELF-DOS reads both FAT16 and FAT12 volumes. FAT12 is what `FORMAT` on
 another machine will have put on a floppy, and on small flash or RAM disks
 of roughly 16MB and under; FAT16 is usual on anything larger. You do not
 have to say which a disk is: ELF-DOS works it out from the disk itself.
-FAT32 is not supported, and `MOUNT` says so rather than attaching it.
+FAT32 is not supported.
+
+**Unformatted partitions.** A partition that does not hold a FAT12 or
+FAT16 file system - a brand new one, or one formatted as FAT32 or by
+another operating system - is still mounted, but marked as not formatted:
+
+```
+C:/> MOUNT 0 2 W:
+Mounted partition 2 as W: (not formatted -- FORMAT W: to format it)
+```
+
+The letter is reserved for it, and `MOUNT` lists it with
+`(not formatted)`, but nothing can be read from or written to it
+(switching to it says `Invalid drive.`) until you `FORMAT` it. See
+"Formatting a Drive" below. This applies only to partitions: a whole
+device (partition `0`) must already hold a file system to be mounted,
+because without a partition table ELF-DOS has no way to know its size.
 
 **Changing a floppy.** Nothing tells ELF-DOS that you have swapped a disk,
 and it remembers the old one's layout, so writing to the new disk could
@@ -122,6 +138,147 @@ Mounted partition 0 as A:
 That re-reads the new disk and starts you at its root directory. Do it at
 the prompt, with no program running, and the old disk is left complete:
 ELF-DOS never leaves a write half-finished once a command has ended.
+
+### Formatting a Drive
+
+`FORMAT` writes a new, empty FAT16 file system onto a mounted drive. It
+works like `FORMAT` on MS-DOS, and like it, it erases everything on the
+drive. The drive must be mounted first (formatted or not):
+
+```
+C:/> FORMAT W:
+
+WARNING, ALL DATA ON NON-REMOVABLE DISK
+DRIVE W: WILL BE LOST!
+Proceed with Format (Y/N)?Y
+
+Formatting 536,870,912 bytes
+Format complete.
+
+Volume label (11 characters, ENTER for none)? PROJECTS
+
+  536,707,072 bytes total disk space
+  536,707,072 bytes available on disk
+
+       16,384 bytes in each allocation unit.
+       32,758 allocation units available on disk.
+
+Volume Serial Number is 07EA-0A1C
+```
+
+If the drive already has a volume label, `FORMAT` first asks you to type
+it, and stops with `Invalid Volume ID` if you get it wrong. That is your
+chance to notice you typed the wrong letter. Letters may be typed in
+either case.
+
+`FORMAT` normally takes only seconds, because it writes just the parts
+of the drive that describe the file system. **`FORMAT W: -S`** (surface
+scan) first reads every sector of the drive, showing its progress as a
+percentage, and sets aside any part that cannot be read (reported as
+`bytes in bad sectors`). That can take hours on a large partition, and is
+rarely worth it on flash cards, which seldom report a read error. This is
+the reverse of MS-DOS, where the scan was the default and `/Q` skipped
+it. `-Q` is still accepted, and does nothing unless it comes after `-S`.
+
+**`-V:label`** sets the volume label without asking; `-V:` on its own
+means no label. A label is at most 11 characters and may not contain
+`* ? / \ | . , ; : + = < > [ ] "`.
+
+`FORMAT` refuses to format:
+
+- the drive ELF-DOS booted from, since the commands themselves live there;
+- a partition that is also mounted under another letter - `UMOUNT` the
+  other letter first;
+- a partition smaller than about 2MB (4,150 sectors) or larger than about
+  4GB (8,387,744 sectors), the limits of FAT16;
+- a partition that overlaps the space at the start of the device where
+  the ELF-DOS system itself is installed.
+
+The size of each allocation unit depends on the size of the partition,
+from 512 bytes on the smallest partitions up to 65,536 bytes on the
+largest. Nothing is written until you answer `Y`, and the disk does not
+look formatted to `MOUNT` until the very last step. A format that is
+interrupted part way leaves the drive unformatted, never half-formatted.
+`FORMAT` returns an exit code of 0 when it succeeds, 5 if you answered
+`N`, and 1 for any other failure.
+
+### Partitioning a Disk
+
+`FDISK` creates, deletes and lists the partitions on a device, like
+`FDISK` on MS-DOS. Type `FDISK` for the device ELF-DOS booted from, or
+`FDISK 1` for unit 1, and choose from its menu:
+
+```
+ELF-DOS Fixed Disk Setup Program
+
+Current unit: 1 (64 MB)
+
+1. Create a FAT16 partition
+2. Set active partition
+3. Delete partition
+4. Display partition information
+5. Change current unit
+
+Enter choice, or Q to quit: 4
+
+Unit 1:
+Partition Status Type          Start LBA       Size  Mounted
+    1      A    FAT16             2,048      20 MB  W:
+    2           FAT16            43,008      32 MB
+
+Total disk space is 64 MB; largest free block 11 MB.
+```
+
+**Creating a partition** asks how big to make it, in MB or as a
+percentage of the whole disk (`50%`); pressing Enter takes the largest
+size that will fit. It goes at the start of the largest free block. A
+partition may be from 3 MB to 4,095 MB, the range `FORMAT` can work
+with. A disk with no partition table is given one first (FDISK asks). A
+new partition is not usable until you `MOUNT` and `FORMAT` it.
+
+**Deleting a partition** asks you to confirm, and refuses while the
+partition is mounted - `UMOUNT` it first. That also protects the
+partition ELF-DOS itself is running from.
+
+A few things work differently from MS-DOS:
+
+- A device has at most four partitions, all primary. ELF-DOS does not use
+  extended partitions or logical drives.
+- The first megabyte of every device is kept free for the ELF-DOS system
+  that `SYS` installs, so the first partition starts at sector 2,048.
+  Partitions start and end on whole megabytes.
+- The active flag is kept for other systems' sake; ELF-DOS itself starts
+  up the same way whichever partition is active.
+- `FDISK` finds a device's size by reading ever further into it until a
+  read fails, so it works with any Elf/OS ROM. If it cannot tell - a
+  device of 8GB or more, or a ROM that never reports reading past the
+  end - it asks you, offering 8GB. **Check that answer**: telling `FDISK`
+  a disk is larger than it really is lets it create partitions that run
+  off its end.
+
+Changes take effect at once: there is no need to restart before mounting
+a new partition. At the next restart, ELF-DOS mounts the boot device's
+formatted partitions as `C:` to `F:` as usual.
+
+### Building a Bootable Disk
+
+With a second device attached, `FDISK`, `FORMAT` and `SYS` can build a
+complete ELF-DOS disk without any other computer. If unit 1 is the new
+disk, and `mbr.bin` and `kernel-full.bin` are on the current drive:
+
+```
+C:/> FDISK 1                      (create partition 1, then Q)
+C:/> SYS 1 mbr.bin                (the start-up code in sector 0)
+C:/> SYS 1 kernel-full.bin        (ELF-DOS itself)
+C:/> MOUNT 1 1 W:
+C:/> FORMAT W:
+C:/> MD W:/bin
+C:/> XCOPY /bin W:/bin -y         (the commands, including the shell)
+```
+
+Copy `/cfg` and anything else you want the same way. The new disk starts
+up with its first partition as `C:`.
+
 
 ## Typing Commands
 
@@ -277,6 +434,8 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | `LABEL` | `LABEL [drive:] [text \| -d]` | Shows, sets, or removes a drive's volume label. `-d` deletes the label. |
 | `MOUNT` | `MOUNT [unit partition letter:]` | With no arguments, lists the drives in use. Otherwise attaches a partition of block device `unit` (0-7, always required) to a drive letter. Partition `0` means "the whole device, no partition table," for floppies. See "Drives" above. |
 | `UMOUNT` | `UMOUNT <letter:>` | Detaches a drive letter. The boot drive cannot be detached. |
+| `FDISK` | `FDISK [unit]` | Creates, deletes and lists the partitions on block device `unit` (0-7, default: the unit the system booted from), from a menu. See "Partitioning a Disk" above. |
+| `FORMAT` | `FORMAT <letter:> [-S] [-V:label]` | Erases a mounted drive and writes a new, empty FAT16 file system on it. `-S` first reads every sector and sets aside any that fail (slow); `-V:label` sets the volume label without asking. See "Formatting a Drive" above. |
 | `CHKDSK` | `CHKDSK [X:]` | Checks a drive for file system problems - lost clusters, files whose size does not match their data, and damaged directory entries - and prints a summary. This is a check only; it does not repair anything. |
 
 ### Working with files
@@ -330,7 +489,7 @@ length.
 | `TIME` | `TIME [HH:MM[:SS]]` | Shows or sets the time. Seconds are optional. |
 | `BAUD` | `BAUD <rate>` | Sets the console's baud rate (300 through 57600). |
 | `VER` | `VER` | Prints the ELF-DOS version. |
-| `REBOOT` | `REBOOT` | Restarts the computer without turning it off. |
+| `REBOOT` | `REBOOT [unit]` | Restarts ELF-DOS without turning the computer off, from block device `unit` (0-7, default: the unit it booted from). Refuses a unit that has no ELF-DOS kernel or boot code on it. |
 | `MON` | `MON` | Drops into the built-in ROM monitor. |
 | `SYS` | `SYS [unit] <kernel-full.bin \| mbr.bin>` | Installs a new copy of ELF-DOS onto block device `unit` (0-7, default: the unit the system booted from). Given `mbr.bin`, it instead replaces the boot code in the device's MBR and keeps its partition table; a fresh card needs both (`SYS 1 mbr.bin`, then `SYS 1 kernel-full.bin`). Refuses a device with no partition table, or where the kernel would run into a partition. |
 | `KSAVE` | `KSAVE [unit] [filename]` | Saves the kernel installed on block device `unit` (0-7, default: the unit the system booted from) to a file (default `kernel-full.bak`) in the same format SYS installs, so `SYS kernel-full.bak` puts it back. |

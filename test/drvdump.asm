@@ -11,6 +11,10 @@
 ; is still set, UMOUNT's store went somewhere else; if it is 0 but MOUNT
 ; still lists the drive, MOUNT's listing is at fault.
 ;
+; The last column is the slot's drive_bpb_table entry, BPBBLK_LEN bytes
+; in hex in BPBBLK_* order (added 2026-09-28 to compare the geometry
+; FORMAT installs with what MOUNT computes from the same boot sector).
+;
 
 #include    include/opcodes.def
 #include    include/bios.inc
@@ -37,7 +41,7 @@ start:
             glo     r9
             call    dd_hex2
             call    K_INMSG
-            db      13,10,"slot present letter",13,10,0
+            db      13,10,"slot present letter  bpb",13,10,0
 
             mov     rf, dd_i
             ldi     0
@@ -79,6 +83,53 @@ dd_loop:
             add16   rf, rd
             ldn     rf
             call    dd_hex2
+            call    K_INMSG
+            db      "    ",0
+
+            ; drive_bpb_table[i], BPBBLK_LEN bytes
+            call    dd_base
+            mov     rf, r9
+            add16   rf, DRIVE_BPB_TABLE_OFF
+            mov     rd, dd_i
+            ldn     rd
+            plo     rc
+dd_bpb_skip:
+            glo     rc
+            lbz     dd_bpb_at
+            add16   rf, BPBBLK_LEN
+            dec     rc
+            lbr     dd_bpb_skip
+dd_bpb_at:
+            mov     rd, dd_ptr              ; keep the pointer in memory:
+            ghi     rf                      ; nothing survives K_TYPE
+            str     rd
+            inc     rd
+            glo     rf
+            str     rd
+            mov     rf, dd_j
+            ldi     BPBBLK_LEN
+            str     rf
+dd_bpb_byte:
+            mov     rd, dd_ptr
+            lda     rd
+            phi     rf
+            ldn     rd
+            plo     rf
+            lda     rf
+            plo     rc
+            mov     rd, dd_ptr
+            ghi     rf
+            str     rd
+            inc     rd
+            glo     rf
+            str     rd
+            glo     rc
+            call    dd_hex2
+            mov     rf, dd_j
+            ldn     rf
+            smi     1
+            str     rf
+            lbnz    dd_bpb_byte
             call    K_INMSG
             db      13,10,0
 
@@ -162,3 +213,5 @@ dd_emit:
 
 dd_i:       db      0
 dd_byte:    db      0
+dd_j:       db      0
+dd_ptr:     dw      0

@@ -109,8 +109,10 @@ behind everything summarized here.
 | `REN <path> <newname>` | Rename a file or directory |
 | `MD <path>` / `RD <path>` | Create / remove an empty subdirectory |
 | `STAT <path>` | Show a file or directory's metadata |
-| `MOUNT [[unit] part] [letter:]` | List mounted drives, or attach a partition to a letter |
+| `MOUNT [unit part letter:]` | List mounted drives, or attach a partition to a letter |
 | `UMOUNT <letter:>` | Detach a drive letter |
+| `FDISK [unit]` | Create, delete and list a device's partitions (MS-DOS style menu) |
+| `FORMAT <letter:> [-s] [-v:label]` | Write a new, empty FAT16 filesystem on a mounted drive (MS-DOS style; `-s` adds a surface scan) |
 | `TOUCH <file...>` | Update a file's last-write time to now |
 | `ATTRIB [+R\|-R] [+H\|-H] <path...>` | Show or set the read-only and hidden attributes |
 | `LABEL [drive:] [text\|-d]` | Show, set, or clear a volume label |
@@ -132,7 +134,7 @@ behind everything summarized here.
 | `CLS` | Clear the screen |
 | `MON` | Drop into the ROM monitor |
 | `VER` | Print the ELF-DOS version |
-| `REBOOT` | Warm-reboot (reloads MBR/krnboot/kernel from disk) |
+| `REBOOT [unit]` | Warm-reboot from a unit (default: the one booted from), reloading MBR/krnboot/kernel from disk |
 
 `YR`/`YS` are currently known to be broken (build-verified only, not yet
 working on real hardware) - see `CLAUDE.md`'s roadmap notes.

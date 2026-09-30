@@ -62,6 +62,19 @@
 ; using one letter. Writing through both at once is not something this
 ; system has ever been tested doing.
 ;
+; UNFORMATTED PARTITIONS (2026-09-28): an MBR partition whose boot
+; sector is not a FAT12/FAT16 volume (never formatted, garbage, FAT32,
+; another OS's filesystem) is still mounted, as an UNFORMATTED drive:
+; drive_letter[i] is set but drive_present[i] stays 0, and only
+; BPBBLK_PART1_LBA/BPBBLK_DEV are filled in. Every kernel path into a
+; drive (path_resolve, _switch_drive, K_SETDRIVE) checks
+; drive_present, so all file access to the letter fails cleanly --
+; "Invalid drive." at the prompt -- while FORMAT can still find it by
+; letter and learn where the partition is. FORMAT brings the slot live
+; once it has written a filesystem. UMOUNT frees it like any other.
+; Partition 0 (a whole device) is still refused when unformatted:
+; without a partition table there is no way to learn its size.
+;
 ; A note on 24-bit LBAs: ELF-DOS addresses sectors with 24 bits
 ; (LBA_SIZE = 3), so a partition must start below sector 2^24 (8GB).
 ; The MBR's own start-LBA field is 4 bytes; this program checks the
@@ -137,6 +150,9 @@ start:
             mov     rf, mnt_unit
             glo     r9
             str     rf
+            mov     rf, mnt_present
+            ldi     1
+            str     rf                      ; formatted until proven not
             mov     rf, mnt_argbase
             ldi     2
             str     rf                      ; partition is argv[2]
@@ -222,6 +238,16 @@ mnt_list_loop:
             call    fmt_size32
             mov     rf, mnt_numbuf
             call    K_MSG
+
+            ; an unformatted drive has a letter but drive_present = 0
+            mov     rf, mnt_slot
+            ldn     rf
+            call    mnt_present_addr        ; RF = &drive_present[slot]
+            ldn     rf
+            lbnz    mnt_list_eol
+            call    K_INMSG
+            db      "  (not formatted)",0
+mnt_list_eol:
             call    K_INMSG
             db      13,10,0
 
@@ -844,8 +870,9 @@ mnt_copy_loop:
             mov     rf, mnt_drive
             ldn     rf
             call    mnt_present_addr
-            ldi     1
-            str     rf
+            mov     rd, mnt_present
+            ldn     rd                      ; 1, or 0 for an unformatted
+            str     rf                      ; partition (see the header)
 
             ; ---- report ----
             call    K_INMSG
@@ -861,7 +888,20 @@ mnt_copy_loop:
             ldn     rf
             call    K_TYPE
             call    K_INMSG
-            db      ":",13,10,0
+            db      ":",0
+            mov     rf, mnt_present
+            ldn     rf
+            lbnz    mnt_report_eol
+            call    K_INMSG
+            db      " (not formatted -- FORMAT ",0
+            mov     rf, mnt_letter
+            ldn     rf
+            call    K_TYPE
+            call    K_INMSG
+            db      ": to format it)",0
+mnt_report_eol:
+            call    K_INMSG
+            db      13,10,0
 
             ldi     0
             rtn
@@ -930,6 +970,37 @@ mnt_vbr_err:
             rtn
 
 mnt_bad_vbr:
+            ; Not a FAT12/FAT16 volume. An MBR partition is mounted
+            ; anyway, as unformatted (see the header); a whole device
+            ; (partition 0) is refused, since nothing says how big it is.
+            mov     rf, mnt_part
+            ldn     rf
+            lbz     mnt_bad_vbr_msg
+
+            ; Keep BPBBLK_PART1_LBA (stored before the VBR was read) and
+            ; zero every derived field, so a stale geometry can never be
+            ; mistaken for a real one.
+            mov     rf, mnt_bpb
+            add16   rf, BPBBLK_FAT_LBA
+            ldi     BPBBLK_DEV - BPBBLK_FAT_LBA
+            plo     rc
+mnt_unf_zero:
+            ldi     0
+            str     rf
+            inc     rf
+            dec     rc
+            glo     rc
+            lbnz    mnt_unf_zero
+            mov     rd, mnt_unit            ; RF is now at BPBBLK_DEV
+            ldn     rd
+            str     rf
+
+            mov     rf, mnt_present
+            ldi     0
+            str     rf
+            lbr     mnt_commit
+
+mnt_bad_vbr_msg:
             call    K_INMSG
             db      "That partition is not a FAT12 or FAT16 volume.",13,10,0
             ldi     1
@@ -1123,6 +1194,8 @@ mnt_argv:       dw      0           ; caller's argv table pointer
 mnt_argc:       db      0
 mnt_unit:       db      0           ; block device unit 0-7
 mnt_argbase:    db      1           ; argv index of <partition>
+mnt_present:    db      1           ; drive_present value to commit:
+                                    ; 0 = mounted but not formatted
 mnt_part:       db      0           ; MBR entry index 0-3
 mnt_drive:      db      0           ; target slot
 mnt_letter:     db      0           ; the letter it answers to

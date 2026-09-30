@@ -263,6 +263,11 @@ chk_fat_loaded:
             str     rf
             inc     rf
             str     rf
+            mov     rf, chk_tally_badfree
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
             mov     rf, chk_tally_file_bytes
             ldi     0
             str     rf
@@ -2658,6 +2663,18 @@ cfsl12_loop:
             lbr     cfsl12_next
 
 cfsl12_nonzero:
+            ; an unreferenced bad-cluster marker is not lost -- FORMAT
+            ; marks unreadable clusters that way (see cfsl_nonzero)
+            glo     rd
+            xri     low FAT_BAD
+            lbnz    cfsl12_not_bad
+            ghi     rd
+            xri     high FAT_BAD
+            lbnz    cfsl12_not_bad
+            mov     rf, chk_tally_badfree
+            call    chk_inc16
+            lbr     cfsl12_next
+cfsl12_not_bad:
             mov     rf, chk_fscan_cluster
             lda     rf
             phi     rd
@@ -2816,6 +2833,21 @@ cfsl_decode:
             lbr     cfsl_entry_done
 
 cfsl_nonzero:
+            ; A bad-cluster marker ($FFF7) that no chain reaches is not a
+            ; lost cluster: it is how FORMAT's surface scan (and MS-DOS
+            ; before it) takes an unreadable cluster out of use. Count it
+            ; for the summary's "bytes in bad sectors" instead. One that
+            ; a chain DOES reach was already reported by chk_walk_chain.
+            glo     r8
+            xri     low FAT_BAD
+            lbnz    cfsl_not_bad
+            ghi     r8
+            xri     high FAT_BAD
+            lbnz    cfsl_not_bad
+            mov     rf, chk_tally_badfree
+            call    chk_inc16
+            lbr     cfsl_entry_done
+cfsl_not_bad:
             mov     rf, chk_fscan_cluster
             lda     rf
             phi     rd
@@ -3164,6 +3196,30 @@ cps_print_sizes:
             call    K_INMSG
             db      " bytes total disk space",13,10,0
 
+            ; bytes in bad sectors (unreferenced $FFF7 clusters), only
+            ; when there are any
+            mov     rf, chk_tally_badfree
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            glo     rd
+            lbnz    cps_show_badfree
+            ghi     rd
+            lbz     cps_after_badfree
+cps_show_badfree:
+            mov     rf, chk_spc
+            ldn     rf
+            plo     rc
+            call    chk_mul16x8
+            mov     rf, chk_bad_bytes
+            call    chk_scale_mul_result_x512
+            mov     rf, chk_bad_bytes
+            call    chk_print_size32_field
+            call    K_INMSG
+            db      " bytes in bad sectors",13,10,0
+cps_after_badfree:
+
             mov     rf, chk_used_bytes
             call    chk_print_size32_field
             call    K_INMSG
@@ -3383,3 +3439,5 @@ chk_fscan_cluster:          ds  2
 chk_fscan_sector_idx:       ds  2
 chk_fscan_entry_idx:        ds  2
 chk_tally_free:             ds  2
+chk_tally_badfree:          ds  2   ; unreferenced $FFF7 clusters
+chk_bad_bytes:              ds  4
