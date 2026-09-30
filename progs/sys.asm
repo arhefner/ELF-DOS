@@ -1,7 +1,14 @@
 ;
 ; sys.asm - target-side kernel installer
 ;
-; Usage: SYS [unit] <kernel-full.bin | mbr.bin>
+; Usage: SYS [unit] <kernel-full.bin | mbr.bin | name>
+;
+; Given a file, the file's first bytes decide what it is (below). Given
+; a name with no such file, SYS installs the pair KSAVE writes:
+; <name>.krn and <name>.mbr. It checks the .mbr completely first (every
+; check below, stopping short of writing), then installs the .krn with
+; the usual prompt -- the only question asked -- and then the .mbr, so
+; a missing or bad .mbr is found before anything is written.
 ;
 ; The file's first bytes choose what is installed: 'KRN' is a kernel
 ; (written to LBA 1 onward), 'MBR' is boot/mbr.asm's boot code, which
@@ -83,6 +90,8 @@ SYSERR_NOPTABLE:    equ     11  ; target unit has no partition table
 SYSERR_OVERLAP:     equ     12  ; image would reach a partition's start
 SYSERR_PTREAD:      equ     13  ; target unit's sector 0 unreadable
 SYSERR_MBRSIZE:     equ     14  ; MBR file not 6..446 bytes
+SYSERR_OPEN:        equ     15  ; the file could not be opened
+NAME_MAX:           equ     64  ; longest <name>.krn/.mbr built
 SYSERR_STAT:        equ     10  ; directory-entry lookup failed (not
                                 ; found, or is a directory) -- shouldn't
                                 ; happen given K_FILE_OPEN already
@@ -170,8 +179,130 @@ have_name_slot:
             lda     rb
             phi     rf
             ldn     rb
-            plo     rf                  ; RF = filename
+            plo     rf                  ; RF = the name argument
+            mov     rb, sys_arg_ptr
+            ghi     rf
+            str     rb
+            inc     rb
+            glo     rf
+            str     rb
 
+            ; ---- a file by that name: install it alone ----
+            call    install_file        ; D = result code
+            plo     r8
+            xri     SYSERR_OPEN
+            lbnz    report              ; found (success or failure)
+
+            ; ---- otherwise the pair <name>.krn + <name>.mbr ----
+            mov     rd, sys_krn_name
+            mov     rb, ext_krn
+            call    make_name
+            lbdf    pair_not_found
+            mov     rd, sys_mbr_name
+            mov     rb, ext_mbr
+            call    make_name
+            lbdf    pair_not_found
+            mov     rf, sys_pair
+            ldi     1
+            str     rf
+
+            ; 1. every check on both files, writing nothing: the .mbr
+            ; must be boot code and the .krn a kernel
+            mov     rf, sys_dry
+            ldi     1
+            str     rf
+            mov     rf, sys_mbr_name
+            call    install_file
+            plo     r8
+            xri     SYSERR_OPEN
+            lbz     pair_not_found
+            glo     r8
+            lbnz    report
+            mov     rf, sys_is_mbr
+            ldn     rf
+            lbz     pair_wrong_kind
+            mov     rf, sys_krn_name
+            call    install_file
+            plo     r8
+            xri     SYSERR_OPEN
+            lbz     pair_not_found
+            glo     r8
+            lbnz    report
+            mov     rf, sys_is_mbr
+            ldn     rf
+            lbnz    pair_wrong_kind
+            mov     rf, sys_dry
+            ldi     0
+            str     rf
+
+            ; 2. the kernel, with the one prompt
+            call    K_INMSG
+            db      "Installing ",0
+            mov     rf, sys_krn_name
+            call    K_MSG
+            call    K_INMSG
+            db      " and ",0
+            mov     rf, sys_mbr_name
+            call    K_MSG
+            call    K_INMSG
+            db      " on unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      ".",13,10,0
+            mov     rf, sys_krn_name
+            call    install_file
+            plo     r8
+            xri     SYSERR_OPEN
+            lbz     pair_not_found
+            glo     r8
+            lbnz    report
+
+            ; 3. the boot code, without asking again
+            mov     rf, sys_noconf
+            ldi     1
+            str     rf
+            mov     rf, sys_mbr_name
+            call    install_file
+            plo     r8
+            lbnz    report
+            call    K_INMSG
+            db      "Kernel and MBR boot code installed on unit ",0
+            call    print_unit
+            call    K_INMSG
+            db      ".",13,10,0
+            ldi     0
+            rtn
+
+pair_wrong_kind:
+            call    K_INMSG
+            db      "The .mbr file must hold MBR boot code and the .krn file a",13,10
+            db      "kernel -- nothing written.",13,10,0
+            ldi     1
+            rtn
+
+pair_not_found:
+            call    K_INMSG
+            db      "Cannot find ",0
+            mov     rb, sys_arg_ptr
+            lda     rb
+            phi     rf
+            ldn     rb
+            plo     rf
+            call    K_MSG
+            call    K_INMSG
+            db      ", or its .krn and .mbr pair.",13,10,0
+            ldi     1
+            rtn
+
+;------------------------------------------------------------------
+; install_file: open the file at RF and run sys_install on it.
+; Returns D = sys_install's result, or SYSERR_OPEN if it cannot be
+; opened.
+;------------------------------------------------------------------
+install_file:
+            mov     rb, sys_is_mbr      ; set by sys_install's MBR path
+            ldi     0
+            str     rb
             ; stash the filename pointer for sys_install's own later
             ; directory-entry lookup -- not guaranteed to survive the
             ; K_FILE_OPEN call below (gotcha #8: assume clobbered
@@ -187,19 +318,13 @@ have_name_slot:
             mov     rd, sys_fcb_struct  ; RD = our FCB struct
             mov     ra, sys_iobuf       ; RA = our I/O buffer -- movs
                                         ; before the mode load below,
-                                        ; since mov clobbers D (this is
-                                        ; safe even though RA held the
-                                        ; incoming argv pointer above --
-                                        ; sys_path_ptr's own capture
-                                        ; already happened before this
-                                        ; point, and RF still holds the
-                                        ; filename pointer independently)
+                                        ; since mov clobbers D
             ldi     0                   ; mode = read
-            call    K_FILE_OPEN         ; DF=0/1 (D unspecified --
-                                        ; sys_fcb_struct is a fixed
-                                        ; address, nothing to capture)
-            lbdf    open_error
-
+            call    K_FILE_OPEN
+            lbnf    if_open
+            ldi     SYSERR_OPEN
+            rtn
+if_open:
             mov     rd, sys_fcb_struct  ; RD = FCB pointer, passed to
                                         ; sys_install as its own
                                         ; argument -- see progs/mr.asm's
@@ -213,12 +338,48 @@ have_name_slot:
             ; result before "mov rf, ..." for K_FILE_CLOSE's own arg
             ; setup clobbers D.
             plo     r8                  ; R8.0 = sys_install's result
-
             mov     rd, sys_fcb_struct
             call    K_FILE_CLOSE        ; result/DF here intentionally
                                         ; ignored -- sys_install's own
                                         ; result is what we report
+            glo     r8
+            rtn
 
+;------------------------------------------------------------------
+; make_name: build <root><ext> at RD, the root being the name argument
+; and RB pointing at the extension (".krn"). DF=1 if the result would
+; not fit in NAME_MAX characters. Leaf routine.
+;------------------------------------------------------------------
+make_name:
+            mov     r9, sys_arg_ptr
+            lda     r9
+            phi     rf
+            ldn     r9
+            plo     rf                  ; RF = the root
+            ldi     NAME_MAX - 4
+            plo     rc                  ; room for the root
+mn_copy:
+            lda     rf
+            lbz     mn_ext
+            str     rd
+            inc     rd
+            dec     rc
+            glo     rc
+            lbnz    mn_copy
+            stc                         ; root too long
+            rtn
+mn_ext:
+            lda     rb                  ; the extension, with its NUL
+            str     rd
+            inc     rd
+            lbnz    mn_ext
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; report: R8.0 = a sys_install result code; say what happened and exit
+;------------------------------------------------------------------
+report:
             glo     r8
             lbz     xfer_success
             xri     SYSERR_CANCELLED
@@ -359,16 +520,11 @@ xfer_failed:
             ldi     1
             rtn
 
-open_error:
-            call    K_INMSG
-            db      "File not found.",13,10,0
-            ldi     1
-            rtn
-
 usage:
             call    K_INMSG
-            db      "Usage: SYS [unit] <kernel-full.bin | mbr.bin>",13,10
-            db      "  unit 0-7, default: the boot unit",13,10,0
+            db      "Usage: SYS [unit] <kernel-full.bin | mbr.bin | name>",13,10
+            db      "  unit 0-7, default: the boot unit; a name installs",13,10
+            db      "  <name>.krn and <name>.mbr, as KSAVE writes them",13,10,0
             ldi     1                   ; exit code 1 = error
             rtn
 
@@ -383,6 +539,15 @@ sys_path_ptr:   dw      0
 sys_unit:       db      0               ; target block device, 0-7
 sys_mbr_ok:     db      0               ; 1 = sector 0 holds ELF-DOS boot code
 sys_did_mbr:    db      0               ; 1 = the MBR path ran
+sys_pair:       db      0               ; installing a .krn/.mbr pair
+sys_is_mbr:     db      0               ; the file was MBR boot code
+sys_dry:        db      0               ; check everything, write nothing
+sys_noconf:     db      0               ; skip the confirmation prompt
+sys_arg_ptr:    dw      0               ; the name as typed
+sys_krn_name:   ds      NAME_MAX+1
+sys_mbr_name:   ds      NAME_MAX+1
+ext_krn:        db      ".krn",0
+ext_mbr:        db      ".mbr",0
 sys_read_len:   dw      0               ; bytes the first read returned
 sys_err_buf:    ds      6
 
@@ -702,8 +867,12 @@ sys_extra_no_borrow:
             call    sys_check_ptable    ; D = 0, or a SYSERR_* code
             lbnz    sys_exit
 
-            call    sys_confirm         ; D = 0 (go) or 1 (cancelled)
-            lbnz    sys_cancelled_err
+            call    sys_gate_krn        ; D = 0 go, 1 cancelled, 2 dry run
+            lbz     sys_krn_go
+            xri     2
+            lbz     sys_dry_ok
+            lbr     sys_cancelled_err
+sys_krn_go:
 
             ; rewind before the write pass -- the magic-check read
             ; above already consumed the first 512 bytes. K_FILE_SEEK
@@ -981,6 +1150,9 @@ sys_ret:    rtn
 ; sys_read_len, and must be 6..446 bytes.
 ;------------------------------------------------------------------
 sys_mbr_path:
+            mov     rf, sys_is_mbr      ; tell a pair install which
+            ldi     1                   ; kind of file this turned
+            str     rf                  ; out to be
             mov     rf, sys_read_len
             lda     rf
             phi     r9
@@ -1009,8 +1181,12 @@ smp_len_ok:
             call    sys_check_ptable    ; also leaves sector 0 in
             lbnz    sys_exit            ; sys_verify_buf
 
-            call    sys_confirm_mbr     ; D = 0 (go) or 1 (cancelled)
-            lbnz    sys_cancelled_err
+            call    sys_gate_mbr        ; D = 0 go, 1 cancelled, 2 dry run
+            lbz     sys_mbr_go
+            xri     2
+            lbz     sys_dry_ok
+            lbr     sys_cancelled_err
+sys_mbr_go:
 
             ; zero the boot code area (bytes 0..445)
             mov     rf, sys_verify_buf
@@ -1094,6 +1270,38 @@ smp_verify:
             str     rf
             ldi     0
             lbr     sys_exit
+
+; sys_dry_ok: a dry run (sys_dry) got as far as the prompt: every check
+; passed and nothing was written
+sys_dry_ok:
+            ldi     0
+            lbr     sys_exit
+
+; sys_gate_krn / sys_gate_mbr: the prompt, unless this is a dry run
+; (D = 2, stop here) or the pair install's second file (D = 0, no
+; question: the user already answered it for the kernel)
+sys_gate_krn:
+            mov     rf, sys_dry
+            ldn     rf
+            lbnz    sg_dry
+            mov     rf, sys_noconf
+            ldn     rf
+            lbnz    sg_go
+            lbr     sys_confirm
+sys_gate_mbr:
+            mov     rf, sys_dry
+            ldn     rf
+            lbnz    sg_dry
+            mov     rf, sys_noconf
+            ldn     rf
+            lbnz    sg_go
+            lbr     sys_confirm_mbr
+sg_go:
+            ldi     0
+            rtn
+sg_dry:
+            ldi     2
+            rtn
 
 ; sys_confirm_mbr: the MBR path's prompt; shares sys_confirm's Y/N read
 sys_confirm_mbr:
@@ -1285,6 +1493,9 @@ sys_confirm:
             db      "device unable to boot.",13,10,0
 
             mov     rf, sys_mbr_ok
+            ldn     rf
+            lbnz    sys_confirm_ask
+            mov     rf, sys_pair        ; the pair installs it next
             ldn     rf
             lbnz    sys_confirm_ask
             call    K_INMSG

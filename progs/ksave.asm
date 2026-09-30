@@ -1,14 +1,25 @@
 ;
 ; ksave.asm - save the installed kernel to a file (the reverse of SYS)
 ;
-; Usage: KSAVE [unit] [filename]
+; Usage: KSAVE [unit] [name]
 ;          unit      block device unit 0-7 (default: the boot unit)
-;          filename  file to write (default kernel-full.bak)
+;          name      root name of the two files written (default elfdos)
 ;
-; Reads the kernel image that SYS (or host-side elfdos-sys -k) wrote to
-; LBA 1 onward of a block device, and writes it to a file in exactly
-; the kernel-full.bin format -- the result can be fed straight back
-; into SYS (or elfdos-sys -k) to restore that kernel.
+; Saves an installed system as a matched pair of files:
+;   <name>.krn  the kernel image that SYS (or host-side elfdos-sys -k)
+;               wrote to LBA 1 onward, in exactly the kernel-full.bin
+;               format
+;   <name>.mbr  the MBR boot code, bytes 0-445 of sector 0, in the
+;               format SYS installs (it starts 'MBR')
+; SYS <name> puts both back (SYS <name>.krn or <name>.mbr, one each).
+;
+; Both are saved because they are a matched pair: the MBR has the
+; kernel's layout built in (how many bootstrap sectors to load, and
+; where), and both have changed between builds, so a kernel restored
+; under a different build's MBR may not boot. The partition table
+; (bytes 446-511) is deliberately NOT saved: putting an old table back
+; on a disk that has been repartitioned since would destroy data with
+; no way to warn about it, and FDISK is how the table is managed.
 ;
 ; The argument is a UNIT, not a drive letter, because the kernel belongs
 ; to a device: it lives in the reserved sectors between the MBR and the
@@ -48,6 +59,7 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
+NAME_MAX:           equ     64      ; longest file name written
 KRNBOOT_SECTORS:    equ     5       ; must match boot/mbr.asm, sys/sys.c,
                                     ; tools/split_kernel.py
 
@@ -128,6 +140,16 @@ arg_is_name:
             lbnf    usage               ; anything left over is an error
 
 args_done:
+            ; <name>.krn and <name>.mbr
+            mov     rd, ks_krn_name
+            mov     rb, ext_krn
+            call    make_name
+            lbdf    name_too_long
+            mov     rd, ks_mbr_name
+            mov     rb, ext_mbr
+            call    make_name
+            lbdf    name_too_long
+
 ;------------------------------------------------------------------
 ; Read the unit's partition table (LBA 0) and keep each used entry's
 ; start LBA, so the kernel image can be checked against all of them.
@@ -162,6 +184,35 @@ args_done:
             ldn     rf
             xri     $E9
             lbz     no_ptable
+
+            ; ELF-DOS's boot code must be there, or the pair is not
+            ; something SYS can put back
+            mov     rf, ks_buf
+            lda     rf
+            xri     'M'
+            lbnz    no_mbr
+            lda     rf
+            xri     'B'
+            lbnz    no_mbr
+            ldn     rf
+            xri     'R'
+            lbnz    no_mbr
+            ; keep bytes 0-445: ks_buf is reused for the kernel copy
+            mov     rf, ks_buf
+            mov     rd, ks_mbrbuf
+            ldi     high 446
+            phi     rc
+            ldi     low 446
+            plo     rc
+keep_mbr:
+            lda     rf
+            str     rd
+            inc     rd
+            dec     rc
+            glo     rc
+            lbnz    keep_mbr
+            ghi     rc
+            lbnz    keep_mbr
 
             ; ks_parts[i] = entry i's 4-byte start LBA (little-endian,
             ; as on disk), or 0 if the entry is unused (type 0) or
@@ -397,11 +448,7 @@ ov_next:
 ;------------------------------------------------------------------
 ; Open the output file and copy LBA 1..total into it
 ;------------------------------------------------------------------
-            mov     rb, ks_name_ptr
-            lda     rb
-            phi     rf
-            ldn     rb
-            plo     rf                  ; RF = filename
+            mov     rf, ks_krn_name     ; RF = <name>.krn
             mov     rd, ks_fcb
             mov     ra, ks_iobuf
             ldi     1                   ; mode = create/overwrite
@@ -491,7 +538,27 @@ remain_done:
             call    K_FILE_CLOSE
             lbdf    close_error
 
-            ; "Saved N sectors from X: to <file>."
+            ; ---- <name>.mbr: the boot code kept from sector 0 ----
+            mov     rf, ks_mbr_name
+            mov     rd, ks_fcb
+            mov     ra, ks_iobuf
+            ldi     1                   ; mode = create/overwrite
+            call    K_FILE_OPEN
+            lbdf    open_error
+            mov     rd, ks_fcb
+            mov     rf, ks_mbrbuf
+            ldi     high 446
+            phi     rc
+            ldi     low 446
+            plo     rc
+            call    K_FILE_WRITE
+            lbdf    write_error
+            mov     rd, ks_fcb
+            call    K_FILE_CLOSE
+            lbdf    close_error
+
+            ; "Saved N kernel sectors from unit U to <krn> and its boot
+            ; code to <mbr>."
             call    K_INMSG
             db      "Saved ",0
             mov     rf, ks_total
@@ -513,11 +580,11 @@ remain_done:
             call    K_TYPE
             call    K_INMSG
             db      " to ",0
-            mov     rb, ks_name_ptr
-            lda     rb
-            phi     rf
-            ldn     rb
-            plo     rf
+            mov     rf, ks_krn_name
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,"and its boot code to ",0
+            mov     rf, ks_mbr_name
             call    K_MSG
             call    K_INMSG
             db      ".",13,10,0
@@ -561,6 +628,18 @@ overlaps:
             ldi     1
             rtn
 
+no_mbr:
+            call    K_INMSG
+            db      "No ELF-DOS boot code in that unit's MBR -- nothing saved.",13,10,0
+            ldi     1
+            rtn
+
+name_too_long:
+            call    K_INMSG
+            db      "Name too long.",13,10,0
+            ldi     1
+            rtn
+
 no_kernel:
             call    K_INMSG
             db      "No kernel on that unit ('KRN' not found).",13,10,0
@@ -575,8 +654,9 @@ bad_header:
 
 usage:
             call    K_INMSG
-            db      "Usage: KSAVE [unit] [filename]",13,10
-            db      "  unit 0-7 (default: the boot unit), file default kernel-full.bak",13,10,0
+            db      "Usage: KSAVE [unit] [name]",13,10
+            db      "  unit 0-7 (default: the boot unit); writes <name>.krn and",13,10
+            db      "  <name>.mbr (default name: elfdos)",13,10,0
             ldi     1
             rtn
 
@@ -585,6 +665,37 @@ usage:
 close_quietly:
             mov     rd, ks_fcb
             call    K_FILE_CLOSE
+            rtn
+
+;------------------------------------------------------------------
+; make_name: build <root><ext> at RD, the root being ks_name_ptr's
+; string and RB pointing at the extension (".krn"). DF=1 if the result
+; would not fit in NAME_MAX characters. Leaf routine.
+;------------------------------------------------------------------
+make_name:
+            mov     r9, ks_name_ptr
+            lda     r9
+            phi     rf
+            ldn     r9
+            plo     rf                  ; RF = the root
+            ldi     NAME_MAX - 4
+            plo     rc                  ; room for the root
+mn_copy:
+            lda     rf
+            lbz     mn_ext
+            str     rd
+            inc     rd
+            dec     rc
+            glo     rc
+            lbnz    mn_copy
+            stc                         ; root too long
+            rtn
+mn_ext:
+            lda     rb                  ; the extension, with its NUL
+            str     rd
+            inc     rd
+            lbnz    mn_ext
+            clc
             rtn
 
 ;------------------------------------------------------------------
@@ -637,7 +748,9 @@ ks_consume_arg:
 ;------------------------------------------------------------------
 ; Data
 ;------------------------------------------------------------------
-ks_default_name: db     "kernel-full.bak",0
+ks_default_name: db     "elfdos",0
+ext_krn:        db      ".krn",0
+ext_mbr:        db      ".mbr",0
 ks_name_ptr:    dw      ks_default_name
 ks_argc:        db      0
 ks_argidx:      db      0
@@ -651,6 +764,9 @@ ks_total:       dw      0
 ks_remain:      dw      0
 ks_lba:         dw      0
 ks_num_buf:     ds      6
+ks_krn_name:    ds      NAME_MAX+1      ; <name>.krn
+ks_mbr_name:    ds      NAME_MAX+1      ; <name>.mbr
+ks_mbrbuf:      ds      446             ; sector 0's boot code
 
 .align  32                  ; FCB must not straddle a page --
                             ; file_open rejects one that does
