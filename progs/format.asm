@@ -2444,7 +2444,8 @@ print_letter:
 rd_sector:
             call    set_lba
             mov     rf, sec_buf
-            lbr     K_SECREAD               ; tail call; DF passes back
+            call    K_SECREAD               ; DF passes back through rtn
+            rtn
 
 ;------------------------------------------------------------------
 ; wr_sector: write the buffer at RB to f_lba. DF=1 on error.
@@ -2452,7 +2453,8 @@ rd_sector:
 wr_sector:
             call    set_lba                 ; leaves RB alone
             mov     rf, rb
-            lbr     K_SECWRITE
+            call    K_SECWRITE
+            rtn
 
 ;------------------------------------------------------------------
 ; set_lba: R7:R8.0 = f_lba's low 24 bits, R8.1 = f_unit.

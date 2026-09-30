@@ -263,7 +263,8 @@
             call    _set_lba_dev      ; R8.1 = block device unit
 
             mov     rf, dir_buf
-            lbr     f_ideread           ; DF = 0/1
+            call    f_ideread           ; DF = 0/1 -- called, never
+            rtn                         ; jumped to: see CLAUDE.md #26
 
             endp
 

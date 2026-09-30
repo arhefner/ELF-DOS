@@ -939,7 +939,8 @@ probe_mb:
             ldn     rf
             phi     r8
             mov     rf, ver_buf
-            lbr     K_SECREAD
+            call    K_SECREAD
+            rtn
 
 ;------------------------------------------------------------------
 ; load_table: read f_unit's sector 0 into mbr_buf, classify it and
@@ -1129,7 +1130,8 @@ read_lba0:
             plo     r7
             phi     r7
             mov     rf, rd
-            lbr     K_SECREAD
+            call    K_SECREAD
+            rtn
 
 unit_error:
             call    K_INMSG

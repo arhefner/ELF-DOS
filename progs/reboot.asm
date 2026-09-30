@@ -26,9 +26,14 @@
 ; is the kernel's volatile region, jump table included, so no kernel
 ; call can be made after the copy.
 ;
-; The registers are left as EDOS-mbios's anyboot leaves them after its
-; read of sector 0: RF = $0300 (just past the sector), R7 = R8.0 = 0
-; (LBA 0), R8.1 = $E0 + unit, R2 = $00FF, X = 2.
+; The only contract a boot sector can rely on is the standard one: it is
+; loaded at $0100 and entered at $0106, with SCRT set up and a stack.
+; Beyond that, registers are left as a ROM's own read of sector 0 would
+; plausibly leave them -- RF = $0300 (just past the sector), R7 = R8.0 =
+; 0 (LBA 0), R8.1 = $E0 + unit (where a multi-unit ROM passes the unit;
+; ELF-DOS's MBR reads it there), R2 = $00FF, X = 2 -- without depending
+; on any one ROM's internals. The sector is read through K_SECREAD, the
+; public passthrough to f_ideread.
 ;
 ; SCRT (R4/R5) is left as the BIOS set it up at power-on, which is what
 ; the MBR expects. Nothing is re-probed: like f_boot, this is not a
@@ -185,7 +190,7 @@ copy:
             ghi     rc
             lbnz    copy
 
-            ; as anyboot leaves them: RF past the sector, LBA 0
+            ; as a ROM's own read leaves them: RF past the sector, LBA 0
             mov     rf, BOOT_SECTOR + 512
             ldi     0
             phi     r7
@@ -207,7 +212,8 @@ read_sector:
             ldn     rf
             phi     r8
             mov     rf, rb_buf
-            lbr     K_SECREAD
+            call    K_SECREAD
+            rtn
 
 print_unit:
             mov     rf, rb_unit

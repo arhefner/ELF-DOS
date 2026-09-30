@@ -1516,7 +1516,8 @@ gsn_build_ext_done:
 
             call    _load_lba24
             mov     rf, dir_buf
-            lbr     f_ideread       ; tail call
+            call    f_ideread       ; not a tail jump: BIOS entry
+            rtn                     ; points are only ever called
 
             endp
 
@@ -1535,7 +1536,8 @@ gsn_build_ext_done:
 
             call    _load_lba24
             mov     rf, dir_buf
-            lbr     f_idewrite      ; tail call
+            call    f_idewrite      ; not a tail jump: BIOS entry
+            rtn                     ; points are only ever called
 
             endp
 
