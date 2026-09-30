@@ -46,7 +46,7 @@ $SdkHeaders = @(
 # docs/DEVELOPER_GUIDE.md's own "Library Modules" table).
 $SdkLibModules = @(
     "drives", "env", "file_glob", "fmt32", "heap_bump", "heap_malloc", "icall",
-    "lineedit", "modload", "move", "pathstr", "vollabel", "ymodem"
+    "lineedit", "modload", "move", "pathstr", "term", "vollabel", "ymodem"
 )
 
 $SdkLibIncs = @(

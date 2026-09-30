@@ -635,6 +635,8 @@ Reads back the exit code of the last command that ran.
 | `DIR_STATE_LEN` | 9 | Size of the snapshot buffer `K_DIR_SAVE_STATE`/`K_DIR_RESTORE_STATE` use. |
 | `IO_TYPE_TARGET` | `PROG_BASE - 114` | Word naming the current console output routine. The kernel restores `K_TYPE` from it after every command, so a console hook must update it too; comparing it against `K_TYPE`'s address field also tells a hook whether output is redirected. |
 | `IO_READ_TARGET` | `PROG_BASE - 112` | The same, for console input and `K_READ`. |
+| `TERM_ROWS` | `$0191` | Byte: the console terminal's height in rows, 0 if unknown. Kept by the kernel, set by `TERMSIZE`. To lay out output, call `term_size` (`term.asm`), which falls back to `ROWS` and then 24; read the byte directly only where opening the environment file is too slow. |
+| `TERM_COLS` | `$0192` | Byte: the terminal's width in columns, 0 if unknown (assume 80). `read_line_ex` wraps long lines by it. Values over 255 are stored as 255. |
 | `BOOT_UNIT` | `PROG_BASE - 115` | Byte: the block device unit the system booted from, where C:-F: live. Set at boot. |
 | `DRIVE_COUNT` | 6 | How many drives can be mounted at once. A drive index runs from 0 to `DRIVE_COUNT`-1 and says nothing about the drive's letter. |
 | `MBR_PART_COUNT` | 4 | Primary partitions in an MBR partition table. Deliberately separate from `DRIVE_COUNT`; a partition number is 1 to 4 however many drives exist. |
@@ -664,9 +666,10 @@ up as an unresolved `drive_letter_of` at link time.
 | `heap_bump.asm` | A simple, fast memory allocator with no per-item `free`. |
 | `heap_malloc.asm` | A general-purpose allocator, with `free` and coalescing of freed blocks. |
 | `icall.asm` | Safely calling through an address that is only known while the program is running. |
-| `lineedit.asm` | Cursor movement and editing on a typed line - arrow keys, Home/End, and so on. |
+| `lineedit.asm` | `read_line_ex`: reading a typed line with cursor movement and editing - arrow keys, Home/End, and so on - including lines longer than the screen is wide. `RF` = buffer, `RC.0` = maximum length, `RC.1` = the column the input starts at (your prompt's length; `LE_COL_UNKNOWN` turns wrapping off), `D` = an `LE_MODE_*` value from `include/lineedit.inc`. With `LE_OPT_HIST` ORed into `D`, the Up and Down arrows return to you as `LE_KEY_UP`/`LE_KEY_DOWN`; put another line in the buffer if you like and call `read_line_resume` (`D` = 1 if you changed the buffer, 0 if not) to carry on editing. |
 | `modload.asm` | Loading a relocatable module at whatever address is currently free. |
 | `move.asm` | Renaming a file where possible, falling back to copy-then-delete otherwise. |
 | `pathstr.asm` | Turning a directory's starting cluster back into a full path string. |
+| `term.asm` | `term_size`: the screen size, `RC.1` = rows, `RC.0` = columns (1-255 each). Takes the kernel's `TERM_ROWS`/`TERM_COLS`, else the `ROWS`/`COLUMNS` variables, else 24 by 80, each dimension separately. Needs `env.asm` and `drives.asm`, and may clobber every other register. |
 | `vollabel.asm` | Reading and writing a drive's volume label. |
 | `ymodem.asm` | The YMODEM file-transfer protocol. |

@@ -180,7 +180,8 @@ SPECIAL_BINS = bin\printenv bin\which bin\export bin\unset \
         bin\ls bin\edlin bin\less bin\hexdump bin\move bin\xcopy bin\shell \
         bin\yr bin\ys bin\termsize bin\mr bin\ms \
         bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
-        bin\stat bin\chkdsk bin\mount bin\umount bin\format bin\fdisk
+        bin\stat bin\chkdsk bin\mount bin\umount bin\format bin\fdisk \
+        bin\mdv
 
 # ---- The test\*.asm that link against lib\ -- see build_test.bat's
 # own exclusion list, which must be kept in sync with this set ----
@@ -319,6 +320,9 @@ lib\pathstr.prg: lib\pathstr.asm include\opcodes.def include\bios.inc include\ke
 lib\vollabel.prg: lib\vollabel.asm include\opcodes.def include\kernel_api.inc include\vollabel.inc
 	cd lib && $(ASM) $(ASMFLAGS) vollabel.asm
 
+lib\term.prg: lib\term.asm include\opcodes.def include\kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) term.asm
+
 lib\lineedit.prg: lib\lineedit.asm include\opcodes.def include\bios.inc include\kernel_api.inc include\lineedit.inc
 	cd lib && $(ASM) $(ASMFLAGS) lineedit.asm
 
@@ -430,29 +434,36 @@ test\bin\corrupt: test\corrupt.prg lib\ymodem.prg lib\fmt32.prg test\bin
 progs\ls.prg: progs\ls.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) ls.asm
 
-bin\ls: progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg lib\drives.prg bin
-	$(LINK) $(LFLAGS) -o bin\ls progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg lib\drives.prg
+bin\ls: progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg lib\drives.prg lib\term.prg bin
+	$(LINK) $(LFLAGS) -o bin\ls progs\ls.prg lib\heap_bump.prg lib\env.prg lib\file_glob.prg lib\drives.prg lib\term.prg
 	-del /F /Q bin\ls.lkb
 
 progs\edlin.prg: progs\edlin.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) edlin.asm
 
-bin\edlin: progs\edlin.prg lib\env.prg lib\lineedit.prg lib\drives.prg bin
-	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg lib\lineedit.prg lib\drives.prg
+bin\edlin: progs\edlin.prg lib\env.prg lib\lineedit.prg lib\drives.prg lib\term.prg bin
+	$(LINK) $(LFLAGS) -o bin\edlin progs\edlin.prg lib\env.prg lib\lineedit.prg lib\drives.prg lib\term.prg
 	-del /F /Q bin\edlin.lkb
 
 progs\less.prg: progs\less.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) less.asm
 
-bin\less: progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg bin
-	$(LINK) $(LFLAGS) -o bin\less progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg
+bin\less: progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg lib\term.prg bin
+	$(LINK) $(LFLAGS) -o bin\less progs\less.prg lib\pager.prg lib\src_file.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg lib\term.prg
 	-del /F /Q bin\less.lkb
+
+progs\mdv.prg: progs\mdv.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) mdv.asm
+
+bin\mdv: progs\mdv.prg lib\env.prg lib\drives.prg lib\term.prg bin
+	$(LINK) $(LFLAGS) -o bin\mdv progs\mdv.prg lib\env.prg lib\drives.prg lib\term.prg
+	-del /F /Q bin\mdv.lkb
 
 progs\hexdump.prg: progs\hexdump.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) hexdump.asm
 
-bin\hexdump: progs\hexdump.prg lib\pager.prg lib\src_hex.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg bin
-	$(LINK) $(LFLAGS) -o bin\hexdump progs\hexdump.prg lib\pager.prg lib\src_hex.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg
+bin\hexdump: progs\hexdump.prg lib\pager.prg lib\src_hex.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg lib\term.prg bin
+	$(LINK) $(LFLAGS) -o bin\hexdump progs\hexdump.prg lib\pager.prg lib\src_hex.prg lib\pos32.prg lib\fmt32.prg lib\env.prg lib\lineedit.prg lib\drives.prg lib\term.prg
 	-del /F /Q bin\hexdump.lkb
 
 progs\move.prg: progs\move.asm include\kernel_api.inc include\bios.inc include\opcodes.def
@@ -462,11 +473,11 @@ bin\move: progs\move.prg lib\move.prg lib\file_glob.prg bin
 	$(LINK) $(LFLAGS) -o bin\move progs\move.prg lib\move.prg lib\file_glob.prg
 	-del /F /Q bin\move.lkb
 
-progs\shell.prg: progs\shell.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+progs\shell.prg: progs\shell.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\lineedit.inc
 	cd progs && $(ASM) $(ASMFLAGS) shell.asm
 
-bin\shell: progs\shell.prg lib\env.prg lib\drives.prg bin
-	$(LINK) $(LFLAGS) -o bin\shell progs\shell.prg lib\env.prg lib\drives.prg
+bin\shell: progs\shell.prg lib\env.prg lib\drives.prg lib\lineedit.prg bin
+	$(LINK) $(LFLAGS) -o bin\shell progs\shell.prg lib\env.prg lib\drives.prg lib\lineedit.prg
 	-del /F /Q bin\shell.lkb
 
 progs\yr.prg: progs\yr.asm include\kernel_api.inc include\bios.inc include\opcodes.def include\ymodem.inc

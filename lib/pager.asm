@@ -126,8 +126,7 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   copy4bytes
             extrn   copy4bytes_to_r8
             extrn   zero4bytes
-            extrn   env_getenv
-            extrn   env_parse_uint
+            extrn   term_size
             extrn   read_line_ex
             extrn   less_top
             extrn   less_candidate_top
@@ -149,7 +148,6 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   less_at_eof
             extrn   less_status_mode
             extrn   less_key
-            extrn   less_rows_name
             extrn   less_esc_buf
             extrn   less_search_len
             extrn   less_count
@@ -158,9 +156,10 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             extrn   less_count_len
             extrn   less_count_pending
             extrn   less_title
-            extrn   less_cols_name
             extrn   less_width
             extrn   less_col
+            extrn   less_sgr_seen
+            extrn   less_sgr_end
             extrn   less_status_room
             extrn   less_numbers
             extrn   less_nowrap
@@ -230,33 +229,32 @@ LESS_STACK_MAX:  equ    250         ; line-history stack depth (must stay
             ldi     LESS_PAGE_LINES
             str     rf
 
-            ; --- read ROWS from the environment; if valid, override
-            ; less_page_lines with ROWS-1 (same "-1 for the status
-            ; line" reasoning as MORE's own identical block, which
-            ; this is copied from). RA/RC (entry argv/argc) are no
-            ; longer needed past this point. ---
-            mov     rf, less_rows_name
-            call    env_getenv          ; RF = value or 0
-            ghi     rf
-            lbnz    less_have_rows
-            glo     rf
-            lbz     less_draw_first     ; not set: keep the default
-
-less_have_rows:
-            call    env_parse_uint      ; RD = parsed value
-            ghi     rd
-            lbnz    less_rows_ok        ; high byte nonzero: >= 256
-            ldi     2
-            str     r2
-            glo     rd
-            sm                          ; DF=1 iff RD.lo >= 2
-            lbnf    less_draw_first     ; RD < 2: keep the default
-
-less_rows_ok:
-            sub16   rd, 1               ; RD = ROWS - 1
+            ; --- the screen size (lib/term.asm: the kernel's TERM_ROWS/
+            ; TERM_COLS, else ROWS/COLUMNS, else 24x80). The page is
+            ; ROWS-1 lines, one row being the status line; nothing the
+            ; pager prints may reach the last column (see less_width).
+            ; RA/RC (entry argv/argc) are no longer needed past here. ---
+            call    term_size           ; RC.1 = rows, RC.0 = columns
+            ghi     rc
+            smi     2
+            lbnf    less_rows_kept      ; under 2: keep the default
+            adi     1                   ; D = rows - 1
+            plo     r9
             mov     rb, less_page_lines
-            glo     rd
+            glo     r9
             str     rb
+less_rows_kept:
+            mov     rf, less_width
+            ldi     LESS_WIDTH_DEFAULT
+            str     rf
+            glo     rc
+            smi     2
+            lbnf    less_draw_first     ; 0 or 1 column: keep the default
+            adi     1                   ; D = columns - 1
+            plo     r9
+            mov     rf, less_width
+            glo     r9
+            str     rf
 
 less_draw_first:
             ; clamp less_page_lines to LESS_MAX_VISIBLE -- bounds
@@ -272,41 +270,6 @@ less_draw_first:
             str     rf
 
 less_draw_first2:
-            ; --- read COLUMNS the same way. Nothing the pager prints
-            ; may wrap: a wrapped line or status line scrolls the whole
-            ; screen, and then no row is where the scroll routines
-            ; expect it. So every line -- the source's and the status
-            ; line -- stops at COLUMNS-1 display columns, never touching
-            ; the last column, which many terminals wrap on the moment
-            ; it is written. An unset, zero or one-column value means
-            ; 80. ---
-            mov     rf, less_width
-            ldi     LESS_WIDTH_DEFAULT
-            str     rf
-            mov     rf, less_cols_name
-            call    env_getenv          ; RF = value or 0
-            ghi     rf
-            lbnz    less_have_cols
-            glo     rf
-            lbz     less_draw_first3    ; not set: keep the default
-less_have_cols:
-            call    env_parse_uint      ; RD = parsed value
-            ghi     rd
-            lbnz    less_cols_wide      ; >= 256: as wide as a byte goes
-            glo     rd
-            smi     2
-            lbnf    less_draw_first3    ; 0 or 1: keep the default
-            glo     rd
-            smi     1
-            plo     r9
-            mov     rf, less_width
-            glo     r9
-            str     rf                  ; limit = COLUMNS - 1
-            lbr     less_draw_first3
-less_cols_wide:
-            mov     rf, less_width
-            ldi     255
-            str     rf
 less_draw_first3:
             ; --- tell the source the display mode + per-row text width. In
             ; wrap mode the source breaks rows to fit that width exactly
@@ -731,6 +694,8 @@ cmd_search:
             mov     rf, less_search_buf
             ldi     LESS_SEARCH_MAX-1
             plo     rc
+            ldi     1                   ; input starts after "/"
+            phi     rc
             ldi     LE_MODE_REDIR
             call    read_line_ex
 
@@ -1528,7 +1493,9 @@ pr_bl_done:
 ; scrolling never see the difference.
 ;
 ; A TAB moves to the next multiple of 8 and is printed only if it lands
-; no further right than less_room; any other byte counts as one column.
+; no further right than less_room; a CR is not printed and an escape
+; sequence takes no columns (see pl_esc); any other byte counts as one
+; column.
 ; A cursor sitting at column less_room is fine -- only a character
 ; printed THERE would wrap -- so a tab may land exactly on it.
 ;
@@ -1548,10 +1515,19 @@ pl_render:
             mov     r8, less_col
             ldi     0
             str     r8                  ; screen column 0
+            mov     r8, less_sgr_seen
+            ldi     0
+            str     r8                  ; no colour changed yet
 
 pl_loop:
             ldn     rf
             lbz     pl_done             ; end of the line
+            xri     27
+            lbz     pl_esc
+            ldn     rf
+            xri     13
+            lbz     pl_cr
+            ldn     rf
             xri     9
             lbz     pl_tab
 
@@ -1567,6 +1543,10 @@ pl_loop:
             str     r8                  ; column + 1
             lda     rf
             call    K_TYPE
+            lbr     pl_loop
+
+pl_cr:
+            inc     rf                  ; a CR (as in CR LF) is not shown
             lbr     pl_loop
 
 pl_tab:
@@ -1592,7 +1572,81 @@ pl_tab_fits:
             lbr     pl_loop
 
 pl_done:
+            ; a line that changed colours ends with a reset, even when it
+            ; was cut short before its own
+            mov     r8, less_sgr_seen
+            ldn     r8
+            lbz     pl_ret
+            call    K_INMSG
+            db      27,"[0m",0
+pl_ret:
             rtn
+
+;------------------------------------------------------------------
+; pl_esc: an escape sequence in the line (RF at the ESC). ESC [ params
+; final takes no columns: printed if it is an SGR (final 'm', the
+; colour and style codes MDV writes), silently dropped otherwise -- a
+; cursor movement would wreck the pager's screen. Any other ESC x pair
+; is dropped too. Nothing past the line's NUL is ever read.
+;------------------------------------------------------------------
+pl_esc:
+            ghi     rf
+            phi     r9
+            glo     rf
+            plo     r9                  ; R9 = the ESC
+            inc     rf
+            ldn     rf
+            lbz     pl_loop             ; a lone ESC at the end: dropped
+            xri     '['
+            lbz     pl_csi
+            inc     rf                  ; ESC x: drop both
+            lbr     pl_loop
+pl_csi:
+            inc     rf
+            ldn     rf
+            lbz     pl_loop             ; unfinished: dropped
+            smi     $40
+            lbnf    pl_csi              ; a parameter byte
+            ldn     rf
+            smi     $7F
+            lbdf    pl_csi
+            ldn     rf                  ; the final byte
+            inc     rf                  ; RF = just past the sequence
+            xri     'm'
+            lbnz    pl_loop             ; not SGR: dropped
+            mov     r8, less_sgr_seen
+            ldi     1
+            str     r8
+pl_sgr_out:
+            ; print R9 up to RF. put_line may only use R8 and R9, and K_TYPE
+            ; keeps RF but nothing is known about R9, so the end goes in
+            ; memory.
+            mov     r8, less_sgr_end
+            ghi     rf
+            str     r8
+            inc     r8
+            glo     rf
+            str     r8
+            ghi     r9
+            phi     rf
+            glo     r9
+            plo     rf
+pl_sgr_l:
+            mov     r8, less_sgr_end
+            lda     r8
+            str     r2
+            ghi     rf
+            xor
+            lbnz    pl_sgr_c
+            ldn     r8
+            str     r2
+            glo     rf
+            xor
+            lbz     pl_loop             ; RF at the end: past the sequence
+pl_sgr_c:
+            lda     rf
+            call    K_TYPE
+            lbr     pl_sgr_l
 
 psl_s_open:         db      "-- ",0
 psl_s_long:         db      ": SPACE next  b back  g top  G end  / search  n again  q quit --",0
@@ -2643,12 +2697,12 @@ less_lines_this_page:   db      0
 less_at_eof:            db      0
 less_status_mode:       db      0
 less_key:               db      0
-less_rows_name:         db      "ROWS",0
 less_esc_buf:           ds      10
 less_title:             dw      0       ; pager_run's RF: the program name
-less_cols_name:         db      "COLUMNS",0
 less_width:             db      LESS_WIDTH_DEFAULT ; widest line (COLUMNS-1)
 less_col:               db      0       ; put_line's current display column
+less_sgr_seen:          db      0       ; put_line printed an SGR this line
+less_sgr_end:           dw      0       ; put_line: end of the SGR printing
 less_status_room:       db      0       ; what is left of it, while printing
 less_numbers:           db      0       ; -N: number the lines
 less_nowrap:            db      0       ; -S: truncate + horizontal scroll
@@ -2681,7 +2735,6 @@ less_num_buf:           ds      12      ; padded number + space, printed
                 public  less_at_eof
                 public  less_status_mode
                 public  less_key
-                public  less_rows_name
                 public  less_esc_buf
                 public  less_search_len
                 public  less_count
@@ -2690,9 +2743,10 @@ less_num_buf:           ds      12      ; padded number + space, printed
                 public  less_count_len
                 public  less_count_pending
                 public  less_title
-                public  less_cols_name
                 public  less_width
                 public  less_col
+                public  less_sgr_seen
+                public  less_sgr_end
                 public  less_status_room
                 public  less_numbers
                 public  less_nowrap

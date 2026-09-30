@@ -805,6 +805,21 @@ K_HIMEM_RELEASE:    equ     $018B       ; -> kernel_himem_release
 ;   Returns: DF = 0 always
 K_DRIVE_INVALIDATE: equ     $018E       ; -> kernel_drive_invalidate
 
+; TERM_ROWS/TERM_COLS: the console terminal's size in rows/columns, one
+; byte each, kept by the kernel in volatile RAM (2026-09-30, kernel
+; v1.2). DATA bytes at fixed addresses, read and written directly -- no
+; call. 0 means unknown: that is the value at every boot. TERMSIZE sets
+; both, along with ROWS/COLUMNS. Values above 255 are stored as 255.
+; To lay out output, call term_size (lib/term.asm) rather than reading
+; these: it falls back to ROWS/COLUMNS and then 24x80 when they are 0.
+;
+; Why here and not only in the environment: reading COLUMNS means
+; opening and scanning /cfg/env.dat, which is fine once per program run
+; but far too slow for the line editor (lib/lineedit.asm), which needs
+; the width at the start of every input line to wrap long lines.
+TERM_ROWS:          equ     $0191       ; byte: terminal rows, 0=unknown
+TERM_COLS:          equ     $0192       ; byte: terminal columns, 0=unknown
+
 ; GLOB_BUF_LEN REMOVED along with K_GLOB_RESERVE above (dead code,
 ; 2026-08-26) -- its only use was sizing that reservation.
 
@@ -876,7 +891,7 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $0191
+; next free jump-table slot address: $0193 (after the TERM_ROWS/TERM_COLS data bytes)
 ;
 ; This comment has been stale in BOTH directions before ($0179 until
 ; 2026-07-27, then $0197 until 2026-09-09) while kernel.asm was right

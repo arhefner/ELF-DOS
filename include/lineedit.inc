@@ -29,3 +29,19 @@ LE_MODE_BITBANG: equ    2       ; read_line_ex: f_bread directly
                                 ; Matches progs/mr.asm's/lib/ymodem.
                                 ; asm's own already-proven "-b" mode
                                 ; convention exactly.
+
+; Options, ORed into read_line_ex's D argument (2026-09-30).
+LE_OPT_HIST:    equ     $80     ; Up/Down (and Ctrl-P/Ctrl-N) return
+                                ; to the caller as LE_KEY_UP/LE_KEY_DOWN
+                                ; instead of being discarded -- see
+                                ; read_line_resume.
+
+; read_line_ex/read_line_resume return codes in D when DF=0.
+LE_KEY_ENTER:   equ     0       ; a finished line
+LE_KEY_UP:      equ     1       ; Up pressed (LE_OPT_HIST only)
+LE_KEY_DOWN:    equ     2       ; Down pressed (LE_OPT_HIST only)
+
+; RC.1 value meaning "I don't know my prompt's length": wrapping is
+; turned off and the editor behaves as it did before wrapping existed
+; (lines longer than the terminal is wide redraw wrongly).
+LE_COL_UNKNOWN: equ     $FF

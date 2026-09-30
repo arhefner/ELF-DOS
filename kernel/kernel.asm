@@ -91,7 +91,7 @@
 ; banner string below, which is a separate literal for simplicity (not
 ; worth generating dynamically at boot).
 KERNEL_VER_MAJOR:   equ     1
-KERNEL_VER_MINOR:   equ     1
+KERNEL_VER_MINOR:   equ     2
 
             org     $0100
 
@@ -330,7 +330,18 @@ k_himem_release: lbr    kernel_himem_release ; $018B
 ; -- see kernel_drive_invalidate's own header comment in kinit.asm for
 ; the ordering contract and why getting it backwards corrupts data.
 k_drive_invalidate: lbr kernel_drive_invalidate ; $018E
-                ; next free jump-table address: $0191
+
+; TERM_ROWS/TERM_COLS: the console terminal's size, 2 DATA bytes at
+; fixed addresses (2026-09-30), not call slots -- same "a fixed address
+; read directly, not through a kernel call" precedent as BPB_DATA_PTR/
+; DRIVE_DATA_PTR above. 0 = unknown (the value at every boot, since the
+; volatile image is reloaded from disk). TERMSIZE writes them; anything
+; that needs the width on every keystroke (lib/lineedit.asm's line
+; wrapping) reads them here instead of opening /cfg/env.dat each time.
+; See kernel_api.inc's own TERM_ROWS comment.
+term_rows:      db      0                   ; $0191: TERM_ROWS
+term_cols:      db      0                   ; $0192: TERM_COLS
+                ; next free jump-table address: $0193
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

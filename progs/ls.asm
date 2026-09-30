@@ -104,8 +104,7 @@
 
             extrn   bump_init
             extrn   bump_alloc
-            extrn   env_getenv
-            extrn   env_parse_uint
+            extrn   term_size
             extrn   is_glob
             extrn   glob_init
             extrn   glob_next
@@ -458,35 +457,17 @@ lso_done:
             rtn
 
 ls_resolve:
-            ; --- read COLUMNS from the environment, once, here -- the
-            ; one point every argv-parsing path above converges
-            ; through (ls_scan_options' own 0/1-path fallthroughs, and
-            ; the 1-path ls_patharg capture just above), and safely
-            ; past every use of the entry RA/RC this program still
-            ; needs (env_getenv/env_parse_uint's own broad clobber
-            ; footprint includes both). Falls back to LS_SCREEN_COLS
-            ; (ls_screen_cols' own compile-time initial value) if
-            ; COLUMNS is unset, non-numeric, or parses to 0.
-            mov     rf, ls_columns_name
-            call    env_getenv          ; RF = value or 0
-            ghi     rf
-            lbnz    ls_have_columns
-            glo     rf
-            lbz     ls_resolve_body     ; not set: keep the default
-
-ls_have_columns:
-            call    env_parse_uint      ; RD = parsed value
-            ghi     rd
-            lbnz    ls_columns_set
-            glo     rd
-            lbz     ls_resolve_body     ; parsed to 0: keep the default
-
-ls_columns_set:
+            ; --- the screen width, once, here -- the one point every
+            ; argv-parsing path above converges through, and safely past
+            ; every use of the entry RA/RC (term_size may call env_getenv,
+            ; whose broad clobber footprint includes both). term_size
+            ; takes the kernel's TERM_COLS, else COLUMNS, else 80.
+            call    term_size           ; RC.0 = columns
             mov     rb, ls_screen_cols
-            ghi     rd
+            ldi     0
             str     rb
             inc     rb
-            glo     rd
+            glo     rc
             str     rb
 
 ls_resolve_body:
@@ -3780,7 +3761,6 @@ ls_colwidths:   ds      LS_MAX_COLS ; 1 byte/column (max width 129 --
 ls_ptrs:        ds      2*LS_MAX_ENTRIES
 ls_entries:     ds      LSENT_LEN*LS_MAX_ENTRIES
 
-ls_columns_name: db     "COLUMNS",0
 ls_screen_cols:  dw     LS_SCREEN_COLS  ; overridden by ls_resolve if
                                         ; COLUMNS is set to a valid
                                         ; nonzero number

@@ -1,7 +1,9 @@
 ;
 ; lineedit.asm - K_INPUTL-style line editor with arrow-key/Emacs-style
 ; Ctrl-shortcut cursor editing (Left/Right/Home/End/Backspace/Del/
-; Ctrl-B/F/A/E/D). NOT a standalone program -- no EDF header, no org
+; Ctrl-B/F/A/E/D), lines longer than the terminal is wide (wrapping
+; onto following rows), and optional Up/Down hand-back for a caller
+; that keeps its own history (the shell). NOT a standalone program -- no EDF header, no org
 ; PROG_BASE, no entry point of its own. Assembled separately
 ; (lib/lineedit.prg) and linked alongside a program that wants it,
 ; the same way every other lib/*.asm module already does. A calling
@@ -79,103 +81,272 @@
 ; shell itself.
 ;
 
+; WRAPPING (2026-09-30). The editor tracks where the terminal's own
+; cursor is (le_phys, a logical position 0..le_len+1 in the line) and
+; moves it with one routine, le_goto, which knows the terminal width W
+; (the kernel's TERM_COLS byte, 80 if unknown) and the column S at
+; which input started (the caller's prompt length, passed in RC.1).
+; Position p is on row (S+p) div W, column (S+p) mod W, counting rows
+; from the one the prompt ended on.
+;
+;   - Moving FORWARD reprints the characters in between (the proven
+;     "reprint to move right" technique the single-row editor always
+;     used); the terminal's own auto-wrap carries it onto the next row.
+;   - Moving BACKWARD on the same row uses backspaces (also unchanged);
+;     to an earlier row it sends ESC[<n>A, then backspaces or ESC[<n>C
+;     to reach the column.
+;   - After printing, if the cursor sits exactly at a row boundary the
+;     terminal may be in "pending wrap" (xterm/VT100 hold the cursor on
+;     the last column until the next character; others have already
+;     moved it). Printing the character that belongs in the next cell
+;     and a backspace puts both kinds in the same place: column 0 of the
+;     next row.
+;
+; On a line that never wraps, every byte sent is the same as before:
+; backspaces left, reprinting right. The CSI sequences only appear once
+; a line actually crosses a row boundary.
+;
+; RC.1 = LE_COL_UNKNOWN ($FF) turns wrapping off (width treated as 255,
+; start column 0) for a caller that does not know its prompt length.
+;
+; HISTORY HAND-BACK. With LE_OPT_HIST set in D, Up/Down (and Ctrl-P/
+; Ctrl-N) return to the caller with DF=0 and D = LE_KEY_UP/LE_KEY_DOWN
+; instead of being discarded. The caller may rewrite the buffer (a
+; NUL-terminated string) and then calls read_line_resume with D=1 (the
+; buffer changed: redraw it, cursor at the end) or D=0 (nothing
+; changed); editing continues exactly where it left off. Enter always
+; returns D = LE_KEY_ENTER (0).
+;
+
 #include    include/opcodes.def
 #include    include/bios.inc
 #include    include/kernel_api.inc
 #include    include/lineedit.inc
 
+LE_MAX_CAP:     equ     250             ; positions (incl. le_len+1)
+                                        ; must stay below 256
+LE_DEF_WIDTH:   equ     80              ; TERM_COLS unknown/implausible
+
             extrn   le_buf
             extrn   le_max_len
             extrn   le_mode
+            extrn   le_opts
             extrn   le_len
             extrn   le_cursor
-            extrn   le_ert_blank_count
-            extrn   le_ert_start
-            extrn   le_ert_pos
-            extrn   le_ert_bscount
+            extrn   le_phys
+            extrn   le_width
+            extrn   le_start
+            extrn   le_startcol
+            extrn   le_row
+            extrn   le_col
+            extrn   le_r1
+            extrn   le_c1
+            extrn   le_tgt
+            extrn   le_pend
+            extrn   le_pstart
+            extrn   le_cnt
+            extrn   le_csi_c
+            extrn   le_dig
             extrn   le_eic_i
             extrn   le_eda_i
-            extrn   le_home_count
-            extrn   le_end_pos
+            extrn   le_oldlen
 
 ;------------------------------------------------------------------
-; read_line_ex: see this file's own header comment for the full
-; design discussion (extraction rationale, history-recall scope, and
-; the LE_MODE_FAST/LE_MODE_REDIR tradeoff).
+; read_line_ex: see this file's own header comment.
 ; Args:    RF = caller-owned buffer (must be at least max_len+1 bytes)
-;          RC.0 = max_len (max characters, NOT including the NUL
-;          terminator)
-;          D = mode (LE_MODE_FAST or LE_MODE_REDIR, include/lineedit.inc)
-; Returns: DF=0: buffer holds a NUL-terminated line (possibly empty)
+;          RC.0 = max_len (max characters, NOT including the NUL;
+;          values above LE_MAX_CAP are treated as LE_MAX_CAP)
+;          RC.1 = column the input starts at (the prompt's length), or
+;          LE_COL_UNKNOWN to disable wrapping
+;          D = mode (LE_MODE_*) ORed with options (LE_OPT_HIST)
+; Returns: DF=0: D = LE_KEY_ENTER, buffer holds a NUL-terminated line
+;          (possibly empty); or (LE_OPT_HIST only) D = LE_KEY_UP/
+;          LE_KEY_DOWN, editing suspended -- see read_line_resume
 ;          DF=1: EOF (LE_MODE_REDIR only) -- input was exhausted
 ;          before any real content was read this call; buffer holds
-;          an empty string. LE_MODE_FAST never returns DF=1, matching
-;          a live keyboard's own lack of any EOF concept.
+;          an empty string.
 ; Modifies: everything
 ;------------------------------------------------------------------
             proc    read_line_ex
 
-            plo     r9                  ; stash D=mode -- the mov
-                                        ; below clobbers D (gotcha #4)
+            plo     r9                  ; stash D -- the mov below
+                                        ; clobbers it (gotcha #4)
             mov     rb, le_mode
             glo     r9
-            str     rb                  ; le_mode = mode argument
+            ani     $7F
+            str     rb                  ; le_mode = mode bits
+            mov     rb, le_opts
+            glo     r9
+            ani     $80
+            str     rb                  ; le_opts = option bits
 
+            glo     rc
+            smi     LE_MAX_CAP+1
+            lbnf    rle_max_ok          ; RC.0 <= LE_MAX_CAP
+            ldi     LE_MAX_CAP
+            plo     rc
+rle_max_ok:
             mov     rb, le_max_len
             glo     rc
             str     rb                  ; le_max_len = RC.0
+
+            mov     rb, le_startcol
+            ghi     rc
+            str     rb                  ; le_startcol = RC.1
 
             mov     rb, le_buf
             ghi     rf
             str     rb
             inc     rb
             glo     rf
-            str     rb                  ; le_buf = RF (caller's buffer
-                                        ; pointer)
+            str     rb                  ; le_buf = RF
 
-            mov     rf, le_len
-            ldi     0
-            str     rf                  ; le_len = 0
-
-            mov     rf, le_cursor
-            ldi     0
-            str     rf                  ; le_cursor = 0
-
-            mov     rd, le_buf
-            lda     rd
-            phi     rf
-            ldn     rd
-            plo     rf                  ; RF = caller's buffer
             ldi     0
             str     rf                  ; buffer[0] = 0 (empty line)
+            mov     rf, le_len
+            ldi     0
+            str     rf
+            mov     rf, le_cursor
+            ldi     0
+            str     rf
+            mov     rf, le_phys
+            ldi     0
+            str     rf
 
+            ; ---- geometry: width W and start column S ----
+            mov     rf, le_startcol
+            ldn     rf
+            xri     LE_COL_UNKNOWN
+            lbnz    rle_known
+            mov     rf, le_width        ; unknown prompt: no wrapping
+            ldi     255
+            str     rf
+            mov     rf, le_start
+            ldi     0
+            str     rf
+            lbr     le_loop
+
+rle_known:
+            mov     rf, TERM_COLS
+            ldn     rf
+            smi     8
+            lbdf    rle_w_ok            ; >= 8: believe it
+            ldi     LE_DEF_WIDTH-8      ; 0 (unknown) or implausible
+rle_w_ok:
+            adi     8
+            plo     r9
+            mov     rf, le_width
+            glo     r9
+            str     rf                  ; le_width = W
+
+            ; S = startcol mod W
+            mov     rf, le_startcol
+            ldn     rf
+rle_mod:
+            plo     r8                  ; R8.0 = remainder so far
+            mov     rf, le_width
+            ldn     rf
+            str     r2                  ; M(X) = W
+            glo     r8
+            sm                          ; D = rem - W
+            lbdf    rle_mod             ; rem >= W: keep subtracting
+            mov     rf, le_start
+            glo     r8
+            str     rf                  ; le_start = S
+
+            ; prompt ended exactly at a row boundary: normalize a
+            ; possible pending wrap so the cursor really is at column
+            ; 0 of the next row, where le_start = 0 says it is
+            glo     r8
+            lbnz    le_loop
+            mov     rf, le_startcol
+            ldn     rf
+            lbz     le_loop             ; no prompt at all
+            ldi     ' '
+            call    K_TYPE
+            ldi     8
+            call    K_TYPE
             lbr     le_loop
 
 ;------------------------------------------------------------------
-; le_getchar: mode-aware, blocking single-byte read -- see this
-; file's own header comment for the full LE_MODE_FAST/LE_MODE_REDIR
-; tradeoff. In LE_MODE_REDIR, D==0 signals EOF, matching K_READ's own
-; documented contract ("D=0 (NUL) at EOF or on a read error" --
-; kernel/redir.asm's _read_from_file); a live console read via K_READ, when
-; NOT actually redirected, falls straight through to the real BIOS
-; f_read and can never legitimately produce a NUL for a genuine
-; keystroke, so this is unambiguous. LE_MODE_FAST/LE_MODE_BITBANG
-; never signal EOF.
-;
-; LE_MODE_BITBANG (2026-08-05) added as a third plain branch, not a
-; function-pointer/indirect-call redesign -- extending this dispatch
-; to a new already-known, already-proven-convention BIOS routine
-; (f_bread, used identically to f_uread by progs/mr.asm/lib/ymodem.asm)
-; costs one more three-instruction branch, matching this project's
-; own established mr.asm/ms.asm/ymodem.asm "-u"/"-b" mode-number
-; precedent exactly. A genuinely dynamic, not-known-at-link-time
-; source (e.g. a future parallel-keyboard driver) would be the real
-; case for an indirect call -- not needed for any source that exists
-; today.
-; Args:    none (reads le_mode)
-; Returns: DF=0, D=the byte read; or DF=1 (LE_MODE_REDIR only) for
-;          EOF -- every caller must check DF immediately after the
-;          call, same discipline as K_INPUTL's own DF=0/1 contract.
+; read_line_resume: continue a read_line_ex call that returned
+; LE_KEY_UP/LE_KEY_DOWN. The caller may have rewritten the buffer
+; (still the one given to read_line_ex).
+; Args:    D = 0: buffer unchanged; nonzero: buffer replaced -- redraw
+;          it and put the cursor at its end
+; Returns: as read_line_ex
+;------------------------------------------------------------------
+            public  read_line_resume
+read_line_resume:
+            lbz     le_loop             ; unchanged: keep editing
+
+            ldi     0
+            call    le_goto             ; to the start of the line
+
+            mov     rf, le_len
+            ldn     rf
+            plo     r9
+            mov     rf, le_oldlen
+            glo     r9
+            str     rf                  ; le_oldlen = old length
+
+            ; le_len = strlen(buffer), capped at le_max_len
+            ldi     0
+            plo     r9                  ; R9.0 = length so far
+rlr_len:
+            glo     r9
+            call    le_ptr              ; RF = &buffer[len] (R9 kept)
+            ldn     rf
+            lbz     rlr_len_done
+            mov     rf, le_max_len
+            ldn     rf
+            str     r2
+            glo     r9
+            sm                          ; D = len - max
+            lbdf    rlr_cap             ; len >= max: cut it here
+            inc     r9
+            lbr     rlr_len
+rlr_cap:
+            glo     r9
+            call    le_ptr
+            ldi     0
+            str     rf                  ; buffer[max] = NUL
+rlr_len_done:
+            mov     rf, le_len
+            glo     r9
+            str     rf
+            mov     rf, le_cursor
+            glo     r9
+            str     rf                  ; cursor at the end
+
+            ; print to max(old, new): the new text, then spaces over
+            ; whatever is left of the old one
+            mov     rf, le_oldlen
+            ldn     rf
+            str     r2
+            mov     rf, le_len
+            ldn     rf
+            sm                          ; D = new - old
+            lbdf    rlr_newlonger
+            mov     rf, le_oldlen
+            ldn     rf
+            lbr     rlr_print
+rlr_newlonger:
+            mov     rf, le_len
+            ldn     rf
+rlr_print:
+            call    le_print_to
+            mov     rf, le_cursor
+            ldn     rf
+            call    le_goto
+            lbr     le_loop
+
+;------------------------------------------------------------------
+; le_getchar: mode-aware, blocking single-byte read. In LE_MODE_REDIR,
+; D==0 signals EOF, matching K_READ's own documented contract ("D=0
+; (NUL) at EOF or on a read error" -- kernel/redir.asm's
+; _read_from_file). LE_MODE_FAST/LE_MODE_BITBANG never signal EOF.
+; Returns: DF=0, D=the byte read; or DF=1 (LE_MODE_REDIR only) for EOF
 ; Modifies: RD (and D)
 ;------------------------------------------------------------------
 le_getchar:
@@ -205,6 +376,9 @@ lgc_have_byte:
             clc
             rtn
 
+;------------------------------------------------------------------
+; Main loop.
+;------------------------------------------------------------------
 le_loop:
             call    le_getchar
             lbdf    le_do_eof
@@ -212,7 +386,7 @@ le_loop:
 
             ; ESC checked FIRST -- minimizes the latency between
             ; reading ESC and le_escape's own next le_getchar call,
-            ; same reasoning as progs/shell.asm's own rlwh_loop.
+            ; same reasoning as the shell's original rlwh_loop.
             glo     rc
             xri     27                  ; ESC
             lbz     le_escape
@@ -248,23 +422,15 @@ le_loop:
             xri     4                   ; Ctrl-D: delete at cursor
             lbz     le_ctrld
 
-            ; ---- deferred: Ctrl-K/U/W/Y need a cut buffer, not
-            ; implemented -- explicitly discarded rather than falling
-            ; through to the ordinary-character path below ----
             glo     rc
-            xri     11                  ; Ctrl-K
-            lbz     le_loop
+            xri     16                  ; Ctrl-P: same as Up
+            lbz     le_up
             glo     rc
-            xri     21                  ; Ctrl-U
-            lbz     le_loop
-            glo     rc
-            xri     23                  ; Ctrl-W
-            lbz     le_loop
-            glo     rc
-            xri     25                  ; Ctrl-Y
-            lbz     le_loop
+            xri     14                  ; Ctrl-N: same as Down
+            lbz     le_down
 
-            ; ---- any other control byte: silently discard ----
+            ; ---- any other control byte (including the still-
+            ; deferred Ctrl-K/U/W/Y cut/paste keys): discard ----
             glo     rc
             smi     32
             lbnf    le_loop             ; < 32 ($20): discard
@@ -279,164 +445,378 @@ le_loop:
             lbdf    le_loop             ; at cap: silently drop
 
             call    le_insert_char      ; RC.0 = character to insert
-                                        ; (already set above, untouched
-                                        ; by every check since)
-
             lbr     le_loop
 
 ;------------------------------------------------------------------
-; le_redraw_tail: reprint buffer[le_ert_start..le_len-1] (the tail
-; after an insert/delete at/before le_cursor), print le_ert_blank_
-; count trailing spaces to erase a stale character left over from a
-; delete, then walk the terminal cursor back to le_cursor via
-; backspaces. le_ert_start and le_cursor are DELIBERATELY different
-; positions for an insert (le_cursor has already advanced past the
-; newly-inserted character by the time this runs; le_ert_start is the
-; OLD position, where the visible content actually changed and where
-; the terminal's own physical cursor already sits) -- conflating them
-; was a real hardware-found bug the first time this logic was written
-; (see progs/shell.asm's own edit_redraw_tail for the full story).
-; Args:    D = blank_count (0 for insert, 1 for a single-character
-;          delete -- every edit operation here changes exactly one
-;          character, so this is always 0 or 1)
-; Returns: nothing
-; Modifies: R8, R9, RD, RF (and D)
+; le_ptr: RF = &buffer[D].
+; Modifies: R8, RD, RF (and D)
 ;------------------------------------------------------------------
-le_redraw_tail:
-            plo     r9                  ; R9.0 = blank_count (stashed
-                                        ; to memory immediately below)
-            mov     rf, le_ert_blank_count
-            glo     r9
-            str     rf
-
-            mov     rb, le_ert_pos
-            mov     rf, le_ert_start
-            ldn     rf
-            str     rb                  ; le_ert_pos = le_ert_start
-
-lert_print_loop:
-            mov     rf, le_ert_pos
-            ldn     rf
+le_ptr:
             plo     r8
             ldi     0
-            phi     r8                  ; R8 = le_ert_pos (zero-ext)
+            phi     r8                  ; R8 = index (zero-extended)
             mov     rd, le_buf
             lda     rd
             phi     rf
             ldn     rd
-            plo     rf                  ; RF = caller's buffer
-            add16   rf, r8              ; RF = &buffer[le_ert_pos]
-            ldn     rf                  ; D = buffer[le_ert_pos]
-            lbz     lert_print_done     ; NUL: tail fully printed
-
-            call    K_TYPE              ; echo (D still holds the
-                                        ; character, set by ldn above)
-
-            mov     rf, le_ert_pos
-            ldn     rf
-            adi     1
-            str     rf                  ; le_ert_pos++
-            lbr     lert_print_loop
-
-lert_print_done:
-            ; le_ert_pos now equals le_len -- print blank_count
-            ; trailing spaces
-            mov     rf, le_ert_blank_count
-            ldn     rf
-            lbz     lert_no_blank
-
-            ldi     ' '
-            call    K_TYPE
-
-lert_no_blank:
-            ; backspace count = (le_ert_pos - le_cursor) + blank_count
-            mov     rf, le_cursor
-            ldn     rf
-            str     r2                  ; M(X) = le_cursor (subtrahend)
-            mov     rf, le_ert_pos
-            ldn     rf                  ; D = le_ert_pos (minuend)
-            sm                          ; D = le_ert_pos - le_cursor
-            plo     r8                  ; stash (mov below clobbers D)
-
-            mov     rf, le_ert_blank_count
-            ldn     rf
-            str     r2                  ; M(X) = blank_count
-            glo     r8                  ; D = tail_len (reloaded)
-            add                         ; D = tail_len + blank_count
-            plo     r8                  ; stash (mov below clobbers D)
-            mov     rf, le_ert_bscount
-            glo     r8
-            str     rf
-
-lert_backspace_loop:
-            mov     rf, le_ert_bscount
-            ldn     rf
-            lbz     lert_backspace_done
-
-            ldi     8
-            call    K_TYPE
-
-            mov     rf, le_ert_bscount
-            ldn     rf
-            smi     1
-            str     rf
-            lbr     lert_backspace_loop
-
-lert_backspace_done:
+            plo     rf
+            add16   rf, r8
             rtn
 
 ;------------------------------------------------------------------
-; le_insert_char: insert RC.0 into the caller's buffer at le_cursor,
-; shifting the existing tail (including the NUL terminator) right by
-; one, then redraw and advance the cursor. Caller has already
-; confirmed there's room (le_len < le_max_len).
+; le_charat: D = the character shown at position D -- buffer[D], or a
+; space for a position at or past le_len (screen cells beyond the end
+; of the text are blank).
+; Modifies: R8, R9, RD, RF (and D)
+;------------------------------------------------------------------
+le_charat:
+            plo     r9
+            mov     rf, le_len
+            ldn     rf
+            str     r2                  ; M(X) = le_len
+            glo     r9
+            sm                          ; D = p - len, DF=1 iff p >= len
+            lbdf    lca_space
+            glo     r9
+            call    le_ptr
+            ldn     rf
+            rtn
+lca_space:
+            ldi     ' '
+            rtn
+
+;------------------------------------------------------------------
+; le_rowcol: row/column of position D, relative to the row input
+; started on: le_row = (S+p) div W, le_col = (S+p) mod W.
+; Modifies: R7, R8, R9, RF (and D). Makes no calls.
+;------------------------------------------------------------------
+le_rowcol:
+            plo     r8
+            ldi     0
+            phi     r8                  ; R8 = p
+            mov     rf, le_start
+            ldn     rf
+            str     r2
+            glo     r8
+            add                         ; D = p.lo + S
+            plo     r8
+            ghi     r8
+            adci    0
+            phi     r8                  ; R8 = S + p (16-bit)
+            ldi     0
+            plo     r9                  ; R9.0 = row
+
+lrc_loop:
+            mov     rf, le_width
+            ldn     rf
+            str     r2                  ; M(X) = W
+            glo     r8
+            sm                          ; D = lo - W
+            plo     r7                  ; R7.0 = candidate low byte
+            ghi     r8
+            smbi    0                   ; D = hi - borrow
+            lbnf    lrc_done            ; borrow: R8 < W
+            phi     r8
+            glo     r7
+            plo     r8                  ; R8 -= W
+            glo     r9
+            adi     1
+            plo     r9                  ; row++
+            lbr     lrc_loop
+
+lrc_done:
+            mov     rf, le_row
+            glo     r9
+            str     rf
+            mov     rf, le_col
+            glo     r8
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; le_print_to: print the cells from le_phys up to (not including) D
+; -- text characters, then spaces for cells past the end -- leaving
+; le_phys = D. If anything was printed and the cursor ended at a row
+; boundary, resolve a possible pending wrap (see the header): print
+; the cell under it again, then back up.
+; Modifies: everything except RC (and D)
+;------------------------------------------------------------------
+le_print_to:
+            plo     r9
+            mov     rf, le_pend
+            glo     r9
+            str     rf                  ; le_pend = end
+            mov     rf, le_pstart
+            mov     rb, le_phys
+            ldn     rb
+            str     rf                  ; le_pstart = le_phys
+
+lpt_loop:
+            mov     rf, le_pend
+            ldn     rf
+            str     r2                  ; M(X) = end
+            mov     rf, le_phys
+            ldn     rf
+            sm                          ; D = phys - end
+            lbdf    lpt_done            ; phys >= end
+
+            mov     rf, le_phys
+            ldn     rf
+            call    le_charat
+            call    K_TYPE
+
+            mov     rf, le_phys
+            ldn     rf
+            adi     1
+            str     rf                  ; le_phys++
+            lbr     lpt_loop
+
+lpt_done:
+            mov     rf, le_pstart
+            ldn     rf
+            str     r2
+            mov     rf, le_phys
+            ldn     rf
+            sm
+            lbz     lpt_ret             ; nothing printed
+
+            mov     rf, le_phys
+            ldn     rf
+            call    le_rowcol
+            mov     rf, le_col
+            ldn     rf
+            lbnz    lpt_ret             ; mid-row: no wrap question
+
+            mov     rf, le_phys
+            ldn     rf
+            call    le_charat
+            call    K_TYPE
+            ldi     8
+            call    K_TYPE
+lpt_ret:
+            rtn
+
+;------------------------------------------------------------------
+; le_goto: move the terminal cursor from le_phys to position D (at
+; most le_len), leaving le_phys = D. Forward by reprinting, backward by
+; backspaces on the same row or ESC[<n>A plus a column move otherwise.
+; Modifies: everything except RC (and D)
+;------------------------------------------------------------------
+le_goto:
+            plo     r9
+            mov     rf, le_tgt
+            glo     r9
+            str     rf                  ; le_tgt = target
+
+            mov     rf, le_phys
+            ldn     rf
+            str     r2                  ; M(X) = phys
+            mov     rf, le_tgt
+            ldn     rf
+            sm                          ; D = tgt - phys, DF=1 iff >=
+            lbnf    lg_back
+            mov     rf, le_tgt
+            ldn     rf
+            lbr     le_print_to         ; forward: reprint up to it
+
+lg_back:
+            mov     rf, le_phys
+            ldn     rf
+            call    le_rowcol
+            mov     rf, le_row
+            ldn     rf
+            plo     r9
+            mov     rf, le_r1
+            glo     r9
+            str     rf                  ; le_r1 = row of phys
+            mov     rf, le_col
+            ldn     rf
+            plo     r9
+            mov     rf, le_c1
+            glo     r9
+            str     rf                  ; le_c1 = column of phys
+
+            mov     rf, le_tgt
+            ldn     rf
+            call    le_rowcol           ; le_row/le_col = target's
+
+            mov     rf, le_row
+            ldn     rf
+            str     r2
+            mov     rf, le_r1
+            ldn     rf
+            sm                          ; D = r1 - r2 (never negative)
+            lbz     lg_horiz
+            plo     r9
+            ldi     'A'
+            plo     r7
+            glo     r9
+            call    le_csi              ; up r1-r2 rows
+
+lg_horiz:
+            mov     rf, le_c1
+            ldn     rf
+            str     r2
+            mov     rf, le_col
+            ldn     rf
+            sm                          ; D = c2 - c1
+            lbz     lg_done
+            lbdf    lg_right            ; c2 > c1
+            mov     rf, le_col
+            ldn     rf
+            str     r2
+            mov     rf, le_c1
+            ldn     rf
+            sm                          ; D = c1 - c2
+            call    le_bs_n
+            lbr     lg_done
+
+lg_right:
+            plo     r9                  ; D = c2 - c1 (branches keep D)
+            ldi     'C'
+            plo     r7
+            glo     r9
+            call    le_csi
+
+lg_done:
+            mov     rf, le_tgt
+            ldn     rf
+            plo     r9
+            mov     rf, le_phys
+            glo     r9
+            str     rf                  ; le_phys = target
+            rtn
+
+;------------------------------------------------------------------
+; le_bs_n: print D backspaces (D may be 0).
+; Modifies: RF (and D)
+;------------------------------------------------------------------
+le_bs_n:
+            plo     r9
+            mov     rf, le_cnt
+            glo     r9
+            str     rf
+lbs_loop:
+            mov     rf, le_cnt
+            ldn     rf
+            lbz     lbs_done
+            smi     1
+            str     rf
+            ldi     8
+            call    K_TYPE
+            lbr     lbs_loop
+lbs_done:
+            rtn
+
+;------------------------------------------------------------------
+; le_csi: send ESC [ <n> <letter>, n in decimal (1..255).
+; Args:    D = n, R7.0 = final letter
+; Modifies: R8, R9, RF (and D)
+;------------------------------------------------------------------
+le_csi:
+            plo     r9                  ; R9.0 = n
+            mov     rf, le_csi_c
+            glo     r7
+            str     rf                  ; le_csi_c = letter
+
+            ldi     0
+            plo     r8                  ; R8.0 = hundreds
+lcs_h:
+            glo     r9
+            smi     100
+            lbnf    lcs_h_done
+            plo     r9
+            glo     r8
+            adi     1
+            plo     r8
+            lbr     lcs_h
+lcs_h_done:
+            ldi     0
+            phi     r8                  ; R8.1 = tens
+lcs_t:
+            glo     r9
+            smi     10
+            lbnf    lcs_t_done
+            plo     r9
+            ghi     r8
+            adi     1
+            phi     r8
+            lbr     lcs_t
+lcs_t_done:
+            mov     rf, le_dig
+            glo     r8
+            str     rf                  ; le_dig[0] = hundreds
+            inc     rf
+            ghi     r8
+            str     rf                  ; le_dig[1] = tens
+            inc     rf
+            glo     r9
+            str     rf                  ; le_dig[2] = ones
+
+            ldi     27
+            call    K_TYPE
+            ldi     '['
+            call    K_TYPE
+
+            mov     rf, le_dig
+            ldn     rf
+            lbz     lcs_no_h
+            adi     '0'
+            call    K_TYPE
+            lbr     lcs_tens            ; tens always printed now
+lcs_no_h:
+            mov     rf, le_dig+1
+            ldn     rf
+            lbz     lcs_ones
+lcs_tens:
+            mov     rf, le_dig+1
+            ldn     rf
+            adi     '0'
+            call    K_TYPE
+lcs_ones:
+            mov     rf, le_dig+2
+            ldn     rf
+            adi     '0'
+            call    K_TYPE
+            mov     rf, le_csi_c
+            ldn     rf
+            call    K_TYPE
+            rtn
+
+;------------------------------------------------------------------
+; le_insert_char: insert RC.0 into the buffer at le_cursor, shifting
+; the tail (including the NUL) right by one, redraw from the cursor to
+; the end, and advance the cursor. Caller has already confirmed
+; there's room (le_len < le_max_len).
 ;
 ; The shift loop is a POST-test loop (copy first, then check whether
-; that was the last needed copy) rather than the more obvious pre-
-; test-then-decrement shape -- see progs/shell.asm's own
-; edit_insert_char for the full derivation of why a pre-test/decrement
-; loop breaks at cursor==0 on an empty line (8-bit unsigned
-; underflow: the loop counter would need to go to -1 to signal "done"
-; but wraps to 255 instead, and a naive unsigned comparison then
-; wrongly treats 255 as "still >= 0").
+; that was the last needed copy): a pre-test/decrement loop breaks at
+; cursor==0 on an empty line, since its counter would need to reach -1
+; but wraps to 255 instead.
 ; Args:    RC.0 = character to insert
-; Returns: nothing
-; Modifies: R7, R8, R9, RB, RD, RF (and D)
+; Modifies: everything except RC (and D)
 ;------------------------------------------------------------------
 le_insert_char:
             mov     rb, le_eic_i
             mov     rf, le_len
             ldn     rf
-            str     rb                  ; le_eic_i = le_len (shift
-                                        ; starts from the end, working
-                                        ; backward, to avoid clobbering
-                                        ; not-yet-moved bytes)
+            str     rb                  ; i = le_len
 
 leic_shift_loop:
             mov     rf, le_eic_i
             ldn     rf
-            plo     r8
-            ldi     0
-            phi     r8                  ; R8 = i (zero-extended)
-            mov     rd, le_buf
-            lda     rd
-            phi     rf
-            ldn     rd
-            plo     rf                  ; RF = caller's buffer
-            add16   rf, r8              ; RF = &buffer[i]
-            ldn     rf                  ; D = buffer[i]
-            plo     r9                  ; stash (mov below clobbers D)
-            inc     rf                  ; RF = &buffer[i+1]
+            call    le_ptr              ; RF = &buffer[i]
+            ldn     rf
+            plo     r9
+            inc     rf
             glo     r9
             str     rf                  ; buffer[i+1] = buffer[i]
 
-            ; was that the last needed copy (i == le_cursor)? see
-            ; this routine's own header for why this is a post-test
             mov     rf, le_cursor
             ldn     rf
-            str     r2                  ; M(X) = le_cursor
+            str     r2
             mov     rf, le_eic_i
-            ldn     rf                  ; D = i
+            ldn     rf
             sm                          ; D = i - le_cursor
             lbz     leic_shift_done     ; i == le_cursor: done
 
@@ -447,60 +827,40 @@ leic_shift_loop:
             lbr     leic_shift_loop
 
 leic_shift_done:
-            ; le_ert_start = le_cursor (the OLD, pre-increment value --
-            ; must be captured here, before le_cursor advances below)
-            mov     rb, le_ert_start
             mov     rf, le_cursor
             ldn     rf
-            str     rb                  ; le_ert_start = le_cursor (OLD)
-
-            mov     rf, le_cursor
-            ldn     rf
-            plo     r8
-            ldi     0
-            phi     r8
-            mov     rd, le_buf
-            lda     rd
-            phi     rf
-            ldn     rd
-            plo     rf
-            add16   rf, r8
+            call    le_ptr
             glo     rc
             str     rf                  ; buffer[le_cursor] = char
-                                        ; (still the OLD value here)
 
             mov     rf, le_len
             ldn     rf
             adi     1
             str     rf                  ; le_len++
 
+            ldn     rf                  ; D = le_len
+            call    le_print_to         ; from the cursor to the end
+
             mov     rf, le_cursor
             ldn     rf
             adi     1
-            str     rf                  ; le_cursor++ (now FINAL)
-
-            ldi     0                   ; blank_count = 0 (insert)
-            call    le_redraw_tail
-            rtn
+            str     rf                  ; le_cursor++
+            lbr     le_goto             ; and put the cursor there
 
 ;------------------------------------------------------------------
-; le_delete_at: delete the character at buffer[hole], shifting
-; buffer[hole+1..le_len] (including the NUL) left by one, then
-; decrement le_len and redraw. Does NOT touch le_cursor OR
-; le_ert_start -- the CALLER must set both to their final values
-; BEFORE calling (see progs/shell.asm's own edit_delete_at for the
-; full derivation of why, and why the physical terminal cursor must
-; also already be repositioned for a backspace before this runs).
-; Caller has already confirmed hole < le_len.
-; Args:    D = hole (position to delete)
-; Returns: nothing
-; Modifies: R7, R8, R9, RD, RF (and D)
+; le_delete_at: delete the character at le_cursor, shifting the rest
+; (including the NUL) left by one, then redraw from there to one past
+; the new end (blanking the old last cell) and return the terminal
+; cursor to le_cursor. The terminal cursor must already be at
+; le_cursor (le_phys == le_cursor). Caller has already confirmed
+; le_cursor < le_len.
+; Modifies: everything except RC (and D)
 ;------------------------------------------------------------------
 le_delete_at:
-            plo     r9
-            mov     rf, le_eda_i
-            glo     r9
-            str     rf                  ; le_eda_i = hole
+            mov     rb, le_eda_i
+            mov     rf, le_cursor
+            ldn     rf
+            str     rb                  ; i = le_cursor
 
 ledel_shift_loop:
             ; pre-test is safe here (unlike the insert loop) since i
@@ -510,37 +870,15 @@ ledel_shift_loop:
             str     r2                  ; M(X) = le_len
             mov     rf, le_eda_i
             ldn     rf                  ; D = i
-            sm                          ; D = i - le_len, DF=1 if
-                                        ; i >= le_len (no borrow)
+            sm                          ; DF=1 iff i >= le_len
             lbdf    ledel_shift_done
 
             mov     rf, le_eda_i
             ldn     rf
-            plo     r8
-            ldi     0
-            phi     r8
-            mov     rd, le_buf
-            lda     rd
-            phi     rf
-            ldn     rd
-            plo     rf
-            add16   rf, r8              ; RF = &buffer[i]
-            inc     rf                  ; RF = &buffer[i+1]
+            call    le_ptr              ; RF = &buffer[i]
+            inc     rf
             ldn     rf                  ; D = buffer[i+1]
-            plo     r9                  ; stash (mov below clobbers D)
-
-            mov     rf, le_eda_i
-            ldn     rf
-            plo     r8
-            ldi     0
-            phi     r8
-            mov     rd, le_buf
-            lda     rd
-            phi     rf
-            ldn     rd
-            plo     rf
-            add16   rf, r8              ; RF = &buffer[i]
-            glo     r9
+            dec     rf
             str     rf                  ; buffer[i] = buffer[i+1]
 
             mov     rf, le_eda_i
@@ -555,103 +893,40 @@ ledel_shift_done:
             smi     1
             str     rf                  ; le_len--
 
-            ldi     1                   ; blank_count = 1 (delete)
-            call    le_redraw_tail
-            rtn
+            ldn     rf
+            adi     1                   ; D = new le_len + 1
+            call    le_print_to         ; text, then one blank
+            mov     rf, le_cursor
+            ldn     rf
+            lbr     le_goto             ; back to the cursor
 
 ;------------------------------------------------------------------
-; le_home/le_end/le_left/le_right/le_ctrld/le_backspace: Ctrl-A/E/B/
-; F/D and backspace, plus (via le_escape) the Left/Right/Del arrow
-; equivalents. Plain jump targets, not call/return subroutines --
-; each ends with "lbr le_loop" directly.
+; Key handlers. Plain jump targets -- each ends with "lbr le_loop".
 ;------------------------------------------------------------------
 le_home:
             mov     rf, le_cursor
-            ldn     rf
-            lbz     le_loop             ; already at 0: no-op
-
-            mov     rf, le_home_count
-            mov     rb, le_cursor
-            ldn     rb
-            str     rf                  ; le_home_count = le_cursor
-
-lhome_bs_loop:
-            mov     rf, le_home_count
-            ldn     rf
-            lbz     lhome_done
-
-            ldi     8
-            call    K_TYPE
-
-            mov     rf, le_home_count
-            ldn     rf
-            smi     1
-            str     rf
-            lbr     lhome_bs_loop
-
-lhome_done:
-            mov     rf, le_cursor
             ldi     0
             str     rf
+            call    le_goto             ; D = 0 (str keeps D)
             lbr     le_loop
 
 le_end:
-            mov     rf, le_cursor
-            ldn     rf
-            str     r2                  ; M(X) = le_cursor
             mov     rf, le_len
             ldn     rf
-            sm                          ; D = le_len - le_cursor
-            lbz     le_loop             ; already at end: no-op
-
-            mov     rb, le_end_pos
+            plo     r9
             mov     rf, le_cursor
-            ldn     rf
-            str     rb                  ; le_end_pos = le_cursor
-
-lend_print_loop:
-            mov     rf, le_end_pos
-            ldn     rf
-            plo     r8
-            ldi     0
-            phi     r8
-            mov     rd, le_buf
-            lda     rd
-            phi     rf
-            ldn     rd
-            plo     rf
-            add16   rf, r8
-            ldn     rf
-            lbz     lend_print_done     ; NUL: done
-
-            call    K_TYPE
-
-            mov     rf, le_end_pos
-            ldn     rf
-            adi     1
-            str     rf
-            lbr     lend_print_loop
-
-lend_print_done:
-            mov     rb, le_cursor
-            mov     rf, le_len
-            ldn     rf
-            str     rb                  ; le_cursor = le_len
+            glo     r9
+            str     rf                  ; le_cursor = le_len
+            call    le_goto             ; D = le_len (str keeps D)
             lbr     le_loop
 
 le_left:
             mov     rf, le_cursor
             ldn     rf
             lbz     le_loop             ; already at 0: no-op
-
             smi     1
-            plo     r8                  ; stash (mov below clobbers D)
-            mov     rf, le_cursor
-            glo     r8
             str     rf                  ; le_cursor--
-
-            ldi     8
-            call    K_TYPE
+            call    le_goto             ; D = new cursor
             lbr     le_loop
 
 le_right:
@@ -662,27 +937,11 @@ le_right:
             ldn     rf
             sm                          ; D = le_len - le_cursor
             lbz     le_loop             ; already at end: no-op
-
-            mov     rf, le_cursor
-            ldn     rf
-            plo     r8
-            ldi     0
-            phi     r8
-            mov     rd, le_buf
-            lda     rd
-            phi     rf
-            ldn     rd
-            plo     rf
-            add16   rf, r8
-            ldn     rf                  ; D = buffer[le_cursor] --
-                                        ; the character about to be
-                                        ; passed over
-            call    K_TYPE
-
             mov     rf, le_cursor
             ldn     rf
             adi     1
             str     rf                  ; le_cursor++
+            call    le_goto
             lbr     le_loop
 
 le_ctrld:
@@ -693,17 +952,6 @@ le_ctrld:
             ldn     rf
             sm                          ; D = le_len - le_cursor
             lbz     le_loop             ; at end: nothing to delete
-
-            ; Ctrl-D/Del doesn't move the cursor -- it stays at hole,
-            ; which is also where the terminal's own physical cursor
-            ; already sits, so le_ert_start = le_cursor unchanged
-            mov     rb, le_ert_start
-            mov     rf, le_cursor
-            ldn     rf
-            str     rb                  ; le_ert_start = le_cursor (=hole)
-
-            mov     rf, le_cursor
-            ldn     rf                  ; D = hole = le_cursor
             call    le_delete_at
             lbr     le_loop
 
@@ -711,57 +959,42 @@ le_backspace:
             mov     rf, le_cursor
             ldn     rf
             lbz     le_loop             ; at start: no-op
-
-            smi     1                   ; D = le_cursor - 1 = hole
-            plo     r8                  ; stash hole (mov below
-                                        ; clobbers D)
-
-            mov     rb, le_ert_start
-            glo     r8
-            str     rb                  ; le_ert_start = hole
-
-            mov     rf, le_cursor
-            glo     r8
-            str     rf                  ; le_cursor = hole (FINAL --
-                                        ; must be set BEFORE calling
-                                        ; le_delete_at)
-
-            ; move the terminal's own PHYSICAL cursor from its
-            ; current position (one past hole) back to hole BEFORE
-            ; the shift+redraw runs
-            ldi     8
-            call    K_TYPE
-
-            ; D = hole -- reloaded fresh from memory (le_cursor
-            ; already holds it), never trusted in R8 across the
-            ; K_TYPE call (its own clobber footprint isn't proven,
-            ; gotcha #8/#10)
-            mov     rf, le_cursor
-            ldn     rf
+            smi     1
+            str     rf                  ; le_cursor = hole
+            call    le_goto             ; terminal cursor onto the hole
             call    le_delete_at
-
             lbr     le_loop
+
+le_up:
+            mov     rf, le_opts
+            ldn     rf
+            ani     LE_OPT_HIST
+            lbz     le_loop             ; no history: discard
+            ldi     LE_KEY_UP
+            clc
+            rtn
+
+le_down:
+            mov     rf, le_opts
+            ldn     rf
+            ani     LE_OPT_HIST
+            lbz     le_loop
+            ldi     LE_KEY_DOWN
+            clc
+            rtn
 
 ;------------------------------------------------------------------
 ; le_escape: parse the byte(s) following a real ESC. Every follow-up
-; read goes through le_getchar (not a raw f_uread/K_READ call) so a
-; LE_MODE_REDIR caller's EOF can be detected even mid-sequence --
-; without this, a redirected script ending exactly after a stray ESC
-; byte could spin forever re-reading D=0 (the exact class of bug this
-; project already hit once with K_INPUTL itself, see CLAUDE.md's
-; "edlin file <NUL" writeup).
+; read goes through le_getchar so a LE_MODE_REDIR caller's EOF can be
+; detected even mid-sequence. Malformed/incomplete sequences are
+; always discarded, never guessed at (see the shell's original
+; rlwh_escape history for why).
 ;------------------------------------------------------------------
 le_escape:
             call    le_getchar
             lbdf    le_do_eof
-            plo     rc                  ; RC.0 = byte immediately
-                                        ; after ESC
+            plo     rc                  ; RC.0 = byte after ESC
 
-            ; Real ANSI/VT100 "ESC [ A"/"ESC [ B"/etc -- see
-            ; progs/shell.asm's own rlwh_escape for the full history
-            ; of why a bare-letter fallback was tried and deliberately
-            ; removed: malformed/incomplete sequences are always
-            ; discarded here, never guessed at.
             glo     rc
             xri     '['
             lbnz    le_loop             ; not a CSI sequence: discard
@@ -770,11 +1003,11 @@ le_escape:
             lbdf    le_do_eof
             plo     rc
             glo     rc
-            xri     'A'                 ; Up -- no history support in
-            lbz     le_loop             ; this library: discard
+            xri     'A'                 ; Up
+            lbz     le_up
             glo     rc
-            xri     'B'                 ; Down -- discard, same reason
-            lbz     le_loop
+            xri     'B'                 ; Down
+            lbz     le_down
             glo     rc
             xri     'C'                 ; Right arrow
             lbz     le_right
@@ -796,17 +1029,21 @@ le_escape:
             lbr     le_ctrld            ; Del: same as Ctrl-D
 
 le_finish:
-            clc                         ; DF=0: a normal line, Enter
-                                        ; was pressed
+            ; leave the terminal cursor after the whole line, so the
+            ; caller's newline doesn't land inside a wrapped line
+            mov     rf, le_len
+            ldn     rf
+            call    le_goto
+            ldi     LE_KEY_ENTER
+            clc                         ; DF=0: a normal line
             rtn
 
 le_do_eof:
-            ; LE_MODE_REDIR only (le_getchar never signals DF=1 in
-            ; LE_MODE_FAST). A partial line already accumulated this
-            ; call is still returned as a normal DF=0 line, matching
-            ; K_INPUTL's own "final line with no trailing newline is
-            ; still returned once" rule -- only a call that read
-            ; nothing at all before hitting EOF reports true DF=1.
+            ; LE_MODE_REDIR only. A partial line already accumulated
+            ; this call is still returned as a normal DF=0 line,
+            ; matching K_INPUTL's own "final line with no trailing
+            ; newline is still returned once" rule -- only a call that
+            ; read nothing at all before hitting EOF reports DF=1.
             mov     rf, le_len
             ldn     rf
             lbnz    le_finish
@@ -816,51 +1053,58 @@ le_do_eof:
             endp
 
 ;------------------------------------------------------------------
-; Shared data -- one dedicated data proc (not bare top-level content
-; between two proc/endp blocks), matching this project's own
-; established convention -- see CLAUDE.md gotcha #20: bare top-level
-; data referenced from inside a proc can silently anchor the whole
-; linked binary to the wrong base address.
+; Shared data -- one dedicated data proc (see CLAUDE.md gotcha #20).
 ;------------------------------------------------------------------
             proc    _lineedit_data
 
 le_buf:             dw      0           ; caller's buffer pointer
-le_max_len:         db      0           ; caller's max length (chars,
-                                        ; not counting the NUL)
-le_mode:            db      0           ; LE_MODE_FAST / LE_MODE_REDIR
+le_max_len:         db      0           ; max characters (no NUL)
+le_mode:            db      0           ; LE_MODE_*
+le_opts:            db      0           ; LE_OPT_* bits
 le_len:             db      0           ; current line length
-le_cursor:          db      0           ; cursor position within the
-                                        ; buffer, 0..le_len
-
-le_ert_blank_count: db      0           ; le_redraw_tail's own arg
-le_ert_start:       db      0           ; le_redraw_tail's own print-
-                                        ; start / caller-set position
-le_ert_pos:         db      0           ; le_redraw_tail's own print
-                                        ; cursor
-le_ert_bscount:     db      0           ; le_redraw_tail's own
-                                        ; backspace-count scratch
-
-le_eic_i:           db      0           ; le_insert_char's own shift
-                                        ; index
-le_eda_i:           db      0           ; le_delete_at's own shift
-                                        ; index
-
-le_home_count:      db      0           ; le_home's own backspace
-                                        ; count
-le_end_pos:         db      0           ; le_end's own print cursor
+le_cursor:          db      0           ; cursor position, 0..le_len
+le_phys:            db      0           ; where the TERMINAL's cursor
+                                        ; is, as a line position
+                                        ; (0..le_len+1)
+le_width:           db      0           ; terminal width W
+le_start:           db      0           ; start column S (mod W)
+le_startcol:        db      0           ; RC.1 as passed
+le_row:             db      0           ; le_rowcol results
+le_col:             db      0
+le_r1:              db      0           ; le_goto: phys row/column
+le_c1:              db      0
+le_tgt:             db      0           ; le_goto: target position
+le_pend:            db      0           ; le_print_to: end position
+le_pstart:          db      0           ; le_print_to: start position
+le_cnt:             db      0           ; le_bs_n: count
+le_csi_c:           db      0           ; le_csi: final letter
+le_dig:             ds      3           ; le_csi: decimal digits
+le_eic_i:           db      0           ; le_insert_char: shift index
+le_eda_i:           db      0           ; le_delete_at: shift index
+le_oldlen:          db      0           ; read_line_resume: old length
 
                 public  le_buf
                 public  le_max_len
                 public  le_mode
+                public  le_opts
                 public  le_len
                 public  le_cursor
-                public  le_ert_blank_count
-                public  le_ert_start
-                public  le_ert_pos
-                public  le_ert_bscount
+                public  le_phys
+                public  le_width
+                public  le_start
+                public  le_startcol
+                public  le_row
+                public  le_col
+                public  le_r1
+                public  le_c1
+                public  le_tgt
+                public  le_pend
+                public  le_pstart
+                public  le_cnt
+                public  le_csi_c
+                public  le_dig
                 public  le_eic_i
                 public  le_eda_i
-                public  le_home_count
-                public  le_end_pos
+                public  le_oldlen
 
             endp

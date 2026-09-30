@@ -102,6 +102,7 @@ behind everything summarized here.
 | `WHICH <command...>` | Show the full path of the file a command would run |
 | `LESS [-N] <file>` | Page through a file's contents, forward and backward, by screen or line, with search (`-N` numbers the lines) |
 | `HEXDUMP [-c] <file>` | `hexdump -C`-style hex/ASCII view of a file, paged like `LESS` (`-c` prints it straight through) |
+| `MDV [-c] [-p] <file>` | Show a Markdown file with ANSI colours and styles, re-flowed to the screen and paged (`-c` no paging, `-p` no colours; redirect the output to read it later in `LESS`) |
 | `COPY [-y] <src> <dst>` | Copy file(s); into a directory, wildcards, overwrite prompt |
 | `MOVE <src> <dst>` | Move/rename file(s) (fast rename when possible) |
 | `XCOPY [switches] <src> <dst>` | Recursive directory copy (`-s`/`-e`/`-y`/`-d`/`-c`/`-v`/`-h`/`-r`) |

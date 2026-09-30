@@ -82,8 +82,7 @@
 #include    include/kernel_api.inc
 #include    include/lineedit.inc
 
-            extrn   env_getenv
-            extrn   env_parse_uint
+            extrn   term_size
             extrn   read_line_ex
 
 ED_MAX_LINES:   equ     512         ; line-offset table capacity
@@ -234,40 +233,19 @@ ed_have_filename:
             ldi     1
             str     rf
 
-            ; --- read ROWS from the environment for the L command's
-            ; own paging (see ed_cmd_l/ed_list_loop below); falls back
-            ; to ED_PAGE_LINES if ROWS is unset, non-numeric, or too
-            ; small (<2, leaving no room after subtracting 1 -- see
-            ; ED_PAGE_LINES's own comment for why one line is always
-            ; held back, REVERTED 2026-07-31 after briefly removing
-            ; this same "-1" and finding it wrong). Read once, here --
-            ; RA/RC (entry argv/argc) are already fully consumed by
-            ; this point, and nothing below needs anything
-            ; env_getenv/env_parse_uint might clobber. ---
-            mov     rf, ed_rows_name
-            call    env_getenv          ; RF = value or 0
-            ghi     rf
-            lbnz    ed_have_rows
-            glo     rf
-            lbz     ed_open_file        ; not set: keep the default
-
-ed_have_rows:
-            call    env_parse_uint      ; RD = parsed value
-            ghi     rd
-            lbnz    ed_rows_ok          ; high byte nonzero: >= 256,
-                                        ; certainly >= 2
-            ldi     2
-            str     r2
-            glo     rd
-            sm                          ; D = RD.lo - 2, DF=1 iff
-                                        ; RD.lo >= 2
-            lbnf    ed_open_file        ; RD < 2: keep the default
-
-ed_rows_ok:
-            dec     rd            ; RD = ROWS - 1
+            ; --- the screen height for the L command's own paging
+            ; (lib/term.asm: TERM_ROWS, else ROWS, else 24); ROWS-1
+            ; lines, one being held back -- see ED_PAGE_LINES's own
+            ; comment. Under 2 keeps the default. RA/RC are consumed. ---
+            call    term_size           ; RC.1 = rows
+            ghi     rc
+            smi     2
+            lbnf    ed_open_file        ; under 2: keep the default
+            adi     1                   ; D = rows - 1
+            plo     r9
             mov     rb, ed_page_lines
-            glo     rd
-            str     rb                  ; ed_page_lines = RD.lo
+            glo     r9
+            str     rb                  ; ed_page_lines = rows - 1
 
 ed_open_file:
             ; --- open and load the file, if a filename was given at
@@ -1329,7 +1307,7 @@ ed_cmdloop:
             mov     rf, ed_input_buf
             ldi     127
             plo     rc
-            ldi     0
+            ldi     1                   ; input starts after "*"
             phi     rc
             ldi     LE_MODE_REDIR       ; K_READ-based, redirect-aware
                                         ; -- this call site's own DF
@@ -1825,7 +1803,7 @@ ed_bare_number:
             mov     rf, ed_input_buf
             ldi     127
             plo     rc
-            ldi     0
+            ldi     2                   ; input starts after ": "
             phi     rc
             ldi     LE_MODE_REDIR       ; DF deliberately ignored here,
                                         ; matching the original
@@ -2310,7 +2288,7 @@ ed_i_loop:
             mov     rf, ed_input_buf
             ldi     127
             plo     rc
-            ldi     0
+            ldi     2                   ; input starts after ": "
             phi     rc
             ldi     LE_MODE_REDIR
             call    read_line_ex
@@ -5724,7 +5702,6 @@ ed_line_scratch:   ds      128         ; a SEPARATE buffer from
 
 ed_page_lines:  db      ED_PAGE_LINES   ; overridden if ROWS is set
 ed_list_page_count: db  0
-ed_rows_name:   db      "ROWS",0
 ed_num_buf:     ds      8
 ed_key:         db      0
 ed_crlf:        db      13,10

@@ -8,6 +8,13 @@
 ; -S chops long lines to the screen width and scrolls sideways with the
 ;    Left/Right arrows, as in less -S. The default is to WRAP long lines.
 ;
+;
+; Colour and style codes (ANSI SGR sequences, ESC [ ... m, as MDV writes)
+; are passed through and take no columns, like less -R; any other escape
+; sequence, and a CR, is not shown. Every line that set a colour ends
+; with a reset, so a line cut short cannot leave colour on. (put_line in
+; lib/pager.asm, and the column counting in lib/src_file.asm.)
+;
 ; As of 2026-09-08 this is a thin main program: it parses argv, opens
 ; the file, hands control to the reusable pager, and closes the file
 ; when the pager returns. Everything else lives in two libraries:

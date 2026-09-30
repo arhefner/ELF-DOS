@@ -2411,7 +2411,7 @@ read_answer:
             mov     rf, f_inbuf
             ldi     FMT_INBUF_MAX
             plo     rc
-            ldi     0
+            ldi     LE_COL_UNKNOWN      ; prompts vary: no wrapping
             phi     rc
             ldi     LE_MODE_REDIR
             call    read_line_ex

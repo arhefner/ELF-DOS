@@ -389,7 +389,10 @@ retyping the whole line:
 | Delete, or Ctrl-D | Delete the character under the cursor. |
 | Up / Down arrow | Recall an earlier command, or step back to a later one. |
 
-These same keys also work inside the `EDLIN` text editor.
+These same keys also work inside the `EDLIN` text editor. A line longer
+than the screen is wide continues on the next row, and the keys work
+across rows the same way; the editor learns the width from `TERMSIZE`
+(below), and assumes 80 columns until `TERMSIZE` has run.
 
 Every command you type is saved to a history file (`history.dat`, on the
 boot drive), and this history is what the Up and Down arrows recall. The
@@ -444,8 +447,9 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 |---|---|---|
 | `TYPE` | `TYPE <filename>` | Displays a text file on the screen. |
 | `WHICH` | `WHICH <command> [command...]` | Searches for each command the way the shell does (current directory, the system `/bin`, then `PATH`, trying `.bat` for a name with no extension) and prints the full path of the file it would run, or `<name>: not found`. `IF`, `GOTO`, `REM` and a drive change such as `D:` are reported as shell built-ins. |
-| `LESS` | `LESS [-N] <filename>` | Pages through a file, forward AND backward, by screen or by line. `-N` numbers the lines, as in `less -N`: each line starts with its number, right-justified in 7 columns, and the text keeps the rest of the screen. Paging and scrolling cost nothing extra, but with `-N` a long jump into a large file (`G`, a search) has to count the lines it skips -- several times quicker than a numbered jump such as `50000g`, but no longer instant. `SPACE`/`F`/PgDn = next page, `B`/PgUp = previous page, `g` = go to the top, `G` = go to the end; typing a number first jumps there -- `50g` (or `50G`; either letter works) goes to line 50, and a number past the end of the file shows the last page, the same as a bare `G`; Down-arrow/`J`/Ctrl-N/Ctrl-E = down one line, Up-arrow/`K`/Ctrl-P/Ctrl-Y = up one line (moving up or back past the point where `LESS` has any recorded history -- e.g. right after `G`, `g`, or a search match -- scans backward through the file for the true previous line/page instead of just stopping); `/` = search forward (case-sensitive), `N` = repeat the last search, `Q` = quit. A search pattern may contain escape sequences -- `\\n`, `\\r`, `\\t`, `\\0`, `\\\\` for a literal backslash, and `\\xHH` for any byte by hex value (exactly two digits) -- so you can search for tabs, line endings, or arbitrary binary bytes, and a pattern may span a line boundary. A backslash followed by anything else is reported as an error rather than searched for literally. A line wider than the screen (`COLUMNS`) is cut off at the right edge instead of wrapping; the whole line is still searched. |
+| `LESS` | `LESS [-N] <filename>` | Pages through a file, forward AND backward, by screen or by line. `-N` numbers the lines, as in `less -N`: each line starts with its number, right-justified in 7 columns, and the text keeps the rest of the screen. Paging and scrolling cost nothing extra, but with `-N` a long jump into a large file (`G`, a search) has to count the lines it skips -- several times quicker than a numbered jump such as `50000g`, but no longer instant. `SPACE`/`F`/PgDn = next page, `B`/PgUp = previous page, `g` = go to the top, `G` = go to the end; typing a number first jumps there -- `50g` (or `50G`; either letter works) goes to line 50, and a number past the end of the file shows the last page, the same as a bare `G`; Down-arrow/`J`/Ctrl-N/Ctrl-E = down one line, Up-arrow/`K`/Ctrl-P/Ctrl-Y = up one line (moving up or back past the point where `LESS` has any recorded history -- e.g. right after `G`, `g`, or a search match -- scans backward through the file for the true previous line/page instead of just stopping); `/` = search forward (case-sensitive), `N` = repeat the last search, `Q` = quit. A search pattern may contain escape sequences -- `\\n`, `\\r`, `\\t`, `\\0`, `\\\\` for a literal backslash, and `\\xHH` for any byte by hex value (exactly two digits) -- so you can search for tabs, line endings, or arbitrary binary bytes, and a pattern may span a line boundary. A backslash followed by anything else is reported as an error rather than searched for literally. A line wider than the screen (`COLUMNS`) is cut off at the right edge instead of wrapping; the whole line is still searched. Colour and style codes in the file (ANSI escape sequences, such as `MDV` writes) are shown as colours and take up no room on the line; any other escape sequence is left out, and so is a carriage return. |
 | `HEXDUMP` | `HEXDUMP [-c] <filename>` | Shows a file's raw bytes, 16 to a row: the offset, the bytes in hexadecimal, and the same bytes as text. The rows appear in the same pager as `LESS`, with the same keys, except that a number before `g` is a byte offset (typed in decimal, e.g. `65536g`) rather than a line number, and a search matches the file's raw bytes, so `/\\x00\\xff` finds binary data. `-c` prints every row straight through with no paging, so the output can be redirected to a file: `HEXDUMP -c data.bin > dump.txt`. Offsets are shown in full for files of any size. Each row is fitted to the screen width (the `COLUMNS` variable): 16 bytes at 80 columns or when `COLUMNS` is not set, 12 at 64, and up to 32 on a wide screen. `-c` uses the same width. |
+| `MDV` | `MDV [-c] [-p] <filename>` | Shows a Markdown file formatted for the terminal, using ANSI colours and styles: headings in bold colour, `**bold**`, `*italic*`, `` `code` `` in yellow, links underlined with the address after them, bullet and numbered lists with their wrapped lines indented, block quotes with a bar down the left, code blocks, rules and table rows. Paragraphs are re-flowed to the screen width (the `COLUMNS` variable). The output is paged: after each screenful `--More--` waits for a key -- `SPACE` shows the next page, `ENTER` or Down-arrow one more line, `Q` quits. `-c` shows it all without stopping, and paging is off anyway when the output is redirected, so `MDV README.MD > README.ANS` writes a file you can read later with `TYPE` or, scrolling both ways, `LESS`. `-p` leaves out the colours and styles and keeps just the layout. Italic is not shown by every terminal. |
 | `COPY` | `COPY [-y] <source> <destination>` | Copies one file to another name, or one or more files into a directory. `-y` skips the "overwrite?" prompt. |
 | `MOVE` | `MOVE <source> <destination>` | Moves or renames one or more files, the same way `COPY` takes its arguments. |
 | `REN` | `REN <path> <newname>` | Renames a file or directory. It must stay in the same directory — use `MOVE` to move it elsewhere. |
@@ -472,14 +476,23 @@ batch files can read. They are persistent across reboots.
 | `UNSET` | `UNSET name...` | Removes one or more variables. |
 
 Two variables describe your screen. `ROWS` is its height and `COLUMNS` its
-width, in characters; when they are not set, programs assume 24 by 80.
-`LS` fits its columns to `COLUMNS`; `LESS` and `HEXDUMP` use `ROWS` for the
-page length and cut every line, status line included, to fit `COLUMNS`;
-`HEXDUMP` also fits its rows to `COLUMNS`; `EDLIN` uses `ROWS` for its page
-length.
-`TERMSIZE` asks the terminal for its real size and sets both, so a line in
-`AUTOEXEC.BAT` is all it takes. On a 64-column terminal, for example,
-`EXPORT COLUMNS=64` is enough.
+width, in characters. `LS` fits its columns to the width; `LESS` and
+`HEXDUMP` use the height for the page length and cut every line, status
+line included, to fit the width; `HEXDUMP` also fits its rows to the width;
+`MDV` wraps its text to the width and pages by the height;
+`EDLIN` uses the height for its page length.
+
+`TERMSIZE` asks the terminal for its real size and sets both variables, and
+also gives the size to the system itself, so a line in `AUTOEXEC.BAT` is
+all it takes. For a terminal that does not answer the size request, give
+the size yourself: `TERMSIZE 24 64` sets 24 rows and 64 columns.
+
+Programs take the size `TERMSIZE` gave the system first, then `ROWS`/
+`COLUMNS`, then 24 by 80. `EXPORT COLUMNS=64` on its own therefore works
+only until `TERMSIZE` has run; after that, change the size with `TERMSIZE`
+(`TERMSIZE 0 0` hands it back to the variables). The command-line editor
+uses only the size from `TERMSIZE`, and assumes 80 columns without it,
+since it cannot afford to read a variable every time you press a key.
 
 ### Date, time, and the system
 

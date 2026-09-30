@@ -912,6 +912,7 @@ spr_add_consumed:
             extrn   seed_byte
             extrn   srl_col
             extrn   srl_skipcol
+            extrn   srl_esc
             extrn   less_hshift
             extrn   peek_byte
             extrn   consume_byte
@@ -1022,6 +1023,9 @@ srl_nowrap:
             str     rf
             inc     rf
             str     rf
+            mov     rf, srl_esc
+            ldi     0
+            str     rf
 nsk_test:
             mov     r8, less_hshift     ; col >= hshift ?  (16-bit)
             ldn     r8
@@ -1058,6 +1062,64 @@ nsk_step:
             adi     1
             str     rf
 nsk_adv:
+            glo     r7
+            xri     13
+            lbz     nsk_test            ; a CR takes no columns
+            ; an escape sequence (ESC [ ... final, or ESC x) takes no
+            ; columns, and is kept in the buffer even though it lies in
+            ; the skipped part, so the visible text keeps its colours.
+            ; put_line prints only the SGR (...m) ones.
+            mov     rf, srl_esc
+            ldn     rf
+            lbnz    nsk_in_esc
+            glo     r7
+            xri     27
+            lbnz    nsk_noesc
+            ldi     1
+            str     rf
+            lbr     nsk_keep
+nsk_in_esc:
+            xri     1
+            lbnz    nsk_csi
+            glo     r7
+            xri     '['
+            lbz     nsk_to_csi
+            ldi     0                   ; ESC x: two bytes, done
+            str     rf
+            lbr     nsk_keep
+nsk_to_csi:
+            ldi     2
+            str     rf
+            lbr     nsk_keep
+nsk_csi:
+            glo     r7
+            smi     $40
+            lbnf    nsk_keep            ; a parameter byte
+            glo     r7
+            smi     $7F
+            lbdf    nsk_keep
+            ldi     0                   ; the final byte
+            str     rf
+nsk_keep:
+            mov     rf, less_linelen
+            ldn     rf
+            smi     SRC_LINE_MAX-1
+            lbdf    nsk_test            ; buffer full: drop it
+            mov     rf, less_linelen
+            ldn     rf
+            plo     r8
+            ldi     0
+            phi     r8
+            mov     rf, src_line_buf
+            add16   rf, r8
+            glo     r7
+            str     rf
+            mov     rf, less_linelen
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     nsk_test
+nsk_noesc:
             glo     r7
             xri     9                   ; TAB?
             lbz     nsk_tab
@@ -1342,6 +1404,9 @@ read_one_row:
             mov     rf, srl_col
             ldi     0
             str     rf                  ; col = 0 for this row
+            mov     rf, srl_esc
+            ldi     0
+            str     rf                  ; no escape sequence open
 ror_next:
             call    peek_byte
             lbdf    ror_eof
@@ -1349,6 +1414,52 @@ ror_next:
             glo     r7
             xri     10
             lbz     ror_lf
+
+            ; --- ror_esc: an escape sequence (ESC [ params final, or
+            ; ESC x) takes no columns, so a row of ANSI-coloured text (MDV's
+            ; output, say) wraps where its visible text does. A row can only
+            ; break at a visible character, so a sequence never straddles
+            ; two rows. A CR takes none either (put_line does not print it),
+            ; so a CR LF line exactly as wide as the screen does not wrap
+            ; into an empty row. ---
+            glo     r7
+            xri     13
+            lbz     ror_esc_byte
+            mov     rf, srl_esc
+            ldn     rf
+            lbnz    ror_in_esc
+            glo     r7
+            xri     27
+            lbnz    ror_noesc
+            ldi     1
+            str     rf
+            lbr     ror_esc_byte
+ror_in_esc:
+            xri     1
+            lbnz    ror_csi
+            glo     r7
+            xri     '['
+            lbz     ror_to_csi
+            ldi     0                   ; ESC x: two bytes, done
+            str     rf
+            lbr     ror_esc_byte
+ror_to_csi:
+            ldi     2
+            str     rf
+            lbr     ror_esc_byte
+ror_csi:
+            glo     r7
+            smi     $40
+            lbnf    ror_esc_byte        ; a parameter byte
+            glo     r7
+            smi     $7F
+            lbdf    ror_esc_byte
+            ldi     0                   ; the final byte
+            str     rf
+ror_esc_byte:
+            call    srw_emit
+            lbr     ror_next
+ror_noesc:
             glo     r7
             xri     9
             lbz     ror_tab
@@ -2310,6 +2421,9 @@ seed_tmp:               ds      4       ; scratch for the pos-1 seed read
 seed_byte:              db      0
 srl_col:                db      0       ; wrap row reader's display column
 srl_skipcol:            dw      0       ; -S read's 16-bit hscroll skip column
+srl_esc:                db      0       ; escape-sequence state while counting
+                                        ; columns: 0 none, 1 after ESC, 2 in
+                                        ; ESC[ ... (see ror_esc)
 
 ; --- private: the forward-reading chunk buffer ---
 less_chunk_buf:         ds      LESS_CHUNK_LEN
@@ -2380,6 +2494,7 @@ sl_buf:                 ds      SL_BUF_LEN
                 public  seed_byte
                 public  srl_col
                 public  srl_skipcol
+                public  srl_esc
                 public  less_chunk_buf
                 public  less_chunk_ptr
                 public  less_chunk_remaining

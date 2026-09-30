@@ -47,8 +47,7 @@
             extrn   src_read_line
             extrn   src_line_buf
             extrn   hx_set_row
-            extrn   env_getenv
-            extrn   env_parse_uint
+            extrn   term_size
 
             org     PROG_BASE
 
@@ -135,7 +134,7 @@ args_done:
 have_name:
             mov     rf, hd_continuous
             glo     r7
-            str     rf                  ; kept in memory: env_getenv and
+            str     rf                  ; kept in memory: term_size and
             mov     rf, hd_file         ; src_open below clobber every
             ghi     r8                  ; register
             str     rf
@@ -143,21 +142,14 @@ have_name:
             glo     r8
             str     rf
 
-            ; --- bytes per row from COLUMNS: n = (COLUMNS-15)/4, rounded
-            ; down to a multiple of 4 by hx_set_row, and held to 4..32.
-            ; Unset or 0 means an 80-column screen. ---
-            mov     rf, hd_cols_name
-            call    env_getenv          ; RF = value or 0
-            ghi     rf
-            lbnz    cols_have
-            glo     rf
-            lbz     cols_default        ; not set
-cols_have:
-            call    env_parse_uint      ; RD = the value
-            ghi     rd
-            lbnz    cols_wide           ; 256 or more
+            ; --- bytes per row from the screen width (lib/term.asm:
+            ; TERM_COLS, else COLUMNS, else 80): n = (columns-15)/4,
+            ; rounded down to a multiple of 4 by hx_set_row, and held to
+            ; 4..32. ---
+            call    term_size           ; RC.0 = columns (1..255)
+            glo     rc
+            plo     rd                  ; RD.0 = columns
             glo     rd
-            lbz     cols_default        ; 0
             smi     143
             lbdf    cols_wide           ; 143 or more: 32 bytes fit
             glo     rd
@@ -174,8 +166,6 @@ cols_wide:
 cols_narrow:
             ldi     4
             lbr     cols_set
-cols_default:
-            ldi     16
 cols_set:
             call    hx_set_row          ; before src_open reads a row
 
@@ -228,6 +218,5 @@ usage:
 hd_continuous:  db      0
 hd_file:        dw      0           ; the filename argument
 hd_name:        db      "HEXDUMP",0
-hd_cols_name:   db      "COLUMNS",0
 
             end     start

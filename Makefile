@@ -232,6 +232,8 @@ bin/batch.mod: kernel/batch_mod.prg | bin
 
 # Programs are single-file: each progs/X.asm assembles and links on
 # its own (no multi-module link order to worry about, unlike KOBJ).
+progs/shell.prg: include/lineedit.inc
+
 progs/%.prg: progs/%.asm include/kernel_api.inc include/bios.inc include/opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) $*.asm
 
@@ -297,6 +299,9 @@ lib/pathstr.prg: lib/pathstr.asm include/opcodes.def include/bios.inc include/ke
 
 lib/ymodem.prg: lib/ymodem.asm include/opcodes.def include/bios.inc include/kernel_api.inc
 	cd lib && $(ASM) $(ASMFLAGS) ymodem.asm
+
+lib/term.prg: lib/term.asm include/opcodes.def include/kernel_api.inc
+	cd lib && $(ASM) $(ASMFLAGS) term.asm
 
 lib/lineedit.prg: lib/lineedit.asm include/opcodes.def include/bios.inc include/kernel_api.inc include/lineedit.inc
 	cd lib && $(ASM) $(ASMFLAGS) lineedit.asm
@@ -415,24 +420,24 @@ test/bin/corrupt: test/corrupt.prg lib/ymodem.prg lib/fmt32.prg | test/bin
 	$(LINK) $(LFLAGS) -o test/bin/corrupt test/corrupt.prg lib/ymodem.prg lib/fmt32.prg
 	rm -f test/bin/corrupt.lkb
 
-bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg lib/drives.prg | bin
-	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg lib/drives.prg
+bin/ls: progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg lib/drives.prg lib/term.prg | bin
+	$(LINK) $(LFLAGS) -o bin/ls progs/ls.prg lib/heap_bump.prg lib/env.prg lib/file_glob.prg lib/drives.prg lib/term.prg
 	rm -f bin/ls.lkb
 
-bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
-	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg lib/drives.prg
+bin/edlin: progs/edlin.prg lib/env.prg lib/lineedit.prg lib/drives.prg lib/term.prg | bin
+	$(LINK) $(LFLAGS) -o bin/edlin progs/edlin.prg lib/env.prg lib/lineedit.prg lib/drives.prg lib/term.prg
 	rm -f bin/edlin.lkb
 
-bin/less: progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
-	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg
+bin/less: progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg lib/term.prg | bin
+	$(LINK) $(LFLAGS) -o bin/less progs/less.prg lib/pager.prg lib/src_file.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg lib/term.prg
 	rm -f bin/less.lkb
 
-bin/hexdump: progs/hexdump.prg lib/pager.prg lib/src_hex.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg | bin
-	$(LINK) $(LFLAGS) -o bin/hexdump progs/hexdump.prg lib/pager.prg lib/src_hex.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg
+bin/hexdump: progs/hexdump.prg lib/pager.prg lib/src_hex.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg lib/term.prg | bin
+	$(LINK) $(LFLAGS) -o bin/hexdump progs/hexdump.prg lib/pager.prg lib/src_hex.prg lib/pos32.prg lib/fmt32.prg lib/env.prg lib/lineedit.prg lib/drives.prg lib/term.prg
 	rm -f bin/hexdump.lkb
 
-bin/shell: progs/shell.prg lib/env.prg lib/drives.prg | bin
-	$(LINK) $(LFLAGS) -o bin/shell progs/shell.prg lib/env.prg lib/drives.prg
+bin/shell: progs/shell.prg lib/env.prg lib/drives.prg lib/lineedit.prg | bin
+	$(LINK) $(LFLAGS) -o bin/shell progs/shell.prg lib/env.prg lib/drives.prg lib/lineedit.prg
 	rm -f bin/shell.lkb
 
 bin/move: progs/move.prg lib/move.prg lib/file_glob.prg | bin
@@ -446,6 +451,10 @@ bin/yr: progs/yr.prg lib/ymodem.prg lib/fmt32.prg | bin
 bin/ys: progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg | bin
 	$(LINK) $(LFLAGS) -o bin/ys progs/ys.prg lib/ymodem.prg lib/fmt32.prg lib/file_glob.prg
 	rm -f bin/ys.lkb
+
+bin/mdv: progs/mdv.prg lib/env.prg lib/drives.prg lib/term.prg | bin
+	$(LINK) $(LFLAGS) -o bin/mdv progs/mdv.prg lib/env.prg lib/drives.prg lib/term.prg
+	rm -f bin/mdv.lkb
 
 bin/termsize: progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg lib/drives.prg | bin
 	$(LINK) $(LFLAGS) -o bin/termsize progs/termsize.prg lib/ymodem.prg lib/fmt32.prg lib/env.prg lib/drives.prg
@@ -610,7 +619,7 @@ SDK_HEADERS = include/kernel_api.inc include/opcodes.def include/bios.inc
 # heap_bump/heap_malloc/icall/move/pathstr have no companion .inc of
 # their own.
 SDK_LIB_MODULES = drives env file_glob fmt32 heap_bump heap_malloc icall \
-                  lineedit modload move pathstr vollabel ymodem
+                  lineedit modload move pathstr term vollabel ymodem
 SDK_LIB_ASM  = $(patsubst %,lib/%.asm,$(SDK_LIB_MODULES))
 SDK_LIB_INCS = include/file_glob.inc include/lineedit.inc \
                include/modformat.inc include/vollabel.inc \
