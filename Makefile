@@ -660,6 +660,7 @@ clean:
 	      kernel/*.prg kernel/*.lst \
 	      progs/*.prg progs/*.lst progs/*.build progs/*.lkb \
 	      test/*.prg test/*.lst test/*.build test/*.lkb \
+	      lib/*.prg lib/*.lst \
 	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN) \
 	      $(KVOL_BIN) $(ROM_BIN) ksym.sym \
 	      $(SDK_OUT)
