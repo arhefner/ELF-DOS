@@ -296,3 +296,20 @@ loads by their exact `/bin/` paths. A kernel already installed can also
 be updated from the *running* system itself via `MR` (receive
 `kernel-full.bin` over serial) + `SYS` (install it) + `REBOOT`, with no
 card swap needed.
+
+## License
+
+ELF-DOS is released under the [Zero-Clause BSD license](LICENSE) (0BSD):
+you may use, copy, modify, and distribute it for any purpose, with or
+without fee, and with no conditions - no attribution is required. It
+comes with no warranty.
+
+Every file in this repository is covered by it. `include/bios.inc` lists
+the Elf/OS BIOS entry points ELF-DOS calls and was written for this
+project; `include/opcodes.def` is the extended-opcode file from the
+[Asm/02 fork](https://github.com/arhefner/Asm-02) ELF-DOS is built with,
+by the same author.
+
+The tools and firmware ELF-DOS is used with are separate projects with
+their own licenses: Asm/02 and Link/02 (the assembler and linker), and
+whichever BIOS is in the machine's ROM.
