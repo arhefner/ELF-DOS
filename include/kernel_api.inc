@@ -222,11 +222,7 @@ FCB_IOBUF_LEN:  equ     512
 ;               not RD, since RD now carries the FCB pointer). The
 ;               full signed 32-bit range is accepted; file positions
 ;               and sizes are likewise supported up to the full 32
-;               bits FCB_FSIZE/FCB_FPOS hold (the underlying cluster-
-;               hop computation is only exercised up to a documented
-;               ~32MB in practice -- see kernel/file.asm's own
-;               fopen_check_append/fsk_general comments -- but is
-;               correct for any position that fits in 32 bits).
+;               bits FCB_FSIZE/FCB_FPOS hold.
 ;               Returns: DF = 0 on success (RA:RD = the resulting
 ;               absolute 32-bit position; RA = high word, RD = low
 ;               word. Widened 2026-09-08 -- RD alone used to be the

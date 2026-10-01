@@ -59,11 +59,9 @@
 ; files larger than 64K; this hardware's own RAM never needs to hold
 ; such a file all at once, since access is always chunked through a
 ; single 512-byte sector buffer regardless of the file's total size.
-; The cluster-hop arithmetic used to reach a given position is only
-; exercised up to a documented ~32MB in practice (see
-; fopen_check_append's/file_seek's own comments), a deliberate,
-; reasonable scope limit rather than full 32-bit correctness for a
-; case this hardware will never encounter.
+; _fcb_seek_to, which seek, append and close use to reach a position,
+; carries a 24-bit sector index, so it is right for the whole 32-bit
+; range (2026-10-01; it kept 16 bits before, wrong from 32MB up).
 ;
 ; file_write only extends/overwrites already-existing files (their
 ; directory entry, and first cluster if non-empty, must already
@@ -365,10 +363,9 @@ fst_lbi_no_borrow:
             phi     r7
             glo     r7
             shrc
-            plo     r7                  ; R9:R7 = sector_index; R9's
-                                        ; own high word discarded (same
-                                        ; documented 32MB-scope limit
-                                        ; the original two copies had)
+            plo     r7                  ; R9.0:R7 = sector_index, 24
+                                        ; bits (a 32-bit position is at
+                                        ; most 2^23 sectors); R9.1 = 0
 
             ; sector_in_clust = sector_index & (spc-1) -- computed
             ; BEFORE the cluster_index shift loop below overwrites R7
@@ -382,32 +379,39 @@ fst_lbi_no_borrow:
                                         ; (R7 still holds sector_index
                                         ; here)
             and
-            plo     r9                  ; stash (mov below clobbers D;
-                                        ; R9's own earlier value --
-                                        ; sector_index's discarded high
-                                        ; word -- is free to reuse)
+            plo     r8                  ; stash (mov below clobbers D;
+                                        ; R8 is free -- last_byte_index
+                                        ; is no longer needed -- and R9.0
+                                        ; holds sector_index's top byte)
             mov     rf, fst_sector_in_clust
-            glo     r9                  ; D = result (reloaded)
+            glo     r8                  ; D = result (reloaded)
             str     rf                  ; fst_sector_in_clust = result
 
-            ; cluster_index = sector_index >> spc_shift (16-bit, R7
-            ; only) -- D-clobber-safe variable-shift-count loop: the
-            ; loop condition's own "glo r9" clobbers D every iteration,
+            ; cluster_index = sector_index >> spc_shift, shifting all 24
+            ; bits (R9.0:R7) so a position at or past 32MB keeps its top
+            ; byte (2026-10-01; only R7 was shifted before, which wrapped
+            ; the sector index at 65,536). The result fits R7 for any
+            ; position inside a real file: a FAT16 chain has at most
+            ; 65,524 clusters. D-clobber-safe variable-shift-count loop: the
+            ; loop condition's own "glo r8" clobbers D every iteration,
             ; so the shifted value must be reloaded into D fresh right
             ; before each "shr", never carried through in D itself
             mov     rf, bpb_spc_shift
             ldn     rf
-            plo     r9                  ; R9.0 = spc_shift (loop count)
+            plo     r8                  ; R8.0 = spc_shift (loop count)
 fst_cidx_shr:
-            glo     r9
+            glo     r8
             lbz     fst_cidx_done
-            ghi     r7
+            glo     r9
             shr
+            plo     r9
+            ghi     r7
+            shrc
             phi     r7
             glo     r7
             shrc
             plo     r7
-            dec     r9
+            dec     r8
             lbr     fst_cidx_shr
 fst_cidx_done:
             mov     rf, fst_cluster_idx
@@ -3551,9 +3555,7 @@ fcrw_err:
 ;               for the same crash-safety reason -- the extra sector
 ;               write only happens when a file is truncated to empty.
 ;
-; Skipped for FSIZE >= 32MB: _fcb_seek_to keeps only a 16-bit sector
-; index, so past that it lands on the wrong cluster, and trimming there
-; would cut real data. Also skipped if the entry after the last cluster
+; Skipped if the entry after the last cluster
 ; is not a real link (end-of-chain, bad, free or reserved), so a chain
 ; that is already right costs one fat_get.
 ;
@@ -3570,10 +3572,7 @@ fcrw_err:
             ghi     r9
             str     r2
             glo     r9
-            shr
             or
-            lbnz    fct_done            ; >= 32MB: past _fcb_seek_to's range
-            glo     r9
             str     r2
             ghi     r8
             or
