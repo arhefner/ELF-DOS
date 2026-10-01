@@ -234,7 +234,6 @@ make            # build kernel-full.bin (bootstrap + kernel)
 make progs      # build every progs/*.asm into bin/<name> (bare, no
                 # extension -- mirrors the on-device /bin layout)
 make test       # build every test/*.asm into test/bin/<name>
-make elfdos-sys # build the host-side installer, sys/elfdos-sys
 make clean      # remove all generated build artifacts
 ```
 
@@ -253,11 +252,25 @@ make install DEV=/dev/mmcblkx      # write MBR + kernel (new/blank disk)
 make update DEV=/dev/mmcblkx       # refresh kernel only (MBR already installed)
 ```
 
-`install`/`update` build the installer first if needed. On Windows, use
+`install`/`update` run `elfdos-sys.sh`, which needs only standard shell
+tools (no C compiler). On Windows they run `Install-ElfDos.ps1`; use
 `nmake /F Makefile.win install DEV=\\.\PhysicalDriveN` /
 `update` instead (no default `DEV` value there - a wrong physical drive
 number destroys data irrecoverably, so it's required explicitly every
 time).
+
+Both scripts can also be run directly, which is all a binary release
+needs (no build tools at all):
+
+```
+sudo ./elfdos-sys.sh -m mbr.bin -k kernel-full.bin /dev/mmcblkx
+.\Install-ElfDos.ps1 -DiskNumber N -Mbr mbr.bin -Kernel kernel-full.bin
+```
+
+Partition and format the card first (`mkdisk.sh` /
+`Format-ElfDosDisk.ps1`). The installers refuse a disk whose sector 0 is
+a FAT boot sector, or whose first partition starts inside the area the
+kernel needs, and read back everything they write.
 
 ### Putting the kernel in ROM
 

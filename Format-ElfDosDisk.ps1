@@ -18,7 +18,7 @@
     So this script writes the MBR and the FAT16 structures directly to
     \\.\PhysicalDriveN, bypassing the partition manager entirely. That is the
     same thing Linux fdisk/mkfs.fat do, and the same raw-device approach
-    sys/elfdos-sys.exe already uses successfully on Windows.
+    Install-ElfDos.ps1 uses on Windows.
 
     LAYOUT
     ------

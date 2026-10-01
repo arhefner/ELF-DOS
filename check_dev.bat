@@ -1,6 +1,6 @@
 @echo off
 rem check_dev.bat - guards Makefile.win's install/update targets against
-rem running with no DEV given. sys\elfdos-sys.exe writes directly to a
+rem running with no DEV given. Install-ElfDos.ps1 writes directly to a
 rem raw physical drive -- the wrong one (or an empty/guessed default)
 rem destroys data with no possibility of recovery. Unlike the Linux
 rem Makefile's own DEV=/dev/mmcblk0 default (safe only because that's

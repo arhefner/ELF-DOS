@@ -177,7 +177,7 @@ def main():
         sys.exit(f"error: {krnboot_bin} is {len(boot)} bytes, expected "
                  f"{want} ({KRNBOOT_SECTORS} sectors) -- keep the pad "
                  f"target in boot/krnboot.asm, KRNBOOT_SECTORS in "
-                 f"boot/mbr.asm and sys/sys.c, and this tool in step")
+                 f"boot/mbr.asm, elfdos-sys.sh and Install-ElfDos.ps1, and this tool in step")
 
     vol_sectors, nv_sectors = sectors(len(vol)), sectors(len(nv))
     # Bytes the non-volatile image actually uses in its final sector

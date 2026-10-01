@@ -11,7 +11,7 @@
 ; for the full reasoning; boot/krnboot.asm's own "ldi 4" (where the
 ; kernel proper's own sectors start, sector 0=MBR + KRNBOOT_SECTORS=3
 ; bootstrap sectors = kernel proper starts at sector 4) and
-; sys/sys.c's/progs/sys.asm's own sector-count math must all stay in
+; elfdos-sys.sh's/Install-ElfDos.ps1's/progs/sys.asm's own sector-count math must all stay in
 ; lockstep with this same value.
 ;
 ; KERN_LOAD was $3000 until 2026-07-09: the kernel proper (loaded by
@@ -77,7 +77,7 @@
                                         ; loads two images and probes
                                         ; for the top of usable RAM)
                                         ; (must match krnboot.asm's own
-                                        ; sector count and sys/sys.c's
+                                        ; sector count and elfdos-sys.sh's
                                         ; /progs/sys.asm's sector math)
 
             org         $0100

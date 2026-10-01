@@ -60,7 +60,7 @@
 #include    include/kernel_api.inc
 
 NAME_MAX:           equ     64      ; longest file name written
-KRNBOOT_SECTORS:    equ     5       ; must match boot/mbr.asm, sys/sys.c,
+KRNBOOT_SECTORS:    equ     5       ; must match boot/mbr.asm, elfdos-sys.sh,
                                     ; tools/split_kernel.py
 
             org     PROG_BASE

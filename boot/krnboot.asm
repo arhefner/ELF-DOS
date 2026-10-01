@@ -1512,7 +1512,7 @@ boot_scratch:       ds      512
 ; bytes of real headroom, matching this project's own margin bar.
 ;
 ; Growing this MOVES THE KERNEL'S FIRST SECTOR (LBA 4 -> 6) and must
-; stay in lockstep with boot/mbr.asm's KRNBOOT_SECTORS, sys/sys.c's
+; stay in lockstep with boot/mbr.asm's KRNBOOT_SECTORS, elfdos-sys.sh's
 ; KRNBOOT_SECTORS, and progs/sys.asm's own copy of the same math.
 ;
 ; NOTE (gotcha, hit once already on a different branch, 2026-07-20):

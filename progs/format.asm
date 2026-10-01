@@ -76,7 +76,7 @@
             extrn   fmt_size32
             extrn   read_line_ex
 
-KRNBOOT_SECTORS:  equ   5           ; must match boot/mbr.asm, sys/sys.c,
+KRNBOOT_SECTORS:  equ   5           ; must match boot/mbr.asm, elfdos-sys.sh,
                                     ; progs/sys.asm and progs/ksave.asm
 FMT_ROOT_SECS:    equ   32          ; 512 entries * 32 bytes / 512
 FMT_MIN_CLUST:    equ   4085        ; fewer is FAT12 by definition

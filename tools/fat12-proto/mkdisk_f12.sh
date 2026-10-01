@@ -22,7 +22,7 @@ dd if=p.img of=disk1.ide bs=512 seek=65536 conv=notrunc status=none
 rm -f p.img
 mkfs.fat -F 12 -n FLOPPY -C disk2.ide 1440 >/dev/null
 
-yes y | "$EDOS/sys/elfdos-sys" -m "$EDOS/mbr.bin" -k "$EDOS/kernel-full.bin" disk1.ide >/dev/null
+"$EDOS/elfdos-sys.sh" -y -m "$EDOS/mbr.bin" -k "$EDOS/kernel-full.bin" disk1.ide >/dev/null
 set -- $(for f in "$EDOS"/bin/*; do echo "$f=/bin/$(basename "$f")"; done) \
        $(for f in "$EDOS"/test/bin/*; do echo "$f=/bin/$(basename "$f")"; done)
 python3 "$EMU/fatput.py" disk1.ide 2048 "$@" >/dev/null

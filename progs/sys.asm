@@ -991,7 +991,7 @@ w_have_bytes:
             ; builds the image. Writing extra_sectors over $4404 here
             ; would replace a correct volatile count with the whole
             ; post-bootstrap sector total and produce an unbootable
-            ; card. Host-side sys/sys.c dropped its own patch for the
+            ; card. The host-side installer dropped its own patch for the
             ; same reason; it now validates the counts instead.
             ;
             ; sys_extra_hi/lo are still computed above and shown in the
