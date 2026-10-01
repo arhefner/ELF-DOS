@@ -57,7 +57,7 @@
 ;
 ; Resolved (confirmed with the user 2026-07-30) as a caller-selectable
 ; mode, matching this project's own established -u/-b precedent in
-; progs/mr.asm/progs/ms.asm/lib/ymodem.asm (see le_getchar below for
+; progs/mr.asm/progs/ms.asm/lib/ymodem.asm (see read_line_ex's le_rdvec setup for
 ; the mode dispatch itself): LE_MODE_FAST uses f_uread throughout
 ; (byte-drop-safe, but can never signal EOF); LE_MODE_REDIR uses
 ; K_READ throughout (redirect-aware, DF=1 at EOF, but subject to the
@@ -130,6 +130,7 @@ LE_DEF_WIDTH:   equ     80              ; TERM_COLS unknown/implausible
             extrn   le_buf
             extrn   le_max_len
             extrn   le_mode
+            extrn   le_rdvec
             extrn   le_opts
             extrn   le_len
             extrn   le_cursor
@@ -179,6 +180,40 @@ LE_DEF_WIDTH:   equ     80              ; TERM_COLS unknown/implausible
             glo     r9
             ani     $80
             str     rb                  ; le_opts = option bits
+
+            ; point le_rdvec (an LBR in this library's data) at the
+            ; read routine for this mode, once, so that every read below
+            ; is a plain "call le_rdvec" with nothing in between -- the
+            ; bytes of an arrow-key sequence arrive back to back, and a
+            ; mode dispatch before each read was slow enough to lose
+            ; them (hardware-found 2026-09-30)
+            glo     r9
+            ani     $7F
+            lbz     rle_v_fast          ; LE_MODE_FAST
+            xri     LE_MODE_REDIR
+            lbz     rle_v_redir
+            ldi     high f_bread        ; LE_MODE_BITBANG
+            phi     r8
+            ldi     low f_bread
+            lbr     rle_v_set
+rle_v_fast:
+            ldi     high f_uread
+            phi     r8
+            ldi     low f_uread
+            lbr     rle_v_set
+rle_v_redir:
+            ldi     high K_READ
+            phi     r8
+            ldi     low K_READ
+rle_v_set:
+            plo     r8                  ; R8 = read routine
+            mov     rb, le_rdvec
+            inc     rb
+            ghi     r8
+            str     rb
+            inc     rb
+            glo     r8
+            str     rb                  ; le_rdvec = LBR <routine>
 
             glo     rc
             smi     LE_MAX_CAP+1
@@ -342,54 +377,28 @@ rlr_print:
             lbr     le_loop
 
 ;------------------------------------------------------------------
-; le_getchar: mode-aware, blocking single-byte read. In LE_MODE_REDIR,
-; D==0 signals EOF, matching K_READ's own documented contract ("D=0
-; (NUL) at EOF or on a read error" -- kernel/redir.asm's
-; _read_from_file). LE_MODE_FAST/LE_MODE_BITBANG never signal EOF.
-; Returns: DF=0, D=the byte read; or DF=1 (LE_MODE_REDIR only) for EOF
-; Modifies: RD (and D)
+; Reading. Every byte comes from "call le_rdvec", an LBR set up by
+; read_line_ex to K_READ, f_uread or f_bread for the mode -- the same
+; path "call K_READ" takes (K_READ is itself an LBR to the routine), so
+; a read costs nothing beyond the BIOS call. A byte of 0 is end of input
+; (K_READ's EOF, LE_MODE_REDIR); in the other modes a NUL keystroke is
+; treated the same way.
+;
+; Within an escape sequence each read follows the previous one after
+; only a compare or two: the terminal sends "ESC [ A" back to back, and
+; anything slower loses bytes (the old dispatch-per-read le_getchar
+; did, on hardware, 2026-09-30).
 ;------------------------------------------------------------------
-le_getchar:
-            mov     rd, le_mode
-            ldn     rd
-            lbz     lgc_mode0           ; mode 0: LE_MODE_FAST
-            xri     1
-            lbz     lgc_mode1           ; mode 1: LE_MODE_REDIR
-
-            ; mode 2: LE_MODE_BITBANG
-            call    f_bread
-            clc
-            rtn
-
-lgc_mode0:
-            call    f_uread
-            clc
-            rtn
-
-lgc_mode1:
-            call    K_READ
-            lbnz    lgc_have_byte
-            stc                         ; D==0: EOF
-            rtn
-
-lgc_have_byte:
-            clc
-            rtn
 
 ;------------------------------------------------------------------
 ; Main loop.
 ;------------------------------------------------------------------
 le_loop:
-            call    le_getchar
-            lbdf    le_do_eof
+            call    le_rdvec
+            lbz     le_do_eof
             plo     rc                  ; RC.0 = char
-
-            ; ESC checked FIRST -- minimizes the latency between
-            ; reading ESC and le_escape's own next le_getchar call,
-            ; same reasoning as the shell's original rlwh_loop.
-            glo     rc
-            xri     27                  ; ESC
-            lbz     le_escape
+            xri     27                  ; ESC checked FIRST, straight
+            lbz     le_escape           ; off the byte: see above
 
             glo     rc
             xri     13                  ; CR
@@ -984,24 +993,22 @@ le_down:
             rtn
 
 ;------------------------------------------------------------------
-; le_escape: parse the byte(s) following a real ESC. Every follow-up
-; read goes through le_getchar so a LE_MODE_REDIR caller's EOF can be
-; detected even mid-sequence. Malformed/incomplete sequences are
-; always discarded, never guessed at (see the shell's original
-; rlwh_escape history for why).
+; le_escape: the byte(s) after an ESC, read with nothing between the
+; reads but a compare (see "Reading" above). Malformed or unknown
+; sequences are discarded, never guessed at.
 ;------------------------------------------------------------------
 le_escape:
-            call    le_getchar
-            lbdf    le_do_eof
-            plo     rc                  ; RC.0 = byte after ESC
-
-            glo     rc
+            call    le_rdvec
+            lbz     le_do_eof
             xri     '['
             lbnz    le_loop             ; not a CSI sequence: discard
 
-            call    le_getchar
-            lbdf    le_do_eof
-            plo     rc
+            call    le_rdvec
+            lbz     le_do_eof
+            plo     rc                  ; RC.0 = final byte
+            xri     '3'                 ; Del is "ESC [ 3 ~": one more
+            lbz     les_del             ; byte coming, so check it first
+
             glo     rc
             xri     'A'                 ; Up
             lbz     le_up
@@ -1014,16 +1021,11 @@ le_escape:
             glo     rc
             xri     'D'                 ; Left arrow
             lbz     le_left
+            lbr     le_loop             ; unrecognized: discard
 
-            ; Del key: "ESC [ 3 ~", a 4-byte sequence
-            glo     rc
-            xri     '3'
-            lbnz    le_loop             ; unrecognized: discard
-
-            call    le_getchar          ; read the expected '~'
-            lbdf    le_do_eof
-            plo     rc
-            glo     rc
+les_del:
+            call    le_rdvec            ; the expected '~'
+            lbz     le_do_eof
             xri     '~'
             lbnz    le_loop             ; malformed: discard
             lbr     le_ctrld            ; Del: same as Ctrl-D
@@ -1060,6 +1062,8 @@ le_do_eof:
 le_buf:             dw      0           ; caller's buffer pointer
 le_max_len:         db      0           ; max characters (no NUL)
 le_mode:            db      0           ; LE_MODE_*
+le_rdvec:           db      $C0,0,0     ; LBR <read routine>, set by
+                                        ; read_line_ex -- see "Reading"
 le_opts:            db      0           ; LE_OPT_* bits
 le_len:             db      0           ; current line length
 le_cursor:          db      0           ; cursor position, 0..le_len
@@ -1086,6 +1090,7 @@ le_oldlen:          db      0           ; read_line_resume: old length
                 public  le_buf
                 public  le_max_len
                 public  le_mode
+                public  le_rdvec
                 public  le_opts
                 public  le_len
                 public  le_cursor
