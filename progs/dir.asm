@@ -1410,6 +1410,12 @@ pde_dirtag_done:
             mov     rf, size_buf13
             ldi     0
             plo     rc                  ; RC.0 = character count
+            phi     rc                  ; RC.1 = 0 too: the add16 rf, rc
+                                        ; below uses all 16 bits, and
+                                        ; RC.1 was whatever the last
+                                        ; call left there (garbled the
+                                        ; whole line on hardware,
+                                        ; 2026-10-01)
 pde_count_loop:
             ldn     rf
             lbz     pde_count_done
