@@ -1,11 +1,11 @@
 # ELF-DOS
 
 A FAT16, DOS-like operating system for the RCA CDP1802 processor, targeting
-Elf/OS-compatible hardware. It boots from an SD card via an MBR partition
-table (four primary FAT16 partitions, mountable as up to six drives under
-any letters `A:`-`Z:`), brings up a small resident kernel, and hands off to
-a command shell where every command - `DIR`, `CD`, `TYPE`, `COPY`, ... - is
-an ordinary loadable executable, not a built-in.
+Elf/OS-compatible hardware. It boots from any media supported by the BIOS
+via an MBR partition table (up to four primary FAT16 partitions, mountable
+as up to six drives under any letters `A:`-`Z:`), brings up a small resident
+kernel, and hands off to a command shell where every command - `DIR`, `CD`,
+`TYPE`, `COPY`, ... - is an ordinary loadable executable, not a built-in.
 
 ## Status
 
@@ -149,25 +149,20 @@ into `test/bin/` via `make test`, kept separate from the real `/bin` set.
 
 - `CHKDSK -f` (automatic repair) - check-only for now.
 - Nested batch scripts (a `.bat` calling another `.bat`).
-- An executable-permission bit - attempted and hardware-tested, but the
-  user judged it not worth the added complexity in practice, and the
-  branch holding it has since been deleted.
 - The system and archive attributes (`ATTRIB` handles read-only and
   hidden).
 
 ## Architecture
 
 - **Kernel API jump table** at a fixed address (`$0106`), one 3-byte `lbr`
-  per call. Slots are append-only pre-release convention going forward
-  (the table underwent one deliberate full renumbering before any external
-  code depended on it), so a program built against an
-  older kernel keeps working after the kernel is rebuilt. Programs include
-  `include/kernel_api.inc`, which restates just the constants they need
-  (call addresses, program header layout, directory-entry layout) rather
-  than sharing the kernel's own internal headers - program code never
-  depends on kernel internals that could change across updates. The
-  register-level contract for every call is documented in
-  `docs/DEVELOPER_GUIDE.md`'s Kernel API Reference.
+  per call. Slots are append-only pre-release convention going forward,
+  so a program built against an older kernel keeps working after the
+  kernel is rebuilt. Programs include `include/kernel_api.inc`, which
+  restates just the constants they need (call addresses, program header
+  layout, directory-entry layout) rather than sharing the kernel's own
+  internal headers - program code never depends on kernel internals that
+  could change across updates. The register-level contract for every call
+  is documented in `docs/DEVELOPER_GUIDE.md`'s Kernel API Reference.
 - **Command-line ABI**: a program receives `RA` = pointer to its argv table
   and `RC` = argc at entry (`argv[0]` is its own invocation name). Both are
   register-passed rather than a fixed address a program's own code would
@@ -176,8 +171,8 @@ into `test/bin/` via `make test`, kept separate from the real `/bin` set.
   programs.
 - **Program binaries** are a small custom format: `'EDF'` magic + version
   byte + 2 reserved bytes, then code. Programs load at a fixed `PROG_BASE`
-  (`$4300`), kept intentionally below `KERN_LOAD` for extra kernel-resident
-  headroom rather than merged with it.
+  defined in `kernel_api.inc`, kept intentionally below `KERN_LOAD` for
+  extra kernel-resident headroom rather than merged with it.
 - **Batch-script support (tracking which line of a `.bat` file runs next,
   etc.) lives in a small, dynamically-loaded kernel module**
   (`/bin/batch.mod`), reserved into high memory only while a script is
@@ -220,7 +215,6 @@ lib/        Shared userland libraries (heap allocators, file globbing,
 test/       Internal regression-test / diagnostic tools, built separately
             from progs/ into test/bin/
 docs/       User's Guide and Developer's Guide (Markdown + PDF)
-sys/        Host-side tool for writing images to a target device
 ```
 
 ## Building
@@ -234,8 +228,10 @@ for prerequisites).
 make            # build kernel-full.bin (bootstrap + kernel)
 make progs      # build every progs/*.asm into bin/<name> (bare, no
                 # extension -- mirrors the on-device /bin layout)
+make mbr        # build the Master Boot Record binary
 make test       # build every test/*.asm into test/bin/<name>
 make clean      # remove all generated build artifacts
+make everything # builds kernel, mbr, and programs
 ```
 
 `make progs`/`make test` auto-discover new files under `progs/`/`test/`
@@ -276,9 +272,9 @@ kernel needs, and read back everything they write.
 ### Putting the kernel in ROM
 
 The kernel links as two regions (see `include/memmap.inc`): a small volatile
-half that must be RAM, and a larger non-volatile half that is all executable
+piece that must be RAM, and a larger non-volatile piece that is all executable
 code and is never written after load - so it can be burned into ROM. Every
-build writes that half out on its own as `kernel-rom.bin`, and:
+build writes that piece out on its own as `kernel-rom.bin`, and:
 
 ```
 make rom                           # where to burn it, and headroom left
@@ -293,7 +289,7 @@ reports the address (`install`/`update` print the same thing afterwards):
 ```
 
 Burning is optional. The same bytes are also inside `kernel-full.bin`, and
-`krnboot` loads them from the card whenever it does not already find the
+`krnboot` loads them from the media whenever it does not already find the
 `NVK` signature at that address - so a RAM-only machine boots from the card
 alone. Putting the image in ROM is what frees the RAM it would otherwise
 occupy. The address moves whenever `NVK_BASE` is re-tuned, which is why it
@@ -307,7 +303,7 @@ be copied wholesale rather than file-by-file - e.g.
 `mcopy -i /dev/sdX@@1M bin/* ::BIN/`. This includes the shell itself
 (`bin/shell`) and the batch module (`bin/batch.mod`), which the kernel
 loads by their exact `/bin/` paths. A kernel already installed can also
-be updated from the *running* system itself via `MR` (receive
+be updated from the *running* system itself using file transfer (receive
 `kernel-full.bin` over serial) + `SYS` (install it) + `REBOOT`, with no
 card swap needed.
 
