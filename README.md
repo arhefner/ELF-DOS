@@ -12,9 +12,9 @@ an ordinary loadable executable, not a built-in.
 Actively in development. Currently working, confirmed on real hardware
 unless noted otherwise. For full day-to-day usage and program-development
 documentation, see `docs/USER_GUIDE.md` and `docs/DEVELOPER_GUIDE.md`
-(PDF versions of both are also included). `CLAUDE.md` carries the full,
-dated project history, architectural rationale, and toolchain gotchas
-behind everything summarized here.
+(PDF versions of both are also included). The Developer's Guide is the
+reference for the program format, the kernel API and the library
+modules summarized here.
 
 ### Boot and filesystem
 
@@ -136,8 +136,8 @@ behind everything summarized here.
 | `VER` | Print the ELF-DOS version |
 | `REBOOT [unit]` | Warm-reboot from a unit (default: the one booted from), as the ROM's disk boot would -- ELF-DOS, Elf/OS or any boot sector |
 
-`YR`/`YS` are currently known to be broken (build-verified only, not yet
-working on real hardware) - see `CLAUDE.md`'s roadmap notes.
+`YR`/`YS` are confirmed on the hardware UART (`-u`) up to 19.2 kbaud;
+they are untested on the bit-banged port.
 
 `test/` holds internal regression-test tools (file write/append/seek
 exercises, the heap allocator libraries, a deliberate-corruption injector
@@ -145,8 +145,6 @@ for exercising `CHKDSK`, etc.) rather than everyday commands - they build
 into `test/bin/` via `make test`, kept separate from the real `/bin` set.
 
 ### Not yet supported
-
-See `CLAUDE.md` for the fuller running notes and roadmap.
 
 - `CHKDSK -f` (automatic repair) - check-only for now.
 - Nested batch scripts (a `.bat` calling another `.bat`).
@@ -161,7 +159,7 @@ See `CLAUDE.md` for the fuller running notes and roadmap.
 - **Kernel API jump table** at a fixed address (`$0106`), one 3-byte `lbr`
   per call. Slots are append-only pre-release convention going forward
   (the table underwent one deliberate full renumbering before any external
-  code depended on it - see `CLAUDE.md`), so a program built against an
+  code depended on it), so a program built against an
   older kernel keeps working after the kernel is rebuilt. Programs include
   `include/kernel_api.inc`, which restates just the constants they need
   (call addresses, program header layout, directory-entry layout) rather
@@ -198,9 +196,9 @@ See `CLAUDE.md` for the fuller running notes and roadmap.
   cache, swapped in on demand (`_switch_drive`, `kernel/fat.asm`) whenever
   a path names a different drive than the one currently active.
 
-See `CLAUDE.md` for the full architectural contract, toolchain gotchas
-specific to Asm/02 1802 assembly, and the conventions for working in this
-codebase.
+See `docs/DEVELOPER_GUIDE.md` for the full reference: the program binary
+format and calling convention, every kernel call with its arguments and
+results, and the library modules.
 
 ## Repository layout
 
