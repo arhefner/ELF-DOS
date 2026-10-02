@@ -174,7 +174,7 @@ SPECIAL_BINS = bin\printenv bin\which bin\export bin\unset \
         bin\yr bin\ys bin\termsize bin\mr bin\ms \
         bin\dir bin\label bin\pwd bin\del bin\touch bin\copy bin\attrib \
         bin\stat bin\chkdsk bin\mount bin\umount bin\format bin\fdisk \
-        bin\mdv
+        bin\mdv bin\cmp
 
 # ---- The test\*.asm that link against lib\ -- see build_test.bat's
 # own exclusion list, which must be kept in sync with this set ----
@@ -591,6 +591,13 @@ progs\stat.prg: progs\stat.asm include\kernel_api.inc include\bios.inc include\o
 bin\stat: progs\stat.prg lib\fmt32.prg bin
 	$(LINK) $(LFLAGS) -o bin\stat progs\stat.prg lib\fmt32.prg
 	-del /F /Q bin\stat.lkb
+
+progs\cmp.prg: progs\cmp.asm include\kernel_api.inc include\bios.inc include\opcodes.def
+	cd progs && $(ASM) $(ASMFLAGS) cmp.asm
+
+bin\cmp: progs\cmp.prg lib\fmt32.prg bin
+	$(LINK) $(LFLAGS) -o bin\cmp progs\cmp.prg lib\fmt32.prg
+	-del /F /Q bin\cmp.lkb
 
 progs\chkdsk.prg: progs\chkdsk.asm include\kernel_api.inc include\bios.inc include\opcodes.def
 	cd progs && $(ASM) $(ASMFLAGS) chkdsk.asm

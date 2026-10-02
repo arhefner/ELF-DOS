@@ -61,6 +61,7 @@ for %%f in (progs\*.asm) do (
     if /I "!name!"=="copy"       set "skip=1"
     if /I "!name!"=="attrib"     set "skip=1"
     if /I "!name!"=="stat"       set "skip=1"
+    if /I "!name!"=="cmp"        set "skip=1"
     if /I "!name!"=="chkdsk"     set "skip=1"
     if /I "!name!"=="mount"      set "skip=1"
     if /I "!name!"=="umount"     set "skip=1"

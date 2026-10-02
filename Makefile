@@ -356,6 +356,10 @@ bin/stat: progs/stat.prg lib/fmt32.prg | bin
 	$(LINK) $(LFLAGS) -o bin/stat progs/stat.prg lib/fmt32.prg
 	rm -f bin/stat.lkb
 
+bin/cmp: progs/cmp.prg lib/fmt32.prg | bin
+	$(LINK) $(LFLAGS) -o bin/cmp progs/cmp.prg lib/fmt32.prg
+	rm -f bin/cmp.lkb
+
 bin/mount: progs/mount.prg lib/fmt32.prg lib/drives.prg | bin
 	$(LINK) $(LFLAGS) -o bin/mount progs/mount.prg lib/fmt32.prg lib/drives.prg
 	rm -f bin/mount.lkb
