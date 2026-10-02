@@ -1,12 +1,12 @@
 # build_sdk.ps1 - packages the external-developer SDK (headers, lib\
-# modules, Developer's Guide) into a single elfdos-sdk.zip that a
+# modules, Developer's Guide) into a single elfdos-sdk-<ver>.zip that a
 # developer downloads and expands directly into their own project -- no
 # git clone of ELF-DOS, no local build step of their own required.
 #
 # Windows counterpart to the Linux Makefile's own "sdk" target
-# (elfdos-sdk.tar.gz) -- see that target's own header comment in
-# Makefile for the full rationale (SOURCE only, pinned to a commit not
-# a version number, kernel.inc/toolchain deliberately excluded). This
+# (elfdos-sdk-<ver>.tar.gz) -- see that target's own header comment in
+# Makefile for the full rationale (SOURCE only, kernel.inc/toolchain
+# deliberately excluded, the kernel version in the file name). This
 # is a standalone script, not inlined into Makefile.win itself, because
 # nmake has no $(wildcard ...)/$(patsubst ...) to drive a file list the
 # way GNU Make does, and hand-building a multi-line PowerShell one-liner
@@ -31,10 +31,15 @@
 # any directory other than the repo root (all paths below are relative).
 
 param(
-    [string]$OutFile = "elfdos-sdk.zip"
+    [string]$OutFile = ""
 )
 
 $ErrorActionPreference = "Stop"
+
+# Kernel version, for the file name and MANIFEST.txt.
+$kmaj = (Select-String -Path "kernel\kernel.asm" -Pattern "KERNEL_VER_MAJOR:\s*equ\s*(\S+)").Matches[0].Groups[1].Value
+$kmin = (Select-String -Path "kernel\kernel.asm" -Pattern "KERNEL_VER_MINOR:\s*equ\s*(\S+)").Matches[0].Groups[1].Value
+if (-not $OutFile) { $OutFile = "elfdos-sdk-$kmaj.$kmin.zip" }
 
 $SdkHeaders = @(
     "include\kernel_api.inc",
@@ -69,8 +74,6 @@ Copy-Item "docs\DEVELOPER_GUIDE.md" $Root
 
 # ---- MANIFEST.txt -- same content/shape as the Linux target's own ----
 $commit = (git rev-parse HEAD).Trim()
-$kmaj = (Select-String -Path "kernel\kernel.asm" -Pattern "KERNEL_VER_MAJOR:\s*equ\s*(\S+)").Matches[0].Groups[1].Value
-$kmin = (Select-String -Path "kernel\kernel.asm" -Pattern "KERNEL_VER_MINOR:\s*equ\s*(\S+)").Matches[0].Groups[1].Value
 $pb   = (Select-String -Path "include\kernel_api.inc" -Pattern "PROG_BASE:\s*equ\s*(\S+)").Matches[0].Groups[1].Value
 
 $lines = @()

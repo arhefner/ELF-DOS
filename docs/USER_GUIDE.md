@@ -11,6 +11,10 @@ write your own programs for it, see the *ELF-DOS Developer's Guide*.
 
 ## Starting ELF-DOS
 
+To put ELF-DOS on a card in the first place, see the installation guide
+for your system: `INSTALL-linux.md` or `INSTALL-windows.md` (`INSTALL.md`
+in a release package).
+
 When you turn on the computer, ELF-DOS prints a short banner and shows you
 a prompt, such as:
 

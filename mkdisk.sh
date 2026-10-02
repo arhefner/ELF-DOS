@@ -275,7 +275,7 @@ lsblk -no NAME,SIZE,FSTYPE,LABEL "$TARGET" | sed 's/^/  /'
 p1=$(part_dev 1)
 echo
 echo "Next -- install the boot code and kernel:"
-echo "  make install DEV=$TARGET"
-echo "then put the programs in \\BIN on the first partition, e.g. with mtools:"
-echo "  mmd   -i $p1 ::BIN"
-echo "  mcopy -i $p1 bin/* ::BIN/"
+echo "  sudo ./elfdos-sys.sh -m mbr.bin -k kernel-full.bin $TARGET"
+echo "then put the programs in /bin on the first partition, e.g. with mtools:"
+echo "  mmd   -i $p1 ::bin"
+echo "  mcopy -i $p1 bin/* ::bin/"

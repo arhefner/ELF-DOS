@@ -729,11 +729,11 @@ if ($Volumes) {
 $FirstLetter = ($Volumes | Sort-Object PartitionNumber | Select-Object -First 1).DriveLetter
 
 Write-Host "`nNext step -- install the boot code and kernel:" -ForegroundColor Cyan
-Write-Host "  nmake /F Makefile.win install DEV=$DevicePath" -ForegroundColor White
+Write-Host "  .\Install-ElfDos.ps1 -DiskNumber $DiskNumber -Mbr mbr.bin -Kernel kernel-full.bin" -ForegroundColor White
 if ($FirstLetter) {
     Write-Host "`nthen copy the programs onto the first partition:" -ForegroundColor Cyan
-    Write-Host "  mkdir ${FirstLetter}:\BIN" -ForegroundColor White
-    Write-Host "  copy bin\* ${FirstLetter}:\BIN" -ForegroundColor White
+    Write-Host "  mkdir ${FirstLetter}:\bin" -ForegroundColor White
+    Write-Host "  copy bin\* ${FirstLetter}:\bin" -ForegroundColor White
 } else {
-    Write-Host "then copy bin\* to the \BIN directory of the first partition." -ForegroundColor Cyan
+    Write-Host "then copy bin\* to the \bin directory of the first partition." -ForegroundColor Cyan
 }
