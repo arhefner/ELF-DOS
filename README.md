@@ -192,8 +192,9 @@ into `test/bin/` via `make test`, kept separate from the real `/bin` set.
   against them, alongside smaller shared libraries for formatting,
   environment-variable access, path display, and file globbing
   (`lib/fmt32.asm`, `lib/env.asm`, `lib/pathstr.asm`, `lib/file_glob.asm`).
-- **Multi-partition support**: up to 4 drives, each with its own BPB/FAT
-  cache, swapped in on demand (`_switch_drive`, `kernel/fat.asm`) whenever
+- **Multi-drive support**: up to 6 mounted drives (letters A-Z, on any
+  disk unit; the boot disk's partitions are mounted at boot, others with
+  `MOUNT`), each with its own BPB, swapped in on demand (`_switch_drive`, `kernel/fat.asm`) whenever
   a path names a different drive than the one currently active.
 
 See `docs/DEVELOPER_GUIDE.md` for the full reference: the program binary
