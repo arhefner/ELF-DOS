@@ -15,7 +15,7 @@
 #   nmake /F Makefile.win rom        report where to burn kernel-rom.bin
 #                                     (the ROM-able half of the kernel)
 #   nmake /F Makefile.win sdk        package the external-developer SDK
-#                                     into elfdos-sdk-<ver>.zip (see tools\
+#                                     into dist\elfdos-sdk-<ver>.zip (see tools\
 #                                     build_sdk.ps1)
 #   nmake /F Makefile.win clean      remove all generated files
 #
@@ -708,9 +708,9 @@ rom: $(FULL_BIN)
 # zip itself) lives in tools\build_sdk.ps1 -- see its own header
 # comment for why this is a standalone script rather than inlined
 # nmake recipe lines. Override the output path with SDK_OUT, e.g.:
-#   nmake /F Makefile.win sdk SDK_OUT=dist\x.zip
+#   nmake /F Makefile.win sdk SDK_OUT=other\x.zip
 # With SDK_OUT empty (the default) the script names the file after the
-# kernel version itself, elfdos-sdk-<ver>.zip. The release packages
+# kernel version itself, dist\elfdos-sdk-<ver>.zip. The release packages
 # ("make release") are built on Linux only.
 SDK_OUT =
 
@@ -725,7 +725,7 @@ clean:
 	-del /F /Q lib\*.prg lib\*.lst
 	-del /F /Q $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
 	-del /F /Q $(KVOL_BIN) $(ROM_BIN) ksym.sym
-	-del /F /Q elfdos-sdk-*.zip
+	-if exist dist rmdir /S /Q dist
 	-if exist bin rmdir /S /Q bin
 	-if exist test\bin rmdir /S /Q test\bin
 	-if exist build rmdir /S /Q build

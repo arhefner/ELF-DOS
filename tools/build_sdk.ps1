@@ -25,7 +25,7 @@
 #
 # Usage (from the repo root):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_sdk.ps1
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_sdk.ps1 -OutFile dist\x.zip
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tools\build_sdk.ps1 -OutFile other\x.zip
 #
 # Invoked by Makefile.win's own "sdk" target; not meant to be run from
 # any directory other than the repo root (all paths below are relative).
@@ -39,7 +39,7 @@ $ErrorActionPreference = "Stop"
 # Kernel version, for the file name and MANIFEST.txt.
 $kmaj = (Select-String -Path "kernel\kernel.asm" -Pattern "KERNEL_VER_MAJOR:\s*equ\s*(\S+)").Matches[0].Groups[1].Value
 $kmin = (Select-String -Path "kernel\kernel.asm" -Pattern "KERNEL_VER_MINOR:\s*equ\s*(\S+)").Matches[0].Groups[1].Value
-if (-not $OutFile) { $OutFile = "elfdos-sdk-$kmaj.$kmin.zip" }
+if (-not $OutFile) { $OutFile = "dist\elfdos-sdk-$kmaj.$kmin.zip" }
 
 $SdkHeaders = @(
     "include\kernel_api.inc",
@@ -94,6 +94,8 @@ $lines += "Toolchain (asm02/link02) is NOT included -- see DEVELOPER_GUIDE.md's 
 Set-Content -Path (Join-Path $Root "MANIFEST.txt") -Value $lines -Encoding ASCII
 
 # ---- Zip ----
+$OutDir = Split-Path -Parent $OutFile
+if ($OutDir -and -not (Test-Path $OutDir)) { New-Item -ItemType Directory -Force -Path $OutDir | Out-Null }
 if (Test-Path $OutFile) { Remove-Item -Force $OutFile }
 Compress-Archive -Path $Root -DestinationPath $OutFile -CompressionLevel Optimal
 

@@ -7,8 +7,7 @@
 
 # SDK and release packages (see "make sdk", "make release",
 # "nmake /F Makefile.win sdk")
-/elfdos-*.tar.gz
-/elfdos-*.zip
+/dist/
 /build/
 
 # Prerequisites

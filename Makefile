@@ -17,10 +17,11 @@
 #              mbr.bin missing. Does not build "sdk" (a release package,
 #              not a build output)
 #   sdk        package the external-developer SDK (headers, lib/
-#              modules, Developer's Guide) into elfdos-sdk-<ver>.tar.gz
+#              modules, Developer's Guide) into dist/elfdos-sdk-<ver>.tar.gz
 #              -- a self-contained download, no repo clone needed
 #   release    build everything and package the two downloads:
-#              elfdos-<ver>-linux.tar.gz and elfdos-<ver>-windows.zip
+#              elfdos-<ver>-linux.tar.gz and elfdos-<ver>-windows.zip,
+#              in dist/
 #   clean      remove all generated files
 #
 # Override DEV on the command line to target a specific device:
@@ -610,8 +611,11 @@ everything: all mbr progs test
 # re-vendoring a newer archive is a deliberate step in the consuming
 # project's own history, never automatic.
 #
-# Usage: make sdk                     -> elfdos-sdk-<ver>.tar.gz
-#        make sdk SDK_OUT=dist/x.tar.gz
+# Everything meant to be published (this and the release packages
+# below) lands in dist/, which is not tracked.
+#
+# Usage: make sdk                     -> dist/elfdos-sdk-<ver>.tar.gz
+#        make sdk SDK_OUT=other/x.tar.gz
 #------------------------------------------------------------------
 ELFDOS_VER := $(shell sed -n 's/^KERNEL_VER_MAJOR:.*equ *\([0-9]*\).*/\1/p' kernel/kernel.asm).$(shell sed -n 's/^KERNEL_VER_MINOR:.*equ *\([0-9]*\).*/\1/p' kernel/kernel.asm)
 # "-dirty" when the working tree has uncommitted changes, so a package
@@ -633,7 +637,9 @@ SDK_LIB_INCS = include/file_glob.inc include/lineedit.inc \
                include/ymodem.inc
 
 SDK_NAME  = elfdos-sdk
-SDK_OUT   = $(SDK_NAME)-$(ELFDOS_VER).tar.gz
+DIST      = dist
+SDK_TGZ   = $(DIST)/$(SDK_NAME)-$(ELFDOS_VER).tar.gz
+SDK_OUT   = $(SDK_TGZ)
 SDK_STAGE = build/sdk-stage
 SDK_ROOT  = $(SDK_STAGE)/$(SDK_NAME)
 
@@ -657,6 +663,7 @@ sdk:
 	@echo ""                                                         >> $(SDK_ROOT)/MANIFEST.txt
 	@echo "DEVELOPER_GUIDE.md included -- see it for the full API reference." >> $(SDK_ROOT)/MANIFEST.txt
 	@echo "Toolchain (asm02/link02) is NOT included -- see DEVELOPER_GUIDE.md's own Build section for install instructions." >> $(SDK_ROOT)/MANIFEST.txt
+	mkdir -p $(dir $(SDK_OUT))
 	tar -czf $(SDK_OUT) -C $(SDK_STAGE) $(SDK_NAME)
 	rm -rf $(SDK_STAGE)
 	@rmdir build 2>/dev/null || true
@@ -678,7 +685,8 @@ sdk:
 #         platform's installation guide (docs/INSTALL-linux.md or
 #         docs/INSTALL-windows.md) as INSTALL.md at the top
 #
-# Each unpacks into one elfdos-<ver>/ directory. Both are made here, on
+# Both are written to dist/, next to the two SDK archives. Each unpacks
+# into one elfdos-<ver>/ directory. Both are made here, on
 # Linux; the zips are written by Python (already needed by the build),
 # so no "zip" program is required. The Windows SDK zip is made from the
 # SDK tarball, so the two SDKs cannot differ.
@@ -687,22 +695,22 @@ sdk:
 # them, so export them again first if the .md guides have changed.
 #------------------------------------------------------------------
 REL_NAME  = elfdos-$(ELFDOS_VER)
-REL_LINUX = $(REL_NAME)-linux.tar.gz
-REL_WIN   = $(REL_NAME)-windows.zip
+REL_LINUX = $(DIST)/$(REL_NAME)-linux.tar.gz
+REL_WIN   = $(DIST)/$(REL_NAME)-windows.zip
 REL_STAGE = build/release-stage
 REL_ROOT  = $(REL_STAGE)/$(REL_NAME)
-SDK_ZIP   = $(SDK_NAME)-$(ELFDOS_VER).zip
+SDK_ZIP   = $(DIST)/$(SDK_NAME)-$(ELFDOS_VER).zip
 REL_DOCS  = docs/USER_GUIDE.md docs/DEVELOPER_GUIDE.md \
             docs/ELF-DOS-UserGuide.pdf docs/ELF-DOS-DevelopersGuide.pdf
 REL_LINUX_TOOLS = mkdisk.sh elfdos-sys.sh
 REL_WIN_TOOLS   = Format-ElfDosDisk.ps1 Install-ElfDos.ps1
 
 release: all mbr progs
-	$(MAKE) sdk SDK_OUT=$(SDK_NAME)-$(ELFDOS_VER).tar.gz
+	$(MAKE) sdk SDK_OUT=$(SDK_TGZ)
 	rm -rf $(REL_STAGE) $(REL_LINUX) $(REL_WIN) $(SDK_ZIP)
 	mkdir -p $(REL_ROOT)/docs $(REL_STAGE)/sdk
-	tar -xzf $(SDK_NAME)-$(ELFDOS_VER).tar.gz -C $(REL_STAGE)/sdk
-	python3 -c "import shutil; shutil.make_archive('$(SDK_NAME)-$(ELFDOS_VER)', 'zip', '$(REL_STAGE)/sdk', '$(SDK_NAME)')"
+	tar -xzf $(SDK_TGZ) -C $(REL_STAGE)/sdk
+	python3 -c "import shutil; shutil.make_archive('$(basename $(SDK_ZIP))', 'zip', '$(REL_STAGE)/sdk', '$(SDK_NAME)')"
 	cp $(FULL_BIN) $(ROM_BIN) $(MBR_BIN) LICENSE $(REL_ROOT)/
 	cp -r bin $(REL_ROOT)/
 	cp $(REL_DOCS) $(REL_ROOT)/docs/
@@ -719,13 +727,13 @@ release: all mbr progs
 	@echo "INSTALL.md       how to put ELF-DOS on a card -- start here" >> $(REL_ROOT)/MANIFEST.txt
 	@echo ""                                                         >> $(REL_ROOT)/MANIFEST.txt
 	@python3 tools/rom_info.py $(ROM_BIN)                            >> $(REL_ROOT)/MANIFEST.txt
-	cp $(REL_LINUX_TOOLS) $(SDK_NAME)-$(ELFDOS_VER).tar.gz $(REL_ROOT)/
+	cp $(REL_LINUX_TOOLS) $(SDK_TGZ) $(REL_ROOT)/
 	cp docs/INSTALL-linux.md $(REL_ROOT)/INSTALL.md
 	tar -czf $(REL_LINUX) -C $(REL_STAGE) $(REL_NAME)
 	cd $(REL_ROOT) && rm -f $(REL_LINUX_TOOLS) $(SDK_NAME)-$(ELFDOS_VER).tar.gz
 	cp $(REL_WIN_TOOLS) $(SDK_ZIP) $(REL_ROOT)/
 	cp docs/INSTALL-windows.md $(REL_ROOT)/INSTALL.md
-	python3 -c "import shutil; shutil.make_archive('$(REL_NAME)-windows', 'zip', '$(REL_STAGE)', '$(REL_NAME)')"
+	python3 -c "import shutil; shutil.make_archive('$(basename $(REL_WIN))', 'zip', '$(REL_STAGE)', '$(REL_NAME)')"
 	rm -rf $(REL_STAGE)
 	@rmdir build 2>/dev/null || true
 	@echo "Release packaged to $(REL_LINUX) and $(REL_WIN)"
@@ -738,7 +746,7 @@ clean:
 	      lib/*.prg lib/*.lst \
 	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN) \
 	      $(KVOL_BIN) $(ROM_BIN) ksym.sym \
-	      $(SDK_OUT) $(SDK_ZIP) $(REL_LINUX) $(REL_WIN)
+	      $(SDK_OUT)
 	rm -rf test/bin
 	rm -rf bin
-	rm -rf build
+	rm -rf build $(DIST)
