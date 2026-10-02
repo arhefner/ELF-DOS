@@ -39,11 +39,11 @@
 #include    include/kernel_api.inc
 
 HX_ROW_MAX:     equ     32          ; most bytes per row (hx_set_row clamps)
+HX_STATE_LEN:   equ     16          ; hx_chunk_rem through hx_next
 HX_LINE_MAX:    equ     144         ; 14 + 4*32 = 142 characters + NUL
-HX_CHUNK_LEN:   equ     128         ; K_FILE_READ chunk -- MUST stay <= 255,
-                                    ; it is loaded with a one-byte ldi (see
-                                    ; lib/src_file.asm's LESS_CHUNK_LEN for
-                                    ; the hardware bug that taught that)
+HX_CHUNK_LEN:   equ     512         ; the read buffer: one 512-byte block
+                                    ; of the file, always starting at a
+                                    ; multiple of 512 (hx_getbyte)
 
 ;------------------------------------------------------------------
 ; src_open: open the named file and learn its size.
@@ -58,6 +58,7 @@ HX_CHUNK_LEN:   equ     128         ; K_FILE_READ chunk -- MUST stay <= 255,
             extrn   hx_path
             extrn   hx_size
             extrn   hx_stat_buf
+            extrn   hx_chunk_rem
             extrn   src_rewind
             extrn   copy4bytes
             extrn   zero4bytes
@@ -75,8 +76,22 @@ HX_CHUNK_LEN:   equ     128         ; K_FILE_READ chunk -- MUST stay <= 255,
             call    K_FILE_OPEN
             lbdf    hop_fail
 
-            call    src_rewind          ; src_pos = 0, chunk buffer empty
-                                        ; -- 'ds' storage is not zeroed
+            ; 'ds' storage is not zeroed: empty the read buffer's state
+            ; (hx_chunk_rem .. hx_next, HX_STATE_LEN bytes) before the
+            ; first src_seek_to looks at it. The file is at 0, as hx_fpos
+            ; then says.
+            mov     rf, hx_chunk_rem
+            ldi     HX_STATE_LEN
+            plo     rc
+hop_zero:
+            ldi     0
+            str     rf
+            inc     rf
+            dec     rc
+            glo     rc
+            lbnz    hop_zero
+
+            call    src_rewind          ; src_pos = 0
 
             mov     rf, hx_path
             lda     rf
@@ -136,39 +151,124 @@ hop_fail:
             endp
 
 ;------------------------------------------------------------------
-; src_seek_to: seek to the 4-byte position at [RF], set src_pos to it,
-; and empty the chunk buffer so the next byte really comes from there.
+; src_seek_to: make the 4-byte position at [RF] the next byte read, and
+; set src_pos to it.
+;
+; This does NOT call the kernel. K_FILE_SEEK follows the file's cluster
+; chain from its first cluster, so its cost grows with the offset, and
+; the pager seeks twice for every line scrolled up -- far into a large
+; file that was seconds per line (hardware, 2026-10-02). Instead: if
+; the position is inside the block already in hx_chunk_buf, only the
+; buffer pointer moves; otherwise the buffer is marked empty and the
+; position is left in hx_next for hx_getbyte, which seeks the file
+; only when it actually has to read a different block.
+;
 ; Args:    RF = pointer to a 4-byte position (may be src_pos itself)
 ; Returns: src_pos = that position
-; Modifies: everything
+; Modifies: R7, R8, RC, RD, RF
 ;------------------------------------------------------------------
             proc    src_seek_to
-            extrn   hx_fcb
+            extrn   hx_chunk_buf
+            extrn   hx_chunk_ptr
             extrn   hx_chunk_rem
+            extrn   hx_base
+            extrn   hx_len
+            extrn   hx_fpos
+            extrn   hx_next
             extrn   src_pos
             extrn   copy4bytes
 
             mov     rd, src_pos
             call    copy4bytes          ; src_pos = [RF]
 
-            mov     rf, src_pos
-            lda     rf
-            phi     ra
-            lda     rf
-            plo     ra                  ; RA = high word
-            lda     rf
-            phi     r9
+            ; R7:R8 = src_pos - hx_base, lowest byte first
+            mov     rf, src_pos+3
+            mov     rd, hx_base+3
+            ldn     rd
+            str     r2
             ldn     rf
-            plo     r9                  ; R9 = low word
+            sm
+            plo     r8
+            dec     rd
+            dec     rf
+            ldn     rd
+            str     r2
+            ldn     rf
+            smb
+            phi     r8
+            dec     rd
+            dec     rf
+            ldn     rd
+            str     r2
+            ldn     rf
+            smb
+            plo     r7
+            dec     rd
+            dec     rf
+            ldn     rd
+            str     r2
+            ldn     rf
+            smb
+            phi     r7
+            lbnf    hsk_miss            ; borrow: before the buffer
+            ghi     r7
+            lbnz    hsk_miss
+            glo     r7
+            lbnz    hsk_miss            ; 64K or more past its start
 
-            mov     rd, hx_fcb
-            ldi     0
-            plo     rc                  ; whence = SEEK_SET
-            call    K_FILE_SEEK
+            ; R8 = offset into the buffer; RC = hx_len - offset = the
+            ; bytes left from there. None (or a borrow): past its end.
+            mov     rf, hx_len+1
+            glo     r8
+            str     r2
+            ldn     rf
+            sm
+            plo     rc
+            dec     rf
+            ghi     r8
+            str     r2
+            ldn     rf
+            smb
+            phi     rc
+            lbnf    hsk_miss
+            glo     rc
+            lbnz    hsk_hit
+            ghi     rc
+            lbz     hsk_miss
 
+hsk_hit:
+            mov     rf, hx_chunk_rem
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf                  ; hx_chunk_rem = bytes left
+            mov     rd, hx_chunk_buf
+            add16   rd, r8
+            mov     rf, hx_chunk_ptr
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; hx_chunk_ptr = buffer + offset
+            ; Reading runs on into the next block. hx_fpos is always the
+            ; end of the buffered block (hx_getbyte sets it so, and
+            ; nothing else moves the file), and hx_next may hold an
+            ; earlier seek that missed the buffer.
+            mov     rf, hx_fpos
+            mov     rd, hx_next
+            call    copy4bytes
+            rtn
+
+hsk_miss:
             mov     rf, hx_chunk_rem
             ldi     0
             str     rf
+            inc     rf
+            str     rf                  ; buffer empty for the reader
+            mov     rf, src_pos
+            mov     rd, hx_next
+            call    copy4bytes          ; hx_next = the position wanted
             rtn
             endp
 
@@ -387,45 +487,185 @@ hxn_digit:
             endp
 
 ;------------------------------------------------------------------
-; hx_getbyte: the next byte from the file, through a chunk buffer.
+; hx_getbyte: the next byte from the file, through a block buffer.
+;
+; hx_chunk_buf holds hx_len bytes of the file starting at hx_base, which
+; is always a multiple of 512, so that scrolling BACKWARD stays inside
+; one buffer for a whole block before it has to read again.
+; hx_chunk_ptr/hx_chunk_rem are the read cursor inside it. When the
+; cursor runs out, hx_next is the file position to read from: the end
+; of the buffer after sequential reading, or wherever src_seek_to asked
+; for. hx_fpos is where the kernel's own file position is, so the file
+; is only seeked when the block wanted is not the one that comes next.
+;
 ; Returns: D = byte, DF=0 -- or DF=1 at the end of the file
-; Modifies: R7, R8, RC, RD, RF
+; Modifies: everything when it has to read (kernel calls); otherwise
+;           R7, R8, RF
 ;------------------------------------------------------------------
             proc    hx_getbyte
             extrn   hx_fcb
             extrn   hx_chunk_buf
             extrn   hx_chunk_ptr
             extrn   hx_chunk_rem
+            extrn   hx_base
+            extrn   hx_len
+            extrn   hx_fpos
+            extrn   hx_next
+            extrn   copy4bytes
 
             mov     rf, hx_chunk_rem
+            lda     rf
+            lbnz    hgb_have
             ldn     rf
             lbnz    hgb_have
 
+            ; --- read the block holding hx_next ---
+            ; hx_base = hx_next with its low 9 bits cleared
+            mov     rf, hx_next
+            mov     rd, hx_base
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            ani     $FE
+            str     rd
+            inc     rd
+            ldi     0
+            str     rd
+
+            ; nothing is in the buffer until the read below succeeds
+            mov     rf, hx_len
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+
+            ; is the file already there?
+            mov     rf, hx_base
+            mov     rd, hx_fpos
+            ldi     4
+            plo     rc
+hgb_cmp:
+            lda     rd
+            str     r2
+            lda     rf
+            xor
+            lbnz    hgb_seek
+            dec     rc
+            glo     rc
+            lbnz    hgb_cmp
+            lbr     hgb_read
+
+hgb_seek:
+            mov     rf, hx_base
+            lda     rf
+            phi     ra
+            lda     rf
+            plo     ra                  ; RA = high word
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = low word
+            mov     rd, hx_fcb
+            ldi     0
+            plo     rc                  ; whence = SEEK_SET
+            call    K_FILE_SEEK
+            lbnf    hgb_read
+            ; the seek failed, so the file's position is unknown: make
+            ; hx_fpos match nothing, so the next read seeks again
+            mov     rf, hx_fpos
+            ldi     $FF
+            str     rf
+            stc
+            rtn
+
+hgb_read:
             mov     rd, hx_fcb
             mov     rf, hx_chunk_buf
-            ldi     HX_CHUNK_LEN
-            plo     rc
-            ldi     0
-            phi     rc
+            mov     rc, HX_CHUNK_LEN
             call    K_FILE_READ         ; RC = bytes read
+
+            mov     rf, hx_len
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf                  ; hx_len = bytes read
+
+            ; hx_fpos = hx_base + bytes read, lowest byte first
+            mov     rf, hx_base+3
+            mov     rd, hx_fpos+3
+            glo     rc
+            str     r2
+            ldn     rf
+            add
+            str     rd
+            dec     rf
+            dec     rd
+            ghi     rc
+            str     r2
+            ldn     rf
+            adc
+            str     rd
+            dec     rf
+            dec     rd
+            ldn     rf
+            adci    0
+            str     rd
+            dec     rf
+            dec     rd
+            ldn     rf
+            adci    0
+            str     rd
+
+            ; R8 = hx_next's offset in the block (its low 9 bits);
+            ; RC = bytes read - that = bytes left from there
+            mov     rf, hx_next+2
+            lda     rf
+            ani     1
+            phi     r8
+            ldn     rf
+            plo     r8
+            glo     r8
+            str     r2
+            glo     rc
+            sm
+            plo     rc
+            ghi     r8
+            str     r2
+            ghi     rc
+            smb
+            phi     rc
+            lbnf    hgb_end
             glo     rc
             lbnz    hgb_got
             ghi     rc
             lbnz    hgb_got
-            stc                         ; nothing read: the end
-            rtn
+hgb_end:
+            stc                         ; nothing there: the end of the
+            rtn                         ; file (hx_chunk_rem is still 0)
 
 hgb_got:
             mov     rf, hx_chunk_rem
-            glo     rc
-            str     rf                  ; RC <= HX_CHUNK_LEN, fits a byte
-            mov     r8, hx_chunk_buf
-            mov     rf, hx_chunk_ptr
-            ghi     r8
+            ghi     rc
             str     rf
             inc     rf
-            glo     r8
-            str     rf                  ; hx_chunk_ptr = hx_chunk_buf
+            glo     rc
+            str     rf
+            mov     rd, hx_chunk_buf
+            add16   rd, r8
+            mov     rf, hx_chunk_ptr
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; cursor = buffer + offset
+            mov     rf, hx_fpos
+            mov     rd, hx_next
+            call    copy4bytes          ; reading carries on after the block
 
 hgb_have:
             mov     rf, hx_chunk_ptr
@@ -442,10 +682,16 @@ hgb_have:
             inc     rf
             glo     r8
             str     rf                  ; pointer advanced
-            mov     rf, hx_chunk_rem
+            mov     rf, hx_chunk_rem+1
             ldn     rf
             smi     1
             str     rf
+            lbdf    hgb_ret             ; no borrow from the low byte
+            dec     rf
+            ldn     rf
+            smi     1
+            str     rf
+hgb_ret:
             glo     r7
             clc
             rtn
@@ -985,8 +1231,14 @@ hx_rowlen:              db      16      ; bytes per row (hx_set_row)
 hx_count:               db      0
 hx_n:                   db      0
 hx_chunk_buf:           ds      HX_CHUNK_LEN
-hx_chunk_ptr:           dw      0
-hx_chunk_rem:           db      0
+hx_chunk_ptr:           dw      0       ; read cursor in hx_chunk_buf
+; hx_chunk_rem .. hx_next are zeroed together by src_open (HX_STATE_LEN)
+hx_chunk_rem:           dw      0       ; bytes left at the cursor
+hx_base:                ds      4       ; file offset of hx_chunk_buf[0]
+hx_len:                 dw      0       ; bytes of the file in the buffer
+hx_fpos:                ds      4       ; the kernel's file position
+hx_next:                ds      4       ; where to read once the cursor
+                                        ; runs out
 hs_pat:                 dw      0
 hs_len:                 db      0
 hs_i:                   db      0
@@ -1013,6 +1265,10 @@ hs_cur:                 ds      4
                 public  hx_chunk_buf
                 public  hx_chunk_ptr
                 public  hx_chunk_rem
+                public  hx_base
+                public  hx_len
+                public  hx_fpos
+                public  hx_next
                 public  hs_pat
                 public  hs_len
                 public  hs_i

@@ -20,20 +20,13 @@
 #include    include/bios.inc
 #include    include/kernel_api.inc
 
-LESS_CHUNK_LEN:  equ    128         ; K_FILE_READ chunk size -- large,
-                                    ; deliberately, to minimize the
-                                    ; number of kernel calls per page.
-                                    ; MUST stay <= 255: get_next_byte
-                                    ; loads it via a single-byte "ldi"
-                                    ; immediate (into RC's low byte) --
-                                    ; 256 silently truncates to 0 with
-                                    ; no assembler warning, which is
-                                    ; exactly what shipped here first
-                                    ; and made every K_FILE_READ ask
-                                    ; for 0 bytes (a real hardware bug,
-                                    ; found 2026-09-01: the file looked
-                                    ; empty -- "(END)" on the very
-                                    ; first screen, nothing else).
+LESS_CHUNK_LEN:  equ    512         ; the read buffer: one 512-byte block
+                                    ; of the file, always starting at a
+                                    ; multiple of 512 (sf_fill). Every
+                                    ; reader here -- rows, the backward
+                                    ; scan, the line counter -- works out
+                                    ; of this one buffer.
+SF_STATE_LEN:    equ    16          ; less_chunk_remaining .. sf_next
 SRC_LINE_MAX:      equ  256         ; src_line_buf size (incl NUL). Holds one
                                     ; wrap ROW, or the VISIBLE window of a
                                     ; nowrap (-S) line -- both at most one
@@ -47,19 +40,6 @@ SRC_LINE_MAX:      equ  256         ; src_line_buf size (incl NUL). Holds one
                                     ; that is what lets scroll reach
                                     ; arbitrarily far. linelen stays a byte
                                     ; (max 255).
-LESS_BACKSCAN_LEN: equ  1024        ; look-back window for src_prev_start's
-                                    ; backward scan. Big (2026-09-11):
-                                    ; each window costs one K_FILE_SEEK,
-                                    ; which walks the FAT chain from the
-                                    ; start (O(offset)), so a bigger
-                                    ; window is far fewer seeks for a long
-                                    ; line. CLAUDE.md (mostly >128-char
-                                    ; lines) drew G in 7.7M instructions
-                                    ; with a 128-byte window. Must stay a
-                                    ; power of two <= 32768.
-SL_BUF_LEN:        equ  512         ; src_line_of's read size: large, so a
-                                    ; long count spends its time counting
-                                    ; rather than in per-call overhead
 
 ;------------------------------------------------------------------
 ; src_rewind: reset the source to the very beginning -- src_pos = 0 and
@@ -150,7 +130,9 @@ SL_BUF_LEN:        equ  512         ; src_line_of's read size: large, so a
 ;------------------------------------------------------------------
             proc    src_line_of
             extrn   less_fcb
-            extrn   sl_buf
+            extrn   peek_byte
+            extrn   less_chunk_ptr
+            extrn   less_chunk_remaining
             extrn   src_seek_to
             extrn   copy4bytes
             extrn   zero4bytes
@@ -253,39 +235,48 @@ slo_read:
             call    slo_dist_zero
             lbdf    slo_finish
 
-            ; n = min(dist, SL_BUF_LEN)
-            mov     rf, sl_dist
-            lda     rf
-            lbnz    slo_full
-            lda     rf
-            lbnz    slo_full
-            lda     rf                  ; D = byte 2
-            smi     high SL_BUF_LEN
-            lbdf    slo_full            ; 512 or more left
-            dec     rf
+            ; count out of the shared block buffer (2026-10-02; this
+            ; used to read into a buffer of its own, which cost a kernel
+            ; seek on every call)
+            call    peek_byte           ; make sure it holds data
+            lbdf    slo_finish          ; nothing more
+
+            ; RC = min(dist, bytes left in the buffer)
+            mov     rf, less_chunk_remaining
             lda     rf
             phi     rc
             ldn     rf
-            plo     rc                  ; RC = what is left (< 512)
-            lbr     slo_have_n
-slo_full:
-            ldi     high SL_BUF_LEN
-            phi     rc
-            ldi     low SL_BUF_LEN
-            plo     rc
-slo_have_n:
-            mov     rd, less_fcb
-            mov     rf, sl_buf
-            call    K_FILE_READ         ; RC = bytes actually read
-            lbdf    slo_finish          ; read error: stop counting
-            ghi     rc
-            lbnz    slo_got
+            plo     rc                  ; RC = bytes left (1..512)
+            mov     rf, sl_dist
+            lda     rf
+            lbnz    slo_have_n
+            lda     rf
+            lbnz    slo_have_n          ; 64K or more still to count
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = dist
             glo     rc
-            lbz     slo_finish          ; nothing more
-slo_got:
+            str     r2
+            glo     r9
+            sm
+            ghi     rc
+            str     r2
+            ghi     r9
+            smb
+            lbdf    slo_have_n          ; dist >= bytes left
+            ghi     r9
+            phi     rc
+            glo     r9
+            plo     rc                  ; RC = dist
+slo_have_n:
             ; count the LFs -- no calls in this loop, so it runs in
             ; registers: RF = byte, RB = bytes left, R9 = LFs found
-            mov     rf, sl_buf
+            mov     r8, less_chunk_ptr
+            lda     r8
+            phi     rf
+            ldn     r8
+            plo     rf                  ; RF = the read cursor
             ghi     rc
             phi     rb
             glo     rc
@@ -304,6 +295,26 @@ slo_scan_next:
             lbnz    slo_scan
             ghi     rb
             lbnz    slo_scan
+
+            ; move the read cursor past what was counted
+            mov     r8, less_chunk_ptr
+            ghi     rf
+            str     r8
+            inc     r8
+            glo     rf
+            str     r8
+            mov     r8, less_chunk_remaining+1
+            glo     rc
+            str     r2
+            ldn     r8
+            sm
+            str     r8
+            dec     r8
+            ghi     rc
+            str     r2
+            ldn     r8
+            smb
+            str     r8
 
             ; count += R9, dist -= RC, both through a 4-byte scratch
             ; (add32/sub32 leave RC and R9 alone)
@@ -427,45 +438,28 @@ sdz_no:
             endp
 
             proc    src_seek_to
-            extrn   less_fcb
-            extrn   less_chunk_remaining
             extrn   src_pos
             extrn   src_fresh
             extrn   copy4bytes
+            extrn   sf_setpos
 ;------------------------------------------------------------------
-; src_seek_to: seeks the FCB to the 4-byte big-endian position at
-; [RF], sets src_pos to match, and resets the chunk buffer so the next
-; byte read is genuinely fresh, not stale pre-seek content.
+; src_seek_to: make the 4-byte big-endian position at [RF] the next
+; byte read, and set src_pos to match.
 ;
-; Setting src_pos here is new (2026-09-10). It used to be left to the
-; caller, and every caller did it, one line after the seek -- so the
-; asymmetry bought nothing and a second source would have had to copy
-; it. [RF] may be src_pos itself; copying it onto itself is harmless.
-; Args:    RF = pointer to a 4-byte position
-; Returns: src_pos = that position. K_FILE_SEEK's DF is ignored (see
-;          this file's own header comment on the accepted error-
-;          handling simplification)
+; This does NOT call the kernel (2026-10-02). K_FILE_SEEK follows the
+; file's cluster chain from its first cluster, so its cost grows with
+; the offset, and the pager seeks twice for every line scrolled up --
+; far into a large file that was seconds per line. sf_setpos only moves
+; the cursor when the position is inside the block already buffered,
+; and otherwise leaves the position for sf_fill, which seeks the file
+; only when it must read a different block.
+; Args:    RF = pointer to a 4-byte position (may be src_pos itself)
+; Returns: src_pos = that position
 ;------------------------------------------------------------------
             mov     rd, src_pos
             call    copy4bytes          ; src_pos = [RF]
             mov     rf, src_pos
-            lda     rf
-            phi     ra
-            lda     rf
-            plo     ra                  ; RA = high word
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = low word
-
-            mov     rd, less_fcb
-            ldi     0
-            plo     rc                  ; whence = SEEK_SET
-            call    K_FILE_SEEK
-
-            mov     rf, less_chunk_remaining
-            ldi     0
-            str     rf
+            call    sf_setpos
             mov     rf, src_fresh       ; the next wrap read reseeds
             ldi     1                   ; src_at_line_start from byte[pos-1]
             str     rf
@@ -480,7 +474,8 @@ sdz_no:
             extrn   less_chunk_remaining
             extrn   src_prev_in
             extrn   src_prev_result
-            extrn   less_backscan_buf
+            extrn   sf_setpos
+            extrn   peek_byte
             extrn   less_backscan_start
             extrn   less_backscan_count
             extrn   less_backscan_idx
@@ -508,11 +503,10 @@ sdz_no:
 ; Verified (2026-09-12) against brute-force enumeration of every row
 ; boundary across 243k (position, file, room) cases before being coded.
 ;
-; find_line_start (the backward LF scan) uses its OWN scratch buffer
-; (less_backscan_buf) and raw seeks, not the forward chunk state. The
-; wrap forward walk DOES use the chunk state and src_seek_to -- safe,
-; since every caller (cmd_line_up / src_last_page / cmd_back) re-seeks
-; right after this returns.
+; find_line_start (the backward LF scan) and the wrap forward walk both
+; work out of the shared block buffer and move its cursor -- safe, since
+; every caller (cmd_line_up / src_last_page / cmd_back) re-seeks right
+; after this returns.
 ;
 ; Precondition: the position passed in is > 0 (checked by the caller).
 ; Args:    RF = pointer to a 4-byte position (taken by value)
@@ -539,7 +533,7 @@ sdz_no:
 ;------------------------------------------------------------------
 ; find_line_start (entry point spr_window): the position just after the
 ; last LF at an index < the exclusive top `hi` in src_prev_in, or 0 if
-; there is none. Scans backward a LESS_BACKSCAN_LEN-byte window at a time
+; there is none. Scans backward one 512-byte file block at a time
 ; (works on a line of any length; the bound strictly decreases so it
 ; always terminates). Result -> src_prev_result. Callable (ends in rtn).
 ;------------------------------------------------------------------
@@ -562,64 +556,41 @@ spr_window:
             rtn
 
 spr_have_hi:
-            ; win_start = max(0, hi - LESS_BACKSCAN_LEN); count = hi -
-            ; win_start (1..LESS_BACKSCAN_LEN, a full 16-bit value now).
+            ; The window is the 512-byte block of the file that holds
+            ; byte hi-1, read through the shared block buffer (2026-10-02;
+            ; it used to be a 1024-byte buffer of its own, filled by a
+            ; kernel seek + read on every call). Scrolling back a line at
+            ; a time now rescans a block that is already in memory.
+            ; win_start = hi-1 with its low 9 bits cleared;
+            ; count = hi - win_start (1..512).
             mov     rf, src_prev_in
             mov     rd, less_backscan_start
-            call    copy4bytes          ; win_start = hi (for now)
-
-            ; win_start -= LESS_BACKSCAN_LEN (a 16-bit constant, so the
-            ; subtract touches the low two bytes and borrows up)
-            mov     r7, less_backscan_start
-            inc     r7
-            inc     r7
-            inc     r7                  ; -> LSB (byte 3)
-            ldi     low LESS_BACKSCAN_LEN
-            str     r2
-            ldn     r7
-            sm
-            str     r7
-            dec     r7                  ; byte 2
-            ldi     high LESS_BACKSCAN_LEN
-            str     r2
-            ldn     r7
-            smb
-            str     r7
-            dec     r7                  ; byte 1
-            ldi     0
-            str     r2
-            ldn     r7
-            smb
-            str     r7
-            dec     r7                  ; byte 0
-            ldi     0
-            str     r2
-            ldn     r7
-            smb
-            str     r7
-            lbdf    spr_count_full      ; no borrow: hi >= window size
-
-            ; hi < LESS_BACKSCAN_LEN: clamp win_start to 0, count = hi
-            ; (its low 16 bits -- hi < 32768, so bytes 0/1 are zero)
+            call    copy4bytes
             mov     rf, less_backscan_start
-            call    zero4bytes
-            mov     rf, src_prev_in
-            inc     rf
-            inc     rf                  ; -> hi byte 2 (high 8 of count)
-            lda     rf
-            phi     r9
+            ldi     1
+            call    subbyte32           ; hi - 1
+            mov     r7, less_backscan_start+2
+            ldn     r7
+            ani     $FE
+            str     r7
+            inc     r7
+            ldi     0
+            str     r7                  ; win_start (R7 -> its LSB)
+
+            mov     rf, src_prev_in+3
+            ldn     r7
+            str     r2
             ldn     rf
-            plo     r9                  ; R9 = count
-            lbr     spr_have_count
+            sm
+            plo     r9
+            dec     rf
+            dec     r7
+            ldn     r7
+            str     r2
+            ldn     rf
+            smb
+            phi     r9                  ; R9 = count = hi - win_start
 
-spr_count_full:
-            ldi     high LESS_BACKSCAN_LEN
-            phi     r9
-            ldi     low LESS_BACKSCAN_LEN
-            plo     r9                  ; count = a full window
-
-spr_have_count:
-            ; less_backscan_count = R9 (16-bit, big-endian)
             mov     rf, less_backscan_count
             ghi     r9
             str     rf
@@ -627,35 +598,37 @@ spr_have_count:
             glo     r9
             str     rf
 
-            ; seek win_start
             mov     rf, less_backscan_start
+            call    sf_setpos
+            call    peek_byte           ; loads the block if it is not
+                                        ; the one in the buffer
+            lbdf    spr_next_window     ; nothing there
+
+            ; RC = min(count, bytes in the buffer) -- the cursor is at
+            ; the block's first byte, so "bytes left" is all of them
+            mov     rf, less_chunk_remaining
             lda     rf
-            phi     ra
-            lda     rf
-            plo     ra
+            phi     rc
+            ldn     rf
+            plo     rc
+            mov     rf, less_backscan_count
             lda     rf
             phi     r9
             ldn     rf
             plo     r9
-            mov     rd, less_fcb
-            ldi     0
-            plo     rc                  ; whence = SEEK_SET
-            call    K_FILE_SEEK
-
-            ; read less_backscan_count bytes into less_backscan_buf
-            mov     rd, less_fcb
-            mov     rf, less_backscan_buf
-            mov     rb, less_backscan_count
-            lda     rb
-            phi     rc
-            ldn     rb
-            plo     rc                  ; RC = count (16-bit)
-            call    K_FILE_READ         ; RC = bytes actually read
-
+            glo     r9
+            str     r2
             glo     rc
-            lbnz    spr_scan_setup
+            sm
+            ghi     r9
+            str     r2
             ghi     rc
-            lbz     spr_next_window     ; nothing read: drop to win_start
+            smb
+            lbnf    spr_scan_setup      ; fewer than count in the buffer
+            ghi     r9
+            phi     rc
+            glo     r9
+            plo     rc                  ; RC = count
 
 spr_scan_setup:
             ; idx = bytes_read - 1 (16-bit)
@@ -675,7 +648,7 @@ spr_scan:
             phi     r9
             ldn     rf
             plo     r9                  ; R9 = idx
-            mov     r8, less_backscan_buf
+            mov     r8, less_chunk_buf
             add16   r8, r9              ; R8 = &buf[idx]
             ldn     r8
             xri     10                  ; LF?
@@ -718,7 +691,7 @@ spr_found:
             phi     r9
             ldn     rf
             plo     r9                  ; R9 = idx
-            inc     r9                  ; R9 = idx + 1 (1..LESS_BACKSCAN_LEN)
+            inc     r9                  ; R9 = idx + 1 (1..512)
 
             ; result += R9 (16-bit), carry propagated into the upper bytes
             mov     r7, src_prev_result
@@ -910,6 +883,8 @@ spr_add_consumed:
             extrn   src_at_line_start
             extrn   seed_tmp
             extrn   seed_byte
+            extrn   sf_setpos
+            extrn   sf_fill
             extrn   srl_col
             extrn   srl_skipcol
             extrn   srl_esc
@@ -1238,35 +1213,15 @@ rlh_skip:
 
 rsk_refill:
             mov     rf, less_chunk_remaining
+            lda     rf
+            lbnz    rsk_load            ; buffer still has bytes
             ldn     rf
-            lbnz    rsk_load            ; chunk still has bytes
+            lbnz    rsk_load
 
-            mov     rd, less_fcb
-            mov     rf, less_chunk_buf
-            ldi     LESS_CHUNK_LEN
-            plo     rc
-            ldi     0
-            phi     rc
-            push    r9                  ; R9 (our count) across K_FILE_READ
-            call    K_FILE_READ         ; RC = bytes read
-            pop     r9
-            glo     rc
-            lbnz    rsk_seed
-            ghi     rc
-            lbnz    rsk_seed
-            lbr     rsk_finish          ; EOF: line ends here, no LF
-
-rsk_seed:
-            mov     rf, less_chunk_remaining
-            glo     rc
-            str     rf                  ; remaining = bytes read
-            mov     r8, less_chunk_buf
-            mov     rf, less_chunk_ptr
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; ptr = start of the fresh chunk
+            push    r9                  ; R9 (our count) across the read
+            call    sf_fill
+            pop     r9                  ; (POP leaves DF alone)
+            lbdf    rsk_finish          ; EOF: line ends here, no LF
 
 rsk_load:
             mov     rf, less_chunk_ptr
@@ -1275,8 +1230,10 @@ rsk_load:
             ldn     rf
             plo     r8                  ; R8 = the current read pointer
             mov     rf, less_chunk_remaining
+            lda     rf
+            phi     rc
             ldn     rf
-            plo     rc                  ; RC.0 = bytes left in this chunk
+            plo     rc                  ; RC = bytes left in the buffer
 
 rsk_byte:
             ldn     r8
@@ -1284,25 +1241,29 @@ rsk_byte:
             lbz     rsk_lf
             inc     r8
             inc     r9
+            dec     rc
             glo     rc
-            smi     1
-            plo     rc
+            lbnz    rsk_byte
+            ghi     rc
             lbnz    rsk_byte
 
-            ; chunk exhausted with no LF: mark it empty and refill
+            ; buffer exhausted with no LF: mark it empty and refill
             mov     rf, less_chunk_remaining
             ldi     0
+            str     rf
+            inc     rf
             str     rf
             lbr     rsk_refill
 
 rsk_lf:
-            ; consume the LF too, then write the chunk state back
+            ; consume the LF too, then write the buffer state back
             inc     r8
             inc     r9                  ; count the LF
-            glo     rc
-            smi     1
-            plo     rc                  ; remaining after the LF
+            dec     rc                  ; bytes left after the LF
             mov     rf, less_chunk_remaining
+            ghi     rc
+            str     rf
+            inc     rf
             glo     rc
             str     rf
             mov     rf, less_chunk_ptr
@@ -1626,26 +1587,18 @@ slst_prev:
             mov     rf, seed_tmp
             ldi     1
             call    subbyte32
-            mov     rf, seed_tmp            ; seek there, read one byte
-            lda     rf
-            phi     ra
-            lda     rf
-            plo     ra
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9
-            mov     rd, less_fcb
-            ldi     0
-            plo     rc                      ; whence = SEEK_SET
-            call    K_FILE_SEEK
-            mov     rd, less_fcb
+            mov     rf, seed_tmp            ; read that one byte through
+            call    sf_setpos               ; the block buffer
+            call    peek_byte               ; D = byte[pos-1]
+            lbnf    slst_gotb
+            ldi     0                       ; (none: not an LF)
+slst_gotb:
+            plo     r7
             mov     rf, seed_byte
-            ldi     1
-            plo     rc
-            ldi     0
-            phi     rc
-            call    K_FILE_READ             ; FCB now sits at src_pos
+            glo     r7
+            str     rf
+            mov     rf, src_pos             ; and back to src_pos
+            call    sf_setpos
             mov     rf, seed_byte
             ldn     rf
             xri     10
@@ -1711,6 +1664,11 @@ src_pos_add16:
 ;------------------------------------------------------------------
             proc    get_next_byte
             extrn   less_fcb
+            extrn   sf_base
+            extrn   sf_len
+            extrn   sf_fpos
+            extrn   sf_next
+            extrn   copy4bytes
             extrn   less_chunk_buf
             extrn   less_chunk_ptr
             extrn   less_chunk_remaining
@@ -1742,33 +1700,13 @@ gnb_eof:
             public  peek_byte
 peek_byte:
             mov     rf, less_chunk_remaining
+            lda     rf
+            lbnz    pk_have
             ldn     rf
             lbnz    pk_have
-
-            mov     rd, less_fcb
-            mov     rf, less_chunk_buf
-            ldi     LESS_CHUNK_LEN
-            plo     rc
-            ldi     0
-            phi     rc
-            call    K_FILE_READ         ; RC = bytes actually read
-            glo     rc
-            lbnz    pk_got
-            ghi     rc
-            lbnz    pk_got
-            stc                         ; 0 bytes: exhausted
-            rtn
-pk_got:
-            mov     rf, less_chunk_remaining
-            glo     rc
-            str     rf                  ; RC <= LESS_CHUNK_LEN <= 255
-            mov     r8, less_chunk_buf
-            mov     rf, less_chunk_ptr
-            ghi     r8
-            str     rf
-            inc     rf
-            glo     r8
-            str     rf                  ; ptr = start of the fresh chunk
+            call    sf_fill             ; read the block at sf_next
+            lbnf    pk_have
+            rtn                         ; DF=1: exhausted
 pk_have:
             mov     rf, less_chunk_ptr
             lda     rf
@@ -1797,10 +1735,280 @@ consume_byte:
             inc     rf
             glo     r8
             str     rf                  ; write the advanced pointer back
-            mov     rf, less_chunk_remaining
+            mov     rf, less_chunk_remaining+1
             ldn     rf
             smi     1
             str     rf
+            lbdf    cb_ret              ; no borrow from the low byte
+            dec     rf
+            ldn     rf
+            smi     1
+            str     rf
+cb_ret:
+            rtn
+
+;------------------------------------------------------------------
+; THE BLOCK BUFFER. less_chunk_buf holds sf_len bytes of the file
+; starting at sf_base, which is always a multiple of 512.
+; less_chunk_ptr/less_chunk_remaining are the read cursor inside it.
+; When the cursor runs out, sf_next is the file position to read from.
+; sf_fpos is where the kernel's own file position is: always the end of
+; the buffered block, because sf_fill is the only code that moves the
+; file. Aligned blocks are what make scrolling BACKWARD cheap -- each
+; step back lands in the block already buffered, for a whole block.
+;
+; sf_setpos: make the 4-byte position at [RF] the next byte read. No
+; kernel call: inside the buffered block it only moves the cursor;
+; outside it, the cursor is emptied and the position goes to sf_next.
+; Args:    RF = pointer to a 4-byte position
+; Modifies: R7, R8, RC, RD, RF
+;------------------------------------------------------------------
+            public  sf_setpos
+sf_setpos:
+            inc     rf
+            inc     rf
+            inc     rf                  ; -> the position's LSB
+            mov     rd, sf_base+3
+            ldn     rd
+            str     r2
+            ldn     rf
+            sm
+            plo     r8
+            dec     rd
+            dec     rf
+            ldn     rd
+            str     r2
+            ldn     rf
+            smb
+            phi     r8
+            dec     rd
+            dec     rf
+            ldn     rd
+            str     r2
+            ldn     rf
+            smb
+            plo     r7
+            dec     rd
+            dec     rf                  ; RF -> the position again
+            ldn     rd
+            str     r2
+            ldn     rf
+            smb
+            phi     r7                  ; R7:R8 = position - sf_base
+            lbnf    ssp_miss            ; borrow: before the buffer
+            ghi     r7
+            lbnz    ssp_miss
+            glo     r7
+            lbnz    ssp_miss            ; 64K or more past its start
+
+            ; R8 = offset in the buffer; RC = sf_len - offset = bytes
+            ; left from there. None (or a borrow): past its end.
+            mov     rd, sf_len+1
+            glo     r8
+            str     r2
+            ldn     rd
+            sm
+            plo     rc
+            dec     rd
+            ghi     r8
+            str     r2
+            ldn     rd
+            smb
+            phi     rc
+            lbnf    ssp_miss
+            glo     rc
+            lbnz    ssp_hit
+            ghi     rc
+            lbz     ssp_miss
+
+ssp_hit:
+            mov     rf, less_chunk_remaining
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf
+            mov     rd, less_chunk_buf
+            add16   rd, r8
+            mov     rf, less_chunk_ptr
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; cursor = buffer + offset
+            mov     rf, sf_fpos         ; reading runs on into the next
+            mov     rd, sf_next         ; block (sf_next may hold an
+            call    copy4bytes          ; earlier position that missed)
+            rtn
+
+ssp_miss:
+            mov     rd, less_chunk_remaining
+            ldi     0
+            str     rd
+            inc     rd
+            str     rd                  ; cursor empty
+            mov     rd, sf_next
+            call    copy4bytes          ; sf_next = the position (RF)
+            rtn
+
+;------------------------------------------------------------------
+; sf_fill: read the block holding sf_next into the buffer and put the
+; cursor on sf_next. Seeks the file only when that block is not where
+; the file already is. Called when the cursor is empty.
+; Returns: DF=0 -- at least one byte at the cursor
+;          DF=1 -- nothing there (end of file, or the seek failed);
+;                  the cursor stays empty
+; Modifies: everything (kernel calls)
+;------------------------------------------------------------------
+            public  sf_fill
+sf_fill:
+            ; sf_base = sf_next with its low 9 bits cleared
+            mov     rf, sf_next
+            mov     rd, sf_base
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            str     rd
+            inc     rd
+            lda     rf
+            ani     $FE
+            str     rd
+            inc     rd
+            ldi     0
+            str     rd
+
+            ; nothing is in the buffer until the read below succeeds
+            mov     rf, sf_len
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+
+            ; is the file already there?
+            mov     rf, sf_base
+            mov     rd, sf_fpos
+            ldi     4
+            plo     rc
+sfl_cmp:
+            lda     rd
+            str     r2
+            lda     rf
+            xor
+            lbnz    sfl_seek
+            dec     rc
+            glo     rc
+            lbnz    sfl_cmp
+            lbr     sfl_read
+
+sfl_seek:
+            mov     rf, sf_base
+            lda     rf
+            phi     ra
+            lda     rf
+            plo     ra                  ; RA = high word
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = low word
+            mov     rd, less_fcb
+            ldi     0
+            plo     rc                  ; whence = SEEK_SET
+            call    K_FILE_SEEK
+            lbnf    sfl_read
+            ; the seek failed, so the file's position is unknown: make
+            ; sf_fpos match nothing, so the next fill seeks again
+            mov     rf, sf_fpos
+            ldi     $FF
+            str     rf
+            stc
+            rtn
+
+sfl_read:
+            mov     rd, less_fcb
+            mov     rf, less_chunk_buf
+            mov     rc, LESS_CHUNK_LEN
+            call    K_FILE_READ         ; RC = bytes read
+
+            mov     rf, sf_len
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf                  ; sf_len = bytes read
+
+            ; sf_fpos = sf_base + bytes read, lowest byte first
+            mov     rf, sf_base+3
+            mov     rd, sf_fpos+3
+            glo     rc
+            str     r2
+            ldn     rf
+            add
+            str     rd
+            dec     rf
+            dec     rd
+            ghi     rc
+            str     r2
+            ldn     rf
+            adc
+            str     rd
+            dec     rf
+            dec     rd
+            ldn     rf
+            adci    0
+            str     rd
+            dec     rf
+            dec     rd
+            ldn     rf
+            adci    0
+            str     rd
+
+            ; R8 = sf_next's offset in the block (its low 9 bits);
+            ; RC = bytes read - that = bytes left from there
+            mov     rf, sf_next+2
+            lda     rf
+            ani     1
+            phi     r8
+            ldn     rf
+            plo     r8
+            glo     r8
+            str     r2
+            glo     rc
+            sm
+            plo     rc
+            ghi     r8
+            str     r2
+            ghi     rc
+            smb
+            phi     rc
+            lbnf    sfl_end
+            glo     rc
+            lbnz    sfl_got
+            ghi     rc
+            lbnz    sfl_got
+sfl_end:
+            stc                         ; nothing there
+            rtn
+
+sfl_got:
+            mov     rf, less_chunk_remaining
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf
+            mov     rd, less_chunk_buf
+            add16   rd, r8
+            mov     rf, less_chunk_ptr
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf                  ; cursor = buffer + offset
+            mov     rf, sf_fpos
+            mov     rd, sf_next
+            call    copy4bytes          ; reading carries on after the block
+            clc
             rtn
             endp
 
@@ -2094,6 +2302,7 @@ ss_bump:
             extrn   src_size
             extrn   src_stat_buf
             extrn   src_open_path
+            extrn   less_chunk_remaining
 
             mov     r8, src_open_path   ; keep the path: K_FILE_OPEN
             ghi     rf                  ; clobbers RF
@@ -2107,6 +2316,20 @@ ss_bump:
             ldi     0                   ; mode 0 = read
             call    K_FILE_OPEN
             lbdf    sop_fail
+
+            ; 'ds' storage is not zeroed: empty the block buffer's state
+            ; (less_chunk_remaining .. sf_next) before anything looks at
+            ; it. The file is at 0, as sf_fpos then says.
+            mov     rf, less_chunk_remaining
+            ldi     SF_STATE_LEN
+            plo     rc
+sop_zero:
+            ldi     0
+            str     rf
+            inc     rf
+            dec     rc
+            glo     rc
+            lbnz    sop_zero
 
             mov     rf, src_open_path
             lda     rf
@@ -2427,8 +2650,15 @@ srl_esc:                db      0       ; escape-sequence state while counting
 
 ; --- private: the forward-reading chunk buffer ---
 less_chunk_buf:         ds      LESS_CHUNK_LEN
-less_chunk_ptr:         dw      0
-less_chunk_remaining:   db      0
+less_chunk_ptr:         dw      0       ; read cursor in less_chunk_buf
+; less_chunk_remaining .. sf_next are zeroed together by src_open
+; (SF_STATE_LEN) -- keep them contiguous
+less_chunk_remaining:   dw      0       ; bytes left at the cursor
+sf_base:                ds      4       ; file offset of less_chunk_buf[0]
+sf_len:                 dw      0       ; bytes of the file in the buffer
+sf_fpos:                ds      4       ; the kernel's file position
+sf_next:                ds      4       ; where to read once the cursor
+                                        ; runs out
 less_linelen:           db      0
 less_consumed:          dw      0
 
@@ -2441,7 +2671,6 @@ spr_l:                  ds      4       ; the line start containing P
 spr_prev:               ds      4       ; previous row boundary in the walk
 spr_cur:                ds      4       ; current row boundary in the walk
 spr_tmp:                ds      4       ; compare scratch
-less_backscan_buf:      ds      LESS_BACKSCAN_LEN
 less_backscan_start:    ds      4
 less_backscan_count:    dw      0       ; 16-bit now (window > 255)
 less_backscan_idx:      dw      0
@@ -2478,7 +2707,6 @@ sl_start:               ds      4
 sl_base:                ds      4
 sl_count:               ds      4
 sl_dir:                 db      0       ; 0 = count forward, 1 = backward
-sl_buf:                 ds      SL_BUF_LEN
 
                 public  less_fcb
                 public  less_iobuf
@@ -2498,6 +2726,10 @@ sl_buf:                 ds      SL_BUF_LEN
                 public  less_chunk_buf
                 public  less_chunk_ptr
                 public  less_chunk_remaining
+                public  sf_base
+                public  sf_len
+                public  sf_fpos
+                public  sf_next
                 public  less_linelen
                 public  less_consumed
                 public  src_prev_in
@@ -2507,7 +2739,6 @@ sl_buf:                 ds      SL_BUF_LEN
                 public  spr_prev
                 public  spr_cur
                 public  spr_tmp
-                public  less_backscan_buf
                 public  less_backscan_start
                 public  less_backscan_count
                 public  less_backscan_idx
@@ -2538,5 +2769,4 @@ sl_buf:                 ds      SL_BUF_LEN
                 public  sl_base
                 public  sl_count
                 public  sl_dir
-                public  sl_buf
             endp
