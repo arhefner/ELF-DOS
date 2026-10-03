@@ -1336,6 +1336,22 @@ mr_buf:             ds      512
 ; every other cross-call value in this file already lives in memory,
 ; never a register.
 ;
+; The read routine is not CALLed. SCRT's call half costs more machine
+; cycles than everything else in the loop put together, and with it a
+; byte took longer to store than a byte time at 57600 baud -- so the
+; transfer only worked while the host's own per-byte delay happened to
+; be long enough, and failed outright where the bytes reach the wire
+; in bunches regardless of that delay (a USB adapter passed through to
+; WSL). Instead each loop does by hand the only part of CALL the read
+; routine's own SEP R5 return depends on: R6 holds the address to come
+; back to, with a copy of it stacked where the return will pop R6 from,
+; so R6 comes back out of the return still holding that address. The
+; loop then jumps straight into the routine. That brings a byte to
+; about 70 cycles (140us at 4MHz) with no hardware-specific code here.
+; It relies on X=2, P=3 and the standard SCRT stack layout, all of
+; which hold for anything entered by CALL. Our own return address is
+; pushed on entry and popped at mrb_done.
+;
 ; Args:    RF = buffer, RC = count-1 (pre-decremented, matching the
 ;          caller's own established convention)
 ; Returns: nothing meaningful in D/DF
@@ -1345,16 +1361,24 @@ mr_buf:             ds      512
             .link   .align  page
             proc    mr_readbytes
 
+            push    r6                  ; our own return address
+
             mov     rd, mr_io_mode
             ldn     rd
             xri     MR_IO_BITBANG
-            lbz     mrb_bitbang
+            lbz     mrb_bitbang_go
             ldn     rd
             xri     MR_IO_UART
-            lbz     mrb_uart
+            lbz     mrb_uart_go
 
+            mov     r6, mrb_console_ret
 mrb_console:
-            call    K_READ
+            glo     r6                  ; stack the address to come back
+            stxd                        ; to, as SCRT CALL would have
+            ghi     r6
+            stxd
+            lbr     K_READ
+mrb_console_ret:
             str     rf
             inc     rf
 
@@ -1363,10 +1387,17 @@ mrb_console:
             xri     $ff
             bnz     mrb_console
 
-            rtn
+            lbr     mrb_done
 
+mrb_uart_go:
+            mov     r6, mrb_uart_ret
 mrb_uart:
-            call    f_uread
+            glo     r6                  ; stack the address to come back
+            stxd                        ; to, as SCRT CALL would have
+            ghi     r6
+            stxd
+            lbr     f_uread
+mrb_uart_ret:
             str     rf
             inc     rf
 
@@ -1375,10 +1406,17 @@ mrb_uart:
             xri     $ff
             bnz     mrb_uart
 
-            rtn
+            lbr     mrb_done
 
+mrb_bitbang_go:
+            mov     r6, mrb_bitbang_ret
 mrb_bitbang:
-            call    f_bread
+            glo     r6                  ; stack the address to come back
+            stxd                        ; to, as SCRT CALL would have
+            ghi     r6
+            stxd
+            lbr     f_bread
+mrb_bitbang_ret:
             str     rf
             inc     rf
 
@@ -1387,6 +1425,8 @@ mrb_bitbang:
             xri     $ff
             bnz     mrb_bitbang
 
+mrb_done:
+            pop     r6
             rtn
 
             endp
