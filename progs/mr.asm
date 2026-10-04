@@ -1348,9 +1348,20 @@ mr_buf:             ds      512
 ; so R6 comes back out of the return still holding that address. The
 ; loop then jumps straight into the routine. That brings a byte to
 ; about 70 cycles (140us at 4MHz) with no hardware-specific code here.
-; It relies on X=2, P=3 and the standard SCRT stack layout, all of
-; which hold for anything entered by CALL. Our own return address is
-; pushed on entry and popped at mrb_done.
+; It relies on X=2 and P=3, which hold for anything entered by CALL.
+; Our own return address is pushed on entry and popped at mrb_done.
+;
+; The copy has to go on the stack the way this BIOS's own CALL would
+; have put it, and they do not all agree: mbios pushes the low half of
+; R6 and then the high, the original Elf BIOS the high and then the
+; low. So the order is found out first, with one real CALL made while
+; R6 holds $00FF -- mrb_look hands back whichever half is on top of the
+; stack, the one pushed last -- and R8 is then loaded with the two
+; halves of the return address in that order, R8.0 to be pushed first.
+; $00FF is only ever a value to recognize, never somewhere to go: CALL
+; saves it and the return puts it back. The address of the place to
+; come back to cannot be used for this itself, as it could have two
+; halves the same.
 ;
 ; Args:    RF = buffer, RC = count-1 (pre-decremented, matching the
 ;          caller's own established convention)
@@ -1363,6 +1374,11 @@ mr_buf:             ds      512
 
             push    r6                  ; our own return address
 
+            mov     r6, $00ff
+            call    mrb_look            ; D = the half pushed last
+            plo     r9                  ; R9.0 = $00 if low half first,
+                                        ; $FF if high half first
+
             mov     rd, mr_io_mode
             ldn     rd
             xri     MR_IO_BITBANG
@@ -1372,10 +1388,17 @@ mr_buf:             ds      512
             lbz     mrb_uart_go
 
             mov     r6, mrb_console_ret
+            mov     r8, r6
+            glo     r9
+            bz      mrb_console
+            ghi     r6                  ; high half first: swap them
+            plo     r8
+            glo     r6
+            phi     r8
 mrb_console:
-            glo     r6                  ; stack the address to come back
+            glo     r8                  ; stack the address to come back
             stxd                        ; to, as SCRT CALL would have
-            ghi     r6
+            ghi     r8
             stxd
             lbr     K_READ
 mrb_console_ret:
@@ -1391,10 +1414,17 @@ mrb_console_ret:
 
 mrb_uart_go:
             mov     r6, mrb_uart_ret
+            mov     r8, r6
+            glo     r9
+            bz      mrb_uart
+            ghi     r6                  ; high half first: swap them
+            plo     r8
+            glo     r6
+            phi     r8
 mrb_uart:
-            glo     r6                  ; stack the address to come back
+            glo     r8                  ; stack the address to come back
             stxd                        ; to, as SCRT CALL would have
-            ghi     r6
+            ghi     r8
             stxd
             lbr     f_uread
 mrb_uart_ret:
@@ -1410,10 +1440,17 @@ mrb_uart_ret:
 
 mrb_bitbang_go:
             mov     r6, mrb_bitbang_ret
+            mov     r8, r6
+            glo     r9
+            bz      mrb_bitbang
+            ghi     r6                  ; high half first: swap them
+            plo     r8
+            glo     r6
+            phi     r8
 mrb_bitbang:
-            glo     r6                  ; stack the address to come back
+            glo     r8                  ; stack the address to come back
             stxd                        ; to, as SCRT CALL would have
-            ghi     r6
+            ghi     r8
             stxd
             lbr     f_bread
 mrb_bitbang_ret:
@@ -1427,6 +1464,12 @@ mrb_bitbang_ret:
 
 mrb_done:
             pop     r6
+            rtn
+
+mrb_look:
+            mov     r8, r2
+            inc     r8
+            ldn     r8                  ; the half of R6 pushed last
             rtn
 
             endp
