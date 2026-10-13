@@ -87,11 +87,11 @@
 ; which programs read directly at the fixed KERNEL_HDR_VER address (see
 ; kernel_api.inc) rather than through a jump-table call, since $0100's
 ; layout is already a stable, never-shifting contract (same reasoning
-; as PROG_BASE/LOADER_ARGS). Keep in sync with kernel_init's boot
-; banner string below, which is a separate literal for simplicity (not
-; worth generating dynamically at boot).
+; as PROG_BASE/LOADER_ARGS). The boot banner (boot/krnboot.asm), VER
+; and the release/SDK file names (Makefile) all read these, so this is
+; the only place to change.
 KERNEL_VER_MAJOR:   equ     1
-KERNEL_VER_MINOR:   equ     2
+KERNEL_VER_MINOR:   equ     3
 
             org     $0100
 

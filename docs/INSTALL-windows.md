@@ -30,7 +30,7 @@ Open PowerShell as Administrator: right-click the Start button and choose
 needs it. Then change to the directory where you unpacked the package:
 
 ```
-cd C:\path\to\elfdos-1.2
+cd C:\path\to\elfdos-1.3
 ```
 
 Windows blocks scripts that came from a download. Allow these two for
@@ -118,7 +118,7 @@ Put the card in the computer and boot from it as your BIOS or monitor
 requires. ELF-DOS prints its banner and a prompt:
 
 ```
-ELF-DOS v1.2
+ELF-DOS v1.3
 C:/>
 ```
 

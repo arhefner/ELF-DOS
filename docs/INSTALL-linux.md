@@ -113,7 +113,7 @@ Put the card in the computer and boot from it as your BIOS or monitor
 requires. ELF-DOS prints its banner and a prompt:
 
 ```
-ELF-DOS v1.2
+ELF-DOS v1.3
 C:/>
 ```
 
