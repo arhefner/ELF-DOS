@@ -1397,38 +1397,30 @@ boot_io_done:
             glo         r9
             str         rf
 
-            ; K_NBREAD: f_nbread is a BIOS extension. Every BIOS vector
-            ; is an LBR ($C0), so a BIOS that has it shows $C0 at
-            ; f_nbread; with anything else there, use the kernel's
-            ; blocking stand-in (K_NBREAD_FALLBACK) so the call still
-            ; returns a character instead of running into whatever that
-            ; BIOS keeps at the address. R9 = the routine chosen; it
-            ; goes both into IO_NBREAD_TARGET, which _redir_teardown
-            ; restores the slot from, and into the slot itself, which
-            ; is linked as "LBR f_nbread".
-            ldi         high f_nbread
-            phi         r9
-            ldi         low f_nbread
-            plo         r9
+            ; K_NBREAD: f_nbread is a BIOS extension. The slot is linked
+            ; as an LBR to the kernel's blocking stand-in, which keeps
+            ; the call working on a BIOS without it. Every BIOS vector
+            ; is an LBR ($C0), so a BIOS that has f_nbread shows $C0 at
+            ; its address: only then point the slot there. Whichever
+            ; the slot ends up holding is copied to IO_NBREAD_TARGET,
+            ; which _redir_teardown restores the slot from.
             mov         rf, f_nbread
             ldn         rf
             xri         $C0
-            lbz         boot_nbread_set
-            ldi         high K_NBREAD_FALLBACK
-            phi         r9
-            ldi         low K_NBREAD_FALLBACK
-            plo         r9
-boot_nbread_set:
-            mov         rf, IO_NBREAD_TARGET
-            ghi         r9
+            lbnz        boot_nbread_set     ; no f_nbread: leave the slot
+            mov         rf, K_NBREAD+1      ; RF = &slot operand
+            ldi         high f_nbread
             str         rf
             inc         rf
-            glo         r9
+            ldi         low f_nbread
             str         rf
-            ldi         high (K_NBREAD+1)
-            phi         rf
-            ldi         low (K_NBREAD+1)
-            plo         rf                  ; RF = &K_NBREAD's slot operand
+boot_nbread_set:
+            mov         rf, K_NBREAD+1
+            lda         rf
+            phi         r9
+            ldn         rf
+            plo         r9                  ; R9 = the slot's target
+            mov         rf, IO_NBREAD_TARGET
             ghi         r9
             str         rf
             inc         rf

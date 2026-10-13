@@ -27,6 +27,7 @@
 #include    include/kernel.inc
 
             extrn   fat_init
+            extrn   _nbread_fallback
             extrn   file_init
             extrn   mem_top
             extrn   mem_base
@@ -343,26 +344,17 @@ term_rows:      db      0                   ; $0191: TERM_ROWS
 term_cols:      db      0                   ; $0192: TERM_COLS
 
 ; K_NBREAD: read a console character, giving up after a timeout -- see
-; kernel_api.inc's own K_NBREAD comment for the contract. Goes to the
-; BIOS here, but like K_READ's slot the operand is rewritten at runtime:
-; kernel/redir.asm points it at its file-reading routine while input is
-; redirected and restores it from IO_NBREAD_TARGET afterward.
-k_nbread:       lbr     f_nbread            ; $0193 -- repatched by
+; kernel_api.inc's own K_NBREAD comment for the contract. Linked
+; pointing at the kernel's blocking stand-in, _nbread_fallback
+; (kernel/redir_data.asm); boot/krnboot.asm rewrites the operand to
+; f_nbread when the BIOS has that routine, and copies whichever it ends
+; up as to IO_NBREAD_TARGET. Like K_READ's slot the operand is also
+; rewritten at runtime: kernel/redir.asm points it at its file-reading
+; routine while input is redirected and restores it afterward.
+k_nbread:       lbr     _nbread_fallback    ; $0193 -- repatched by
+                                            ; boot/krnboot.asm and
                                             ; kernel/redir.asm
-
-; K_NBREAD_FALLBACK: what K_NBREAD does on a BIOS with no f_nbread.
-; boot/krnboot.asm points K_NBREAD's slot and IO_NBREAD_TARGET here when
-; it finds no LBR at f_nbread's vector. A plain blocking read that
-; always reports a character: the call never times out, which is how
-; every program behaved before K_NBREAD existed. Code rather than a
-; slot, at a fixed address because krnboot is linked separately. ADI 0
-; clears DF and leaves the character in D; RC is not touched.
-k_nbread_fallback:                          ; $0196
-                call    K_READ              ; call, never jump, into the
-                                            ; BIOS
-                adi     0
-                rtn
-                ; next free jump-table address: $019C
+                ; next free jump-table address: $0196
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

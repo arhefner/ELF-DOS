@@ -479,7 +479,8 @@ branch at its vector (`$FF84`); on a BIOS without one, `K_NBREAD`
 becomes a plain blocking read that waits as long as `K_READ` would and
 always returns `DF` = 0. A program then gets no timeout, but still
 works. To find out, compare the word at `IO_NBREAD_TARGET` with
-`K_NBREAD_FALLBACK` (`$0196`). The check looks at one byte only, so a
+`f_nbread` (`$FF84`): any other value means the blocking read is in
+use. The check looks at one byte only, so a
 BIOS that keeps a different routine's vector at `$FF84` is not detected.
 
 **`K_TTY`**

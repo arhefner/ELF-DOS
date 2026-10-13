@@ -79,3 +79,27 @@ himem_scratch:           dw      0   ; scratch word used by
                 public  redir_obuf
 
             endp
+
+; ----------------------------------------------------------------
+; _nbread_fallback: what K_NBREAD does on a BIOS with no f_nbread. The
+; slot (kernel/kernel.asm) is linked pointing here, and boot/krnboot.asm
+; repoints it at f_nbread only when the BIOS has one. A plain blocking
+; read that always reports a character: the call never times out, which
+; is how every program behaved before K_NBREAD existed. ADI 0 clears DF
+; and leaves the character in D; RC is not touched.
+;
+; Code in a data file on purpose: it is unused on a BIOS that has
+; f_nbread, and here, after every aligned buffer in the volatile
+; region, its 6 bytes move nothing else. Put ahead of loader_data's FCB
+; it pushed that across a 32-byte boundary and cost 32.
+; Args:    none (RC, K_NBREAD's timeout, is ignored)
+; Returns: D = the character, DF = 0
+; ----------------------------------------------------------------
+            proc    _nbread_fallback
+
+            call    K_READ              ; call, never jump, into the
+                                        ; BIOS
+            adi     0
+            rtn
+
+            endp

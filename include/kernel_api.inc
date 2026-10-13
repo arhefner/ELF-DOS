@@ -146,17 +146,12 @@ IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
 BOOT_UNIT:          equ     PROG_BASE-115   ; byte: boot block device unit
 
 ; IO_NBREAD_TARGET: the console's timed read routine, restated from
-; kernel.inc for boot/krnboot.asm, which writes f_nbread here at boot.
+; kernel.inc for boot/krnboot.asm, which writes it at boot: f_nbread,
+; or the kernel's blocking stand-in on a BIOS without that routine.
 ; The kernel restores K_NBREAD's slot from it after every command, so a
 ; console hook that replaces K_NBREAD must update it too, as with
 ; IO_READ_TARGET and K_READ.
 IO_NBREAD_TARGET:   equ     PROG_BASE-117   ; word: current console timed read
-
-; K_NBREAD_FALLBACK: the kernel's blocking stand-in for f_nbread
-; (kernel/kernel.asm, right after K_NBREAD's slot). boot/krnboot.asm
-; puts this address in K_NBREAD's slot and IO_NBREAD_TARGET when the
-; BIOS has no f_nbread. Not for programs to call: call K_NBREAD.
-K_NBREAD_FALLBACK:  equ     $0196
 
 ; K_GET_ERRORLEVEL: read the last command's exit code. A real jump-table
 ; call rather than a direct RUN_ERRORLEVEL read, unlike the shell's own
@@ -854,7 +849,8 @@ TERM_COLS:          equ     $0192       ; byte: terminal columns, 0=unknown
 ; \$FF84. If there is none, this call becomes a plain blocking read: it
 ; waits as long as K_READ would and always returns DF = 0, so a program
 ; gets no timeout but does not fail. A program can tell by comparing
-; the word at IO_NBREAD_TARGET with K_NBREAD_FALLBACK. The test is only
+; the word at IO_NBREAD_TARGET with f_nbread: any other value means the
+; blocking stand-in is in use. The test is only
 ; as good as that one byte: a BIOS with some other routine's vector at
 ; \$FF84 passes it and K_NBREAD will misbehave there.
 K_NBREAD:           equ     $0193       ; -> f_nbread
@@ -930,7 +926,7 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $019C (after K_NBREAD and its fallback routine)
+; next free jump-table slot address: $0196 (after K_NBREAD)
 ;
 ; This comment has been stale in BOTH directions before ($0179 until
 ; 2026-07-27, then $0197 until 2026-09-09) while kernel.asm was right
