@@ -362,6 +362,12 @@ BOOT_UNIT:          equ     PROG_BASE-115   ; byte: boot block device unit
 ; address, so the relay floor is PROG_BASE-117.
 IO_NBREAD_TARGET:   equ     PROG_BASE-117   ; word: current console timed read
 
+; K_NBREAD_FALLBACK: the kernel's blocking stand-in for f_nbread
+; (kernel/kernel.asm, right after K_NBREAD's slot). boot/krnboot.asm
+; puts this address in K_NBREAD's slot and IO_NBREAD_TARGET when the
+; BIOS has no f_nbread. Not for programs to call: call K_NBREAD.
+K_NBREAD_FALLBACK:  equ     $0196
+
 ; K_TYPE/K_READ: the jump-table addresses (kernel/kernel.asm), restated
 ; here (matching kernel_api.inc's own identical constants -- "restated,
 ; not shared," same convention as every field above) so kernel-internal

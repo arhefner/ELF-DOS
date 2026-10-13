@@ -349,7 +349,20 @@ term_cols:      db      0                   ; $0192: TERM_COLS
 ; redirected and restores it from IO_NBREAD_TARGET afterward.
 k_nbread:       lbr     f_nbread            ; $0193 -- repatched by
                                             ; kernel/redir.asm
-                ; next free jump-table address: $0196
+
+; K_NBREAD_FALLBACK: what K_NBREAD does on a BIOS with no f_nbread.
+; boot/krnboot.asm points K_NBREAD's slot and IO_NBREAD_TARGET here when
+; it finds no LBR at f_nbread's vector. A plain blocking read that
+; always reports a character: the call never times out, which is how
+; every program behaved before K_NBREAD existed. Code rather than a
+; slot, at a fixed address because krnboot is linked separately. ADI 0
+; clears DF and leaves the character in D; RC is not touched.
+k_nbread_fallback:                          ; $0196
+                call    K_READ              ; call, never jump, into the
+                                            ; BIOS
+                adi     0
+                rtn
+                ; next free jump-table address: $019C
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

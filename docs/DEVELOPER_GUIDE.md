@@ -474,8 +474,13 @@ end of the file - or input redirected from the null device - is reported
 as a timeout. So unlike `K_READ`, the end of the input can be told apart
 from a null byte.
 
-`f_nbread` is a BIOS extension - on a BIOS that does not provide it,
-this call may never return when reading the console.
+`f_nbread` is a BIOS extension. At boot the kernel checks for a long
+branch at its vector (`$FF84`); on a BIOS without one, `K_NBREAD`
+becomes a plain blocking read that waits as long as `K_READ` would and
+always returns `DF` = 0. A program then gets no timeout, but still
+works. To find out, compare the word at `IO_NBREAD_TARGET` with
+`K_NBREAD_FALLBACK` (`$0196`). The check looks at one byte only, so a
+BIOS that keeps a different routine's vector at `$FF84` is not detected.
 
 **`K_TTY`**
 A direct passthrough to the console's own single-character output

@@ -506,7 +506,8 @@ ypb_bitbang:
 ; the callers' retry loops run in that mode too: YR repeats its 'C'
 ; until the sender starts instead of sending one and blocking forever.
 ; K_NBREAD needs the BIOS's f_nbread, an extension; on a BIOS without
-; it console mode may hang here, and -u is the way round that.
+; it the kernel makes K_NBREAD a blocking read, so console mode waits
+; forever for each byte, as it did before K_NBREAD existed.
 ;
 ; Bit-bang mode (-b) still blocks: it has no "is a byte waiting" test
 ; (f_btest detects BREAK, not data), and f_nbread reads the CONSOLE

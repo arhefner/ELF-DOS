@@ -1397,15 +1397,42 @@ boot_io_done:
             glo         r9
             str         rf
 
-            ; IO_NBREAD_TARGET: what _redir_teardown restores K_NBREAD's
-            ; slot to. There is nothing to detect as there is for
-            ; K_READ: the slot is linked as "LBR f_nbread" already, and
-            ; this records the same address.
-            mov         rf, IO_NBREAD_TARGET
+            ; K_NBREAD: f_nbread is a BIOS extension. Every BIOS vector
+            ; is an LBR ($C0), so a BIOS that has it shows $C0 at
+            ; f_nbread; with anything else there, use the kernel's
+            ; blocking stand-in (K_NBREAD_FALLBACK) so the call still
+            ; returns a character instead of running into whatever that
+            ; BIOS keeps at the address. R9 = the routine chosen; it
+            ; goes both into IO_NBREAD_TARGET, which _redir_teardown
+            ; restores the slot from, and into the slot itself, which
+            ; is linked as "LBR f_nbread".
             ldi         high f_nbread
+            phi         r9
+            ldi         low f_nbread
+            plo         r9
+            mov         rf, f_nbread
+            ldn         rf
+            xri         $C0
+            lbz         boot_nbread_set
+            ldi         high K_NBREAD_FALLBACK
+            phi         r9
+            ldi         low K_NBREAD_FALLBACK
+            plo         r9
+boot_nbread_set:
+            mov         rf, IO_NBREAD_TARGET
+            ghi         r9
             str         rf
             inc         rf
-            ldi         low f_nbread
+            glo         r9
+            str         rf
+            ldi         high (K_NBREAD+1)
+            phi         rf
+            ldi         low (K_NBREAD+1)
+            plo         rf                  ; RF = &K_NBREAD's slot operand
+            ghi         r9
+            str         rf
+            inc         rf
+            glo         r9
             str         rf
 
             ; Phase 2: self-modify K_TYPE's/K_READ's own jump-table slots
