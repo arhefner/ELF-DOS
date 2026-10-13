@@ -1,32 +1,39 @@
 ;
 ; chkdsk.asm - check a FAT16 volume for filesystem consistency errors
 ;
-; Usage: CHKDSK [X:]
+; Usage: CHKDSK [X:] [-f]
 ;
-; Check-only (no -f/fix mode -- see CLAUDE.md's own roadmap note: fix
-; mode is a deliberately separate, later follow-up, since correcting
-; on-disk state will very likely need a reboot afterward to avoid the
-; kernel's own BPB/FAT cache going stale relative to what was just
-; corrected).
+; With no argument, checks the current drive; with "X:", that drive
+; (cur_drive is not changed). Without -f nothing is written.
 ;
-; With no argument, checks the currently active drive. With an "X:"
-; argument (C-F, case-insensitive), checks that drive instead, WITHOUT
-; changing cur_drive -- the same K_PATH_RESOLVE-for-its-side-effect
-; trick already proven by progs/xcopy.asm/lib/file_glob.asm.
+; Checks: lost clusters, cross-linked clusters, chains that run into an
+; invalid, free or bad-marked cluster, file size against chain length,
+; "." and ".." links, duplicate short names and broken LFN runs.
 ;
-; Checks performed: FAT consistency (lost clusters, cross-linked
-; clusters, invalid/out-of-range cluster references, bad-sector
-; markers reported as their own category), file size vs. cluster-
-; chain-length mismatches, directory entry structural validity
-; (duplicate short names, orphaned/checksum-mismatched LFN entries),
-; "."/".." correctness, and a final DOS-style summary report.
+; -f repairs what MS-DOS CHKDSK /F repaired, the same way:
+;   - lost chains: asks, then turns each into /FILEnnnn.CHK or frees them
+;   - a chain that runs into an invalid cluster: ended at its last good
+;     cluster ("file truncated"); if the first cluster is invalid the
+;     entry is emptied (a directory becomes an empty file)
+;   - size that does not fit the chain: size set to the chain's length
+;   - wrong "." or ".." cluster: corrected
+; Reported but never repaired, as in MS-DOS: cross-linked files (copy
+; them, then delete the originals). Also report-only: duplicate short
+; names and LFN problems. A chain that loops back on itself is ended at
+; the cluster whose link closes the loop.
 ;
-; Zero kernel changes -- built entirely on the existing K_DIR_OPEN/
-; K_DIR_READ/K_DIR_SAVE_STATE/K_DIR_RESTORE_STATE/K_SECREAD/
-; K_PATH_RESOLVE/K_GETCURDIR/BPB_DATA_PTR primitives. No hardware or
-; emulator access exists in this environment -- everything here is
-; build-verified only, awaiting a real hardware round. Full design at
-; ~/.claude/plans/graceful-fluttering-summit.md.
+; How -f writes: FAT and directory sectors go out with K_SECWRITE, with
+; K_DRIVE_INVALIDATE before and after each batch of FAT writes so the
+; kernel never holds a stale FAT sector. The tree walk still uses
+; K_DIR_OPEN/K_DIR_READ, which give no on-disk location, so a repair
+; finds its entry again by counting: the Nth entry K_DIR_READ returned
+; is the Nth in-use short entry of a raw scan (same skip rules), and the
+; entry's cluster is compared before anything is changed. Recovered
+; files are created empty through K_FILE_OPEN (so the kernel picks the
+; slot and the time stamp) and then given their chain and size raw.
+;
+; -f is refused while output is redirected: a file being written on the
+; checked drive would be changing the FAT underneath the repair.
 ;
 ; This is a flat file (no proc/endp, matching every other progs/*.asm
 ; in this project) -- gotcha #20 (a bare top-level label between
@@ -39,6 +46,7 @@
 #include    include/kernel_api.inc
 
             extrn   drive_letter_of
+            extrn   drive_index_of
 
             extrn   fmt_size32
 
@@ -80,61 +88,81 @@ CHK_BITMAP_LEN:     equ     8192    ; 1 bit/cluster, FAT16 worst case
 ; Program entry point - PROG_BASE + $06
 ;------------------------------------------------------------------
 start:
-            ; RA = argv pointer, RC = argc. argv[0] is this program's
-            ; own name.
-            glo     rc
-            smi     2
-            lbnf    chk_no_arg          ; argc < 2: check active drive
+            ; RA = argv pointer, RC = argc. Arguments, in any order: one
+            ; "X:" and/or "-f". The loop makes no calls, so its state
+            ; stays in registers: RB = argv slot, R7.0 = slots left.
+            mov     rf, chk_fix
+            ldi     0
+            str     rf
+            mov     rf, chk_fix_req
+            ldi     0
+            str     rf
+            mov     rf, chk_drive_letter
+            ldi     0
+            str     rf
 
-            ; argv[1] must be present and non-NUL to consider -- fall
-            ; through to validating it as a drive-letter token
+            glo     rc
+            plo     r7
             mov     rb, ra
-            add16   rb, 2
+chk_arg_loop:
+            dec     r7
+            glo     r7
+            lbz     chk_args_done
+            inc     rb
+            inc     rb                  ; RB -> next argv slot
             lda     rb
             phi     rf
             ldn     rb
-            plo     rf                  ; RF = argv[1] pointer
+            plo     rf                  ; RF = this argument
+            dec     rb                  ; RB back on the slot's first byte
 
             ldn     rf
-            ani     $DF                 ; uppercase-fold. Safe across the
-                                        ; whole A-Z range: the only bytes
-                                        ; aliasing into $41-$5A under this
-                                        ; mask are $41-$5A and $61-$7A.
+            xri     '-'
+            lbnz    chk_arg_drive
+            inc     rf
+            lda     rf
+            ani     $DF
+            xri     'F'
+            lbnz    chk_usage
+            ldn     rf
+            lbnz    chk_usage           ; more after "-f"
+            mov     rf, chk_fix
+            ldi     1
+            str     rf
+            mov     rf, chk_fix_req
+            ldi     1
+            str     rf
+            lbr     chk_arg_loop
+
+chk_arg_drive:
+            mov     r8, chk_drive_letter
+            ldn     r8
+            lbnz    chk_usage           ; a second drive
+            ldn     rf
+            ani     $DF                 ; uppercase-fold: only $41-$5A and
+                                        ; $61-$7A land in $41-$5A
             smi     DRIVE_LETTER_MIN
             lbnf    chk_usage           ; below 'A'
-            ldn     rf                  ; reload: the smi destroyed D
+            ldn     rf
             ani     $DF
             smi     DRIVE_LETTER_MAX+1
             lbdf    chk_usage           ; above 'Z'
-                                        ;
-                                        ; Only the RANGE is checked here.
-                                        ; This program keeps the letter,
-                                        ; not a slot -- it builds "X:/"
-                                        ; and lets K_PATH_RESOLVE decide
-                                        ; whether that drive exists -- so
-                                        ; it needs no drive_index_of.
-
-            mov     rb, rf
-            inc     rb
-            ldn     rb                  ; D = second character
+            mov     r9, rf
+            inc     r9
+            lda     r9
             xri     ':'
-            lbnz    chk_usage           ; no ':' following
-
-            inc     rb
-            ldn     rb                  ; D = third character
-            lbnz    chk_usage           ; more after "X:": not a bare
-                                        ; drive token
-
-            ; valid "X:" token -- recompute the uppercase letter fresh
-            ; (the smi chain above destroyed D) and stash it for the
-            ; header/"X:/" path build below. Destination pointer set up
-            ; BEFORE loading D (gotcha #4 -- mov clobbers D, so it must
-            ; never run between computing D and the str that stores it).
-            mov     rb, chk_drive_letter
+            lbnz    chk_usage
+            ldn     r9
+            lbnz    chk_usage           ; more after "X:"
             ldn     rf
             ani     $DF
-            str     rb
-            lbr     chk_have_drive_arg
+            str     r8                  ; chk_drive_letter
+            lbr     chk_arg_loop
+
+chk_args_done:
+            mov     rf, chk_drive_letter
+            ldn     rf
+            lbnz    chk_have_drive_arg
 
 chk_no_arg:
             ; no argument: check the ACTIVE drive. K_GETCURDIR already
@@ -142,6 +170,10 @@ chk_no_arg:
             ; all in this branch, since the active drive's BPB is
             ; already the one we want.
             call    K_GETCURDIR         ; D = cur_drive
+            plo     r9
+            mov     rb, chk_drive_slot
+            glo     r9
+            str     rb                  ; slot, for K_DRIVE_INVALIDATE
             call    drive_letter_of     ; D = slot in, letter out
             plo     r9                  ; stash D (R9 free here) --
                                         ; K_GETCURDIR's own doc doesn't
@@ -175,7 +207,19 @@ chk_have_drive_arg:
 
             mov     rf, chk_path_buf
             call    K_PATH_RESOLVE
-            lbnf    chk_print_header
+            lbdf    chk_not_present
+
+            mov     rf, chk_drive_letter
+            ldn     rf
+            call    drive_index_of      ; D = slot
+            lbdf    chk_not_present
+            plo     r9
+            mov     rf, chk_drive_slot
+            glo     r9
+            str     rf
+            lbr     chk_print_header
+
+chk_not_present:
 
             ; DF=1 here can only mean "no mounted partition on that
             ; drive" per K_PATH_RESOLVE's own contract -- there's no
@@ -192,11 +236,39 @@ chk_have_drive_arg:
 
 chk_usage:
             call    K_INMSG
-            db      "Usage: CHKDSK [X:]",13,10,0
+            db      "Usage: CHKDSK [X:] [-f]",13,10,0
             ldi     1
             rtn
 
 chk_print_header:
+            ; -f with output redirected: refuse. K_TYPE's slot differs
+            ; from IO_TYPE_TARGET exactly while output is redirected.
+            mov     rf, chk_fix
+            ldn     rf
+            lbz     chk_hdr_go
+            mov     rf, K_TYPE+1
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = K_TYPE's target
+            mov     rf, IO_TYPE_TARGET
+            lda     rf
+            str     r2
+            ghi     r8
+            xor
+            lbnz    chk_redirected
+            ldn     rf
+            str     r2
+            glo     r8
+            xor
+            lbz     chk_hdr_go
+chk_redirected:
+            call    K_INMSG
+            db      "CHKDSK -f cannot run with its output redirected.",13,10,0
+            ldi     1
+            rtn
+
+chk_hdr_go:
             call    K_INMSG
             db      "Checking drive ",0
             mov     rb, chk_drive_letter
@@ -205,6 +277,18 @@ chk_print_header:
             call    K_INMSG
             db      ":",13,10,0
 
+            ; FAT cache: nothing loaded, nothing to write
+            mov     rf, chk_fc_sec
+            ldi     $FF
+            str     rf
+            inc     rf
+            str     rf
+            mov     rf, chk_fc_dirty
+            ldi     0
+            str     rf
+            mov     rf, chk_f12_dirty
+            ldi     0
+            str     rf
             call    chk_read_bpb
             call    chk_load_fat12      ; FAT12 only; no-op on FAT16
             lbnf    chk_fat_loaded
@@ -234,6 +318,11 @@ chk_fat_loaded:
             inc     rf
             str     rf
             mov     rf, chk_tally_lost
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            mov     rf, chk_tally_chain
             ldi     0
             str     rf
             inc     rf
@@ -278,15 +367,11 @@ chk_fat_loaded:
             inc     rf
             str     rf
 
-            ; zero the needed portion of the "seen" bitmap --
-            ; needed_bytes = (max_clust+8)>>3, only the bytes that
-            ; could ever legitimately be touched (avoids an
-            ; unconditional 8192-byte zero loop regardless of the
-            ; real volume's size). `ds` does NOT zero-initialize
-            ; memory in this codebase -- without this, chk_mark_
-            ; cluster/chk_bit_is_set would read GARBAGE bits from
-            ; uninitialized RAM, producing false cross-link reports
-            ; and wrong lost-cluster detection.
+            ; The "seen" bitmap, one bit per cluster, lives in the free
+            ; memory after the program (LOADER_ARGS: mem_base..mem_top)
+            ; and is only as long as this volume needs:
+            ; (max_clust+8)>>3 bytes, 8,191 at most. It is zeroed here --
+            ; nothing else clears that memory.
             mov     rf, chk_max_clust
             lda     rf
             phi     r9
@@ -304,7 +389,49 @@ chk_fat_loaded:
             glo     r9
             str     rf
 
-            mov     rf, chk_bitmap
+            mov     rf, LOADER_ARGS
+            lda     rf
+            phi     rd
+            lda     rf
+            plo     rd                  ; RD = mem_base
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = mem_top (last usable byte)
+            mov     rf, chk_bm1_base
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            mov     rf, chk_bm_base
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            sub16   r8, rd              ; R8 = mem_top - mem_base
+            lbnf    chk_no_memory
+            sub16   r8, r9              ; room for the bitmap?
+            lbdf    chk_mem_ok
+chk_no_memory:
+            call    K_INMSG
+            db      "Not enough memory to check this drive.",13,10,0
+            ldi     1
+            rtn
+chk_mem_ok:
+            mov     rf, chk_bitmap_needed
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = bytes to clear
+            mov     rf, chk_bm1_base
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     rf, r8              ; RF -> the bitmap
 cbmz_loop:
             ghi     r9
             lbnz    cbmz_body
@@ -338,8 +465,11 @@ cbmz_done:
             ; tally, run once now that the tree walk's own "seen"
             ; bitmap is complete
             call    chk_fat_scan_lost
+            call    chk_lost_chains     ; report; with -f, recover or free
 
+            call    chk_fat_flush       ; nothing may stay unwritten
             call    chk_print_summary
+            call    chk_print_verdict
 
             ldi     0
             rtn
@@ -348,10 +478,10 @@ cbmz_done:
 ; chk_read_bpb: snapshot the ACTIVE drive's BPB fields into local,
 ; chkdsk-owned memory. Safe to snapshot ONCE, not re-dereference
 ; BPB_DATA_PTR on every use like most callers in this codebase do --
-; deliberate deviation, justified because chkdsk never calls any
-; path-based kernel routine again after this point for the rest of
-; the run (see the plan's own "activating a drive" note), so the
-; active BPB is guaranteed stable from here on.
+; deliberate deviation, justified because nothing CHKDSK calls after
+; this point makes another drive active: the only path-based calls
+; (K_STAT/K_FILE_OPEN in chk_recover_chain) name this same drive, and
+; this snapshot is of the drive's geometry, which they do not change.
 ;
 ; Args:    none
 ; Returns: nothing (chk_fat_lba/chk_data_lba/chk_root_lba/chk_spc/
@@ -440,6 +570,18 @@ chk_read_bpb:
             inc     rb
             ldn     rf
             str     rb                  ; chk_max_clust (2B)
+
+            mov     rf, r9
+            add16   rf, BPBBLK_NUM_FATS
+            ldn     rf
+            lbnz    crb_nf_ok
+            ldi     1                   ; never 0: chk_fat_flush counts
+                                        ; copies up to this value
+crb_nf_ok:
+            plo     r8
+            mov     rb, chk_num_fats
+            glo     r8
+            str     rb                  ; chk_num_fats (1B)
 
             ; BUG FIX (2026-09-11): chk_unit -- every raw sector read below
             ; used to hardcode R8.1 = 0 (the boot device), so CHKDSK on a
@@ -576,16 +718,13 @@ cctl_done:
             rtn
 
 ;------------------------------------------------------------------
-; chk_fat_read: read the raw 16-bit FAT16 entry for a given cluster,
-; directly via K_SECREAD (K_DIR_OPEN/K_DIR_READ never expose this --
-; fat_get itself is kernel-internal only). Uncached -- every call
-; re-reads the FAT sector from disk; a same-sector cache is a later,
-; separately-verified optimization per the plan, not attempted here.
+; chk_fat_read: read the FAT entry for a cluster. FAT16 entries come
+; from a one-sector cache (chk_fr_secbuf, see chk_fat_load), FAT12
+; entries from the whole-FAT copy in RAM.
 ;
 ; Args:    RD = cluster number
-; Returns: DF = 0 with RD = raw 16-bit FAT entry value (little-endian
-;          on disk, returned here as an ordinary 16-bit value);
-;          DF = 1 on a K_SECREAD I/O error (RD undefined)
+; Returns: DF = 0 with RD = the entry as a 16-bit value;
+;          DF = 1 on an I/O error (RD undefined)
 ; Modifies: R7, R8, R9, RB, RF (and D) -- treat as fully clobbering
 ;------------------------------------------------------------------
 chk_fat_read:
@@ -593,9 +732,6 @@ chk_fat_read:
             ldn     rb
             lbnz    cfr12               ; FAT12: decode from RAM
 
-            ; stash the cluster number in memory immediately -- RD
-            ; itself is about to be reused as scratch below, and nothing
-            ; here may be trusted to survive the eventual K_SECREAD call
             mov     rb, chk_fr_cluster
             ghi     rd
             str     rb
@@ -603,23 +739,46 @@ chk_fat_read:
             glo     rd
             str     rb
 
-            ; fat_sector_lba = chk_fat_lba + (cluster >> 8), i.e. the
-            ; cluster's own HIGH byte added into chk_fat_lba's low
-            ; (bits 7-0) byte, with carry rippled up -- exact mirror of
-            ; kernel/fat.asm's _fat_load_sector's own proven shape
-            mov     rf, chk_fat_lba
-            lda     rf                  ; D = bits 23-16
-            plo     r8
-            lda     rf                  ; D = bits 15-8
-            phi     r7
-            lda     rf                  ; D = bits 7-0
-            plo     r7
-            mov     rf, chk_unit
-            ldn     rf
-            phi     r8                  ; R8.1 = this drive's block-device unit
+            call    chk_fat_load
+            lbdf    chk_fr_ioerr
 
+            ; byte offset = (cluster & $FF) * 2, at most 510
             mov     rf, chk_fr_cluster
-            ldn     rf                  ; D = cluster high byte (sector index)
+            inc     rf                  ; -> cluster's low byte
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     r9
+            shl16   r9                  ; R9 = byte offset
+
+            mov     rf, chk_fr_secbuf
+            add16   rf, r9              ; RF -> the entry (little-endian)
+            lda     rf
+            plo     rd
+            ldn     rf
+            phi     rd                  ; RD = entry
+            clc
+            rtn
+
+chk_fr_ioerr:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; chk_fat_sec_lba: LBA of one sector of one copy of the FAT.
+; Args:    R9.0 = sector index within the FAT, R9.1 = copy (0 = first)
+; Returns: R7/R8 ready for K_SECREAD/K_SECWRITE (unit in R8.1)
+; Modifies: R7, R8, R9, RF (and D). Makes no calls.
+;------------------------------------------------------------------
+chk_fat_sec_lba:
+            mov     rf, chk_fat_lba
+            lda     rf
+            plo     r8                  ; bits 23-16
+            lda     rf
+            phi     r7                  ; bits 15-8
+            ldn     rf
+            plo     r7                  ; bits 7-0
+            glo     r9
             str     r2
             glo     r7
             add
@@ -630,38 +789,371 @@ chk_fat_read:
             glo     r8
             adci    0
             plo     r8
+cfsa_copy:
+            ghi     r9
+            lbz     cfsa_have
+            mov     rf, chk_spf
+            inc     rf                  ; -> spf low byte
+            ldn     rf
+            str     r2
+            glo     r7
+            add
+            plo     r7
+            dec     rf
+            ldn     rf
+            str     r2
+            ghi     r7
+            adc
+            phi     r7
+            glo     r8
+            adci    0
+            plo     r8
+            ghi     r9
+            smi     1
+            phi     r9
+            lbr     cfsa_copy
+cfsa_have:
+            mov     rf, chk_unit
+            ldn     rf
+            phi     r8                  ; R8.1 = this drive's unit
+            rtn
 
+;------------------------------------------------------------------
+; chk_fat_load (FAT16): make chk_fr_secbuf hold the FAT sector with the
+; entry for chk_fr_cluster. The sector index is the cluster's high byte.
+; A different sector already in the buffer is written back first if it
+; was changed.
+; Returns: DF = 0 loaded, DF = 1 on an I/O error (nothing cached)
+; Modifies: everything
+;------------------------------------------------------------------
+chk_fat_load:
+            mov     rf, chk_fr_cluster
+            ldn     rf
+            plo     r9                  ; R9.0 = wanted sector
+            mov     rf, chk_fc_sec
+            lda     rf
+            lbnz    cfl_miss            ; $FFxx: nothing cached
+            ldn     rf
+            str     r2
+            glo     r9
+            xor
+            lbnz    cfl_miss
+            clc
+            rtn
+cfl_miss:
+            call    chk_fat_flush
+            lbdf    cfl_fail
+
+            mov     rf, chk_fc_sec      ; nothing valid during the read
+            ldi     $FF
+            str     rf
+            inc     rf
+            str     rf
+
+            mov     rf, chk_fr_cluster
+            ldn     rf
+            plo     r9
+            ldi     0
+            phi     r9                  ; first copy
+            call    chk_fat_sec_lba
             mov     rf, chk_fr_secbuf
             call    K_SECREAD
-            lbdf    chk_fr_ioerr
+            lbdf    cfl_fail
 
-            ; byte_offset = (cluster & 0xFF) * 2 -- the cluster's own
-            ; low byte, zero-extended then doubled (max 255*2=510,
-            ; safely fits in 16 bits, well within one 512-byte sector)
+            mov     rf, chk_fc_sec
+            ldi     0
+            str     rf
+            inc     rf
+            mov     r9, chk_fr_cluster
+            ldn     r9
+            str     rf                  ; chk_fc_sec = that sector
+            clc
+            rtn
+cfl_fail:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; chk_kinval: K_DRIVE_INVALIDATE for the checked drive -- the kernel
+; writes out and forgets its own FAT sector. Called before and after
+; every batch of raw FAT writes.
+; Modifies: everything
+;------------------------------------------------------------------
+chk_kinval:
+            mov     rf, chk_drive_slot
+            ldn     rf
+            call    K_DRIVE_INVALIDATE
+            rtn
+
+;------------------------------------------------------------------
+; chk_fat_write: set the FAT entry for a cluster. Changes memory only;
+; chk_fat_flush (or, FAT16, loading another sector) writes it out.
+; Args:    RD = cluster, RB = value ($FFFF = end of chain, 0 = free;
+;          FAT12 keeps the low 12 bits)
+; Returns: DF = 0 done, DF = 1 on an I/O error
+; Modifies: everything
+;------------------------------------------------------------------
+chk_fat_write:
+            mov     rf, chk_fw_value
+            ghi     rb
+            str     rf
+            inc     rf
+            glo     rb
+            str     rf
+
+            mov     rf, chk_fat12
+            ldn     rf
+            lbnz    cfw12
+
             mov     rf, chk_fr_cluster
-            inc     rf                  ; -> cluster's low byte
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            call    chk_fat_load
+            lbdf    cfw_fail
+
+            mov     rf, chk_fr_cluster
+            inc     rf
             ldn     rf
             plo     r9
             ldi     0
             phi     r9
-            shl16   r9                  ; R9 = byte_offset
-
+            shl16   r9                  ; R9 = byte offset in the sector
             mov     rf, chk_fr_secbuf
-            add16   rf, r9              ; RF -> the FAT entry's low byte
-                                        ; (little-endian on disk)
-            lda     rf                  ; D = entry low byte
-            plo     rb
-            ldn     rf                  ; D = entry high byte
-            phi     rb
+            add16   rf, r9
+            mov     r8, chk_fw_value
+            inc     r8
+            ldn     r8
+            str     rf                  ; low byte first on disk
+            inc     rf
+            dec     r8
+            ldn     r8
+            str     rf
+            mov     rf, chk_fc_dirty
+            ldi     1
+            str     rf
+            clc
+            rtn
+cfw_fail:
+            stc
+            rtn
 
-            ghi     rb
-            phi     rd
-            glo     rb
-            plo     rd                  ; RD = raw FAT entry value
+            ; FAT12: the entry for cluster N is 12 bits starting at byte
+            ; N + N/2 -- the low 12 of those 16 bits for an even N, the
+            ; high 12 for an odd one.
+cfw12:
+            ghi     rd
+            shr
+            phi     r9
+            glo     rd
+            shrc
+            plo     r9                  ; R9 = N >> 1
+            add16   r9, rd              ; R9 = byte offset
+            mov     rf, chk_fat12_buf
+            add16   rf, r9              ; RF -> first byte
+            mov     r8, chk_fw_value
+            lda     r8
+            ani     $0F
+            phi     r7                  ; R7.1 = value bits 11-8
+            ldn     r8
+            plo     r7                  ; R7.0 = value bits 7-0
+            glo     rd
+            shr
+            lbdf    cfw12_odd
+
+            glo     r7
+            str     rf
+            inc     rf
+            ldn     rf
+            ani     $F0
+            str     r2
+            ghi     r7
+            or
+            str     rf
+            lbr     cfw12_done
+cfw12_odd:
+            glo     r7
+            shl
+            shl
+            shl
+            shl
+            str     r2
+            ldn     rf
+            ani     $0F
+            or
+            str     rf
+            inc     rf
+            glo     r7
+            shr
+            shr
+            shr
+            shr
+            str     r2
+            ghi     r7
+            shl
+            shl
+            shl
+            shl
+            or
+            str     rf
+cfw12_done:
+            mov     rf, chk_f12_dirty
+            ldi     1
+            str     rf
             clc
             rtn
 
-chk_fr_ioerr:
+;------------------------------------------------------------------
+; chk_fat_flush: write changed FAT data to every copy of the FAT. Does
+; nothing when nothing was changed. FAT16: the one cached sector.
+; FAT12: the whole RAM copy.
+; Returns: DF = 0 written (or nothing to write); DF = 1 on a write
+;          error, after chk_write_failed has turned repairs off
+; Modifies: everything
+;------------------------------------------------------------------
+chk_fat_flush:
+            mov     rf, chk_fat12
+            ldn     rf
+            lbnz    cff12
+
+            mov     rf, chk_fc_dirty
+            ldn     rf
+            lbnz    cff_go
+            clc
+            rtn
+cff_go:
+            call    chk_kinval
+            mov     rf, chk_fw_copy
+            ldi     0
+            str     rf
+cff_loop:
+            mov     rf, chk_fw_copy
+            ldn     rf
+            phi     r9
+            mov     rf, chk_fc_sec
+            inc     rf
+            ldn     rf
+            plo     r9
+            call    chk_fat_sec_lba
+            mov     rf, chk_fr_secbuf
+            call    K_SECWRITE
+            lbdf    chk_write_failed
+
+            mov     rf, chk_fw_copy
+            ldn     rf
+            adi     1
+            str     rf
+            mov     r9, chk_num_fats
+            ldn     r9
+            str     r2
+            ldn     rf
+            xor
+            lbnz    cff_loop
+
+            mov     rf, chk_fc_dirty
+            ldi     0
+            str     rf
+            call    chk_kinval
+            clc
+            rtn
+
+cff12:
+            mov     rf, chk_f12_dirty
+            ldn     rf
+            lbnz    cff12_go
+            clc
+            rtn
+cff12_go:
+            call    chk_kinval
+            mov     rf, chk_fw_copy
+            ldi     0
+            str     rf
+cff12_copy:
+            mov     rf, chk_lf_idx
+            ldi     0
+            str     rf
+cff12_sec:
+            ; this copy is done at index 12 or index spf, whichever
+            ; comes first -- the same sectors chk_load_fat12 read
+            mov     rf, chk_lf_idx
+            ldn     rf
+            plo     r9
+            smi     CHK_FAT12_MAXSEC
+            lbdf    cff12_nextcopy
+            mov     rf, chk_spf
+            lda     rf
+            lbnz    cff12_do            ; spf >= 256
+            ldn     rf
+            str     r2
+            glo     r9
+            sm
+            lbdf    cff12_nextcopy      ; index >= spf
+cff12_do:
+            mov     rf, chk_fw_copy
+            ldn     rf
+            phi     r9                  ; R9 = copy : index
+            call    chk_fat_sec_lba
+            mov     rf, chk_lf_idx
+            ldn     rf
+            phi     r9
+            ldi     0
+            plo     r9
+            shl16   r9                  ; R9 = index * 512
+            mov     rf, chk_fat12_buf
+            add16   rf, r9
+            call    K_SECWRITE
+            lbdf    chk_write_failed
+
+            mov     rf, chk_lf_idx
+            ldn     rf
+            adi     1
+            str     rf
+            lbr     cff12_sec
+cff12_nextcopy:
+            mov     rf, chk_fw_copy
+            ldn     rf
+            adi     1
+            str     rf
+            mov     r9, chk_num_fats
+            ldn     r9
+            str     r2
+            ldn     rf
+            xor
+            lbnz    cff12_copy
+
+            mov     rf, chk_f12_dirty
+            ldi     0
+            str     rf
+            call    chk_kinval
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; chk_write_failed: a sector write failed. Jumped to, not called, by
+; the routines that write; it returns to THEIR caller with DF = 1.
+; Repairs are turned off for the rest of the run, so the remainder is
+; an ordinary check.
+;------------------------------------------------------------------
+chk_write_failed:
+            mov     rf, chk_fix
+            ldi     0
+            str     rf
+            mov     rf, chk_fc_sec      ; the buffer no longer matches the disk
+            ldi     $FF
+            str     rf
+            inc     rf
+            str     rf
+            mov     rf, chk_fc_dirty
+            ldi     0
+            str     rf
+            mov     rf, chk_f12_dirty
+            ldi     0
+            str     rf
+            call    K_INMSG
+            db      "Disk write error. No further repairs will be made.",13,10,0
+            call    chk_kinval
             stc
             rtn
 
@@ -996,8 +1488,12 @@ mc_shiftloop:
             lbr     mc_shiftloop
 mc_shiftdone:
 
-            mov     rf, chk_bitmap
-            add16   rf, r8              ; RF -> chk_bitmap[byte_index]
+            mov     rd, chk_bm_base     ; which bitmap: the "seen" one,
+            lda     rd                  ; or chk_lost_chains' second one
+            phi     rf
+            ldn     rd
+            plo     rf
+            add16   rf, r8              ; RF -> bitmap[byte_index]
 
             ldn     rf                  ; D = current byte
             str     r2
@@ -1050,6 +1546,10 @@ mc_already_set:
 ; the same 16-bit width by construction.
 ;
 ; Args:    RD = start cluster
+; On any exit chk_wc_cluster is the cluster (or bad link value) the
+; walk stopped on and chk_wc_prev the cluster before it (0 = none),
+; which is what chk_fix_chain needs to end the chain.
+;
 ; Returns: DF = 0 if the chain ended normally (EOC), with results in
 ;          chk_wc_hops(2B)/chk_wc_capacity(4B,BE)/chk_wc_prevcap
 ;          (4B,BE, capacity as of one hop earlier -- free, snapshotted
@@ -1073,6 +1573,8 @@ CHK_REASON_TOOLONG:     equ     1
 CHK_REASON_BADCLUSTER:  equ     2
 CHK_REASON_FREEHIT:     equ     3
 CHK_REASON_BADSECTOR:   equ     4
+CHK_REASON_IOERR:       equ     5
+CHK_REASON_LOOP:        equ     6
 
 chk_walk_chain:
             mov     rf, chk_wc_hops
@@ -1112,6 +1614,19 @@ chk_walk_chain:
             str     rf
             inc     rf
             glo     rd
+            str     rf
+
+            mov     rf, chk_wc_start
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, chk_wc_prev     ; 0 = still on the first cluster
+            ldi     0
+            str     rf
+            inc     rf
             str     rf
 
 cwc_loop:
@@ -1165,6 +1680,8 @@ cwc_range_hi_ok:
             ; reported here but doesn't stop the walk)
             call    chk_mark_cluster
             lbnf    cwc_not_crosslink
+            call    chk_wc_in_chain     ; one of this chain's own clusters?
+            lbdf    cwc_looped
             call    K_INMSG
             db      "Cross-linked cluster: ",0
             mov     rf, chk_wc_cluster
@@ -1244,6 +1761,13 @@ cwc_next_link:
             ; RD names the next cluster in the chain -- store it and
             ; loop back (the top of the loop will range-check it)
             mov     rf, chk_wc_cluster
+            mov     r8, chk_wc_prev
+            lda     rf
+            str     r8
+            inc     r8
+            ldn     rf
+            str     r8                  ; prev = the cluster just done
+            dec     rf
             ghi     rd
             str     rf
             inc     rf
@@ -1258,9 +1782,109 @@ cwc_eoc:
             clc
             rtn
 
+cwc_looped:
+            ; The chain has come back to a cluster it already holds.
+            ; Nothing was counted for this second visit, so hops,
+            ; capacity and chk_wc_prev describe the chain up to the
+            ; cluster whose link closes the loop.
+            call    K_INMSG
+            db      "Cluster chain loops back on itself at cluster: ",0
+            mov     rf, chk_wc_cluster
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_print_uint
+            call    K_INMSG
+            db      13,10,0
+            mov     rf, chk_tally_chain
+            call    chk_inc16
+            mov     rf, chk_wc_reason
+            ldi     CHK_REASON_LOOP
+            str     rf
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; chk_wc_in_chain: is chk_wc_cluster one of the chk_wc_hops clusters
+; this walk has already been through? Follows the chain again from
+; chk_wc_start. Only called when a cluster turns out to be marked
+; already, which is rare, so the second walk costs nothing normally.
+; Returns: DF = 1 yes (the chain loops), DF = 0 no (a real cross-link)
+; Modifies: everything
+;------------------------------------------------------------------
+chk_wc_in_chain:
+            mov     r7, chk_wc_start
+            mov     r8, chk_lp_cur
+            lda     r7
+            str     r8
+            inc     r8
+            ldn     r7
+            str     r8
+            mov     r7, chk_wc_hops
+            mov     r8, chk_lp_left
+            lda     r7
+            str     r8
+            inc     r8
+            ldn     r7
+            str     r8
+cwi_loop:
+            mov     rf, chk_lp_left
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            ghi     r9
+            lbnz    cwi_more
+            glo     r9
+            lbz     cwi_no
+cwi_more:
+            dec     r9
+            mov     rf, chk_lp_left
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+
+            mov     rf, chk_lp_cur
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd                  ; RD = a cluster of this chain
+            mov     rf, chk_wc_cluster
+            lda     rf
+            str     r2
+            ghi     rd
+            xor
+            lbnz    cwi_next
+            ldn     rf
+            str     r2
+            glo     rd
+            xor
+            lbz     cwi_yes
+cwi_next:
+            call    chk_fat_read        ; RD = its link
+            lbdf    cwi_no
+            mov     rf, chk_lp_cur
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            lbr     cwi_loop
+cwi_yes:
+            stc
+            rtn
+cwi_no:
+            clc
+            rtn
+
 cwc_toolong:
             call    K_INMSG
             db      "Cluster chain too long (possible cycle), stopped.",13,10,0
+            mov     rf, chk_tally_chain
+            call    chk_inc16
             mov     rf, chk_wc_reason
             ldi     CHK_REASON_TOOLONG
             str     rf
@@ -1278,6 +1902,8 @@ cwc_badcluster:
             call    chk_print_uint
             call    K_INMSG
             db      13,10,0
+            mov     rf, chk_tally_chain
+            call    chk_inc16
             mov     rf, chk_wc_reason
             ldi     CHK_REASON_BADCLUSTER
             str     rf
@@ -1295,6 +1921,8 @@ cwc_freehit:
             call    chk_print_uint
             call    K_INMSG
             db      13,10,0
+            mov     rf, chk_tally_chain
+            call    chk_inc16
             mov     rf, chk_wc_reason
             ldi     CHK_REASON_FREEHIT
             str     rf
@@ -1324,7 +1952,7 @@ cwc_ioerr:
             call    K_INMSG
             db      "Disk read error while walking a cluster chain.",13,10,0
             mov     rf, chk_wc_reason
-            ldi     CHK_REASON_BADCLUSTER
+            ldi     CHK_REASON_IOERR
             str     rf
             stc
             rtn
@@ -1385,7 +2013,9 @@ CHK_FRAME_DIRSTATE_OFF: equ     0           ; 9 bytes
 CHK_FRAME_CLUSTER_OFF:  equ     9           ; 2 bytes
 CHK_FRAME_PARENT_OFF:   equ     11          ; 2 bytes
 CHK_FRAME_DEPTH_OFF:    equ     13          ; 1 byte
-CHK_FRAME_LEN:          equ     14
+CHK_FRAME_ORD_OFF:      equ     14          ; 2 bytes: entries K_DIR_READ
+                                            ; has returned at this level
+CHK_FRAME_LEN:          equ     16
 
 chk_walk_dir:
             ; depth cap check FIRST -- smi sets DF=1 if depth >=
@@ -1480,6 +2110,11 @@ cwd_mul_done:
             mov     rb, chk_cwd_depth_arg
             ldn     rb
             str     rf
+            inc     rf                  ; -> CHK_FRAME_ORD_OFF
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
 
             ; pass B: raw structural scan of this SAME directory
             ; (duplicate short names, orphaned/mismatched LFN entries)
@@ -1504,6 +2139,11 @@ cwd_loop:
             mov     rf, chk_dirent
             call    K_DIR_READ
             lbdf    cwd_done            ; end of this directory
+
+            call    chk_get_frame       ; count it: chk_locate_entry finds
+            mov     rf, r8              ; this entry again by its number
+            add16   rf, CHK_FRAME_ORD_OFF
+            call    chk_inc16
 
             ; name == "." ?
             mov     rf, chk_dirent
@@ -1546,6 +2186,8 @@ cwd_dot_mismatch:
             db      13,10,0
             mov     rf, chk_tally_structural
             call    chk_inc16
+            ldi     CHK_FRAME_CLUSTER_OFF
+            call    chk_fix_dot
             lbr     cwd_next
 
 cwd_not_dot:
@@ -1589,6 +2231,8 @@ cwd_dotdot_mismatch:
             db      13,10,0
             mov     rf, chk_tally_structural
             call    chk_inc16
+            ldi     CHK_FRAME_PARENT_OFF
+            call    chk_fix_dot
             lbr     cwd_next
 
 cwd_not_dotdot:
@@ -1621,9 +2265,66 @@ cwd_not_hidden:
             phi     rd
             ldn     rf
             plo     rd
-            call    chk_walk_chain      ; DF ignored -- any problem is
-                                        ; already reported by this call
+            call    chk_walk_chain      ; problems are reported there
+            lbnf    cwd_dir_walk
+            call    chk_fix_chain       ; D = 0 left alone, 1 chain ended,
+            xri     2                   ; 2 = no valid cluster at all
+            lbz     cwd_dir_empty
 
+            ; Not descending into a chain that loops, or whose very
+            ; first cluster is out of range (K_DIR_OPEN would read
+            ; whatever that number happens to address).
+            mov     rf, chk_wc_reason
+            ldn     rf
+            xri     CHK_REASON_TOOLONG
+            lbz     cwd_dir_skip
+            ldn     rf
+            xri     CHK_REASON_LOOP
+            lbz     cwd_dir_skip
+            ldn     rf
+            xri     CHK_REASON_BADCLUSTER
+            lbnz    cwd_dir_walk
+            mov     rf, chk_wc_prev
+            lda     rf
+            lbnz    cwd_dir_walk
+            ldn     rf
+            lbnz    cwd_dir_walk
+cwd_dir_skip:
+            call    K_INMSG
+            db      "   Subdirectory not checked: ",0
+            call    chk_print_dirent_name
+            call    K_INMSG
+            db      13,10,0
+            lbr     cwd_next
+
+cwd_dir_empty:
+            ; -f, and the directory has no usable cluster: MS-DOS turned
+            ; such an entry into a file. It becomes an empty one.
+            call    chk_locate_entry
+            lbdf    cwd_next
+            add16   rf, DE_ATTR
+            ldi     ATTR_ARCHIVE
+            str     rf
+            add16   rf, DE_CLUSTER-DE_ATTR
+            ldi     0
+            str     rf                  ; DE_CLUSTER (2) and DE_SIZE (4)
+            inc     rf                  ; are adjacent
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            call    chk_write_dir_sector
+            lbdf    cwd_next
+            call    K_INMSG
+            db      "   Invalid subdirectory entry converted to an empty file.",13,10,0
+            lbr     cwd_next
+
+cwd_dir_walk:
             call    chk_get_frame
             mov     rf, r8
             add16   rf, CHK_FRAME_DIRSTATE_OFF
@@ -1813,12 +2514,60 @@ ccf_nocluster_baddata:
             db      13,10,0
             mov     rf, chk_tally_mismatch
             call    chk_inc16
+
+            mov     rf, chk_fix
+            ldn     rf
+            lbz     ccf_done
+            call    chk_locate_entry
+            lbdf    ccf_done
+            add16   rf, DE_SIZE
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            call    chk_write_dir_sector
+            lbdf    ccf_done
+            call    K_INMSG
+            db      "   Allocation error, size adjusted.",13,10,0
             rtn
 
 ccf_have_cluster:
             call    chk_walk_chain      ; RD already holds DIRENT_CLUST
-            lbdf    ccf_done            ; DF=1: chk_walk_chain already
+            lbnf    ccf_size_check
+                                        ; DF=1: chk_walk_chain already
                                         ; reported the specific problem
+            call    chk_fix_chain       ; D = 0 left alone, 1 chain ended,
+            lbz     ccf_done            ; 2 = no valid cluster at all
+            smi     1
+            lbz     ccf_size_check      ; ended: now check the size
+
+            ; no valid cluster: empty the entry
+            call    chk_locate_entry
+            lbdf    ccf_done
+            add16   rf, DE_CLUSTER
+            ldi     0
+            str     rf                  ; DE_CLUSTER (2) and DE_SIZE (4)
+            inc     rf                  ; are adjacent
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            inc     rf
+            str     rf
+            call    chk_write_dir_sector
+            lbdf    ccf_done
+            call    K_INMSG
+            db      "   First cluster number is invalid, entry truncated.",13,10,0
+            rtn
+
+ccf_size_check:
 
             ; hops == 1 and size == 0 is the one explicitly tolerated
             ; case (a lazily-allocated first cluster on a still-empty
@@ -1883,7 +2632,456 @@ ccf_mismatch:
             db      " cluster(s))",13,10,0
             mov     rf, chk_tally_mismatch
             call    chk_inc16
+
+            ; -f: as MS-DOS did, the size becomes what the chain holds
+            mov     rf, chk_fix
+            ldn     rf
+            lbz     ccf_done
+            call    chk_locate_entry
+            lbdf    ccf_done
+            add16   rf, DE_SIZE         ; little-endian on disk
+            mov     r8, chk_wc_capacity
+            add16   r8, 3
+            ldn     r8
+            str     rf
+            inc     rf
+            dec     r8
+            ldn     r8
+            str     rf
+            inc     rf
+            dec     r8
+            ldn     r8
+            str     rf
+            inc     rf
+            dec     r8
+            ldn     r8
+            str     rf
+            call    chk_write_dir_sector
+            lbdf    ccf_done
+            call    K_INMSG
+            db      "   Allocation error, size adjusted.",13,10,0
 ccf_done:
+            rtn
+
+;------------------------------------------------------------------
+; chk_copy4: copy 4 bytes from R7 to R8.
+; Modifies: R7, R8 (and D)
+;------------------------------------------------------------------
+chk_copy4:
+            lda     r7
+            str     r8
+            inc     r8
+            lda     r7
+            str     r8
+            inc     r8
+            lda     r7
+            str     r8
+            inc     r8
+            ldn     r7
+            str     r8
+            rtn
+
+;------------------------------------------------------------------
+; chk_fix_chain: with -f, end a chain that chk_walk_chain just reported
+; as running into something invalid. MS-DOS's "has invalid cluster,
+; file truncated".
+;   - the chain reached a free cluster: that cluster becomes the end
+;   - the next link is out of range, names a cluster marked bad, or
+;     leads back into the chain itself: the cluster before it becomes
+;     the end
+; A chain that could not be read is left alone.
+;
+; Returns: D = 0 nothing changed (no -f, not repairable, write error)
+;          D = 1 chain ended; chk_wc_hops/capacity/prevcap describe it
+;          D = 2 not even the first cluster is usable: nothing written,
+;                the caller empties the directory entry
+; Modifies: everything
+;------------------------------------------------------------------
+chk_fix_chain:
+            mov     rf, chk_fix
+            ldn     rf
+            lbz     cfc_none
+            mov     rf, chk_wc_reason
+            ldn     rf
+            xri     CHK_REASON_FREEHIT
+            lbz     cfc_free
+            ldn     rf
+            xri     CHK_REASON_BADCLUSTER
+            lbz     cfc_cut
+            ldn     rf
+            xri     CHK_REASON_LOOP
+            lbz     cfc_cut
+            ldn     rf
+            xri     CHK_REASON_BADSECTOR
+            lbz     cfc_bad
+cfc_none:
+            ldi     0
+            rtn
+
+cfc_free:
+            mov     rf, chk_wc_cluster
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            lbr     cfc_end_at
+
+cfc_bad:
+            ; the bad-marked cluster was counted before its mark was
+            ; seen: take it back out
+            mov     rf, chk_wc_hops
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            dec     r9
+            dec     rf
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            mov     r7, chk_wc_prevcap
+            mov     r8, chk_wc_capacity
+            call    chk_copy4
+cfc_cut:
+            mov     rf, chk_wc_prev
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            ghi     rd
+            lbnz    cfc_cut_go
+            glo     rd
+            lbnz    cfc_cut_go
+            ldi     2                   ; nothing before it
+            rtn
+cfc_cut_go:
+            ; RD = the last good cluster. Write the end mark first, so
+            ; a failed write leaves the counters unused.
+            ldi     $FF
+            phi     rb
+            plo     rb
+            call    chk_fat_write
+            lbdf    cfc_none
+            call    chk_fat_flush
+            lbdf    cfc_none
+            ; prevcap = capacity less one cluster (hops is at least 1)
+            mov     r7, chk_wc_capacity
+            mov     r8, chk_wc_prevcap
+            call    chk_copy4
+            mov     rf, chk_wc_prevcap
+            mov     rd, chk_cluster_bytes
+            call    chk_sub32
+            lbr     cfc_done
+
+cfc_end_at:
+            ldi     $FF
+            phi     rb
+            plo     rb
+            call    chk_fat_write
+            lbdf    cfc_none
+            call    chk_fat_flush
+            lbdf    cfc_none
+cfc_done:
+            call    K_INMSG
+            db      "   Chain ended at its last valid cluster.",13,10,0
+            ldi     1
+            rtn
+
+;------------------------------------------------------------------
+; chk_fix_dot: with -f, correct the cluster of the "." or ".." entry
+; K_DIR_READ just returned.
+; Args:    D = CHK_FRAME_CLUSTER_OFF for ".", CHK_FRAME_PARENT_OFF for
+;          ".." -- the frame field holding the right value
+; Modifies: everything
+;------------------------------------------------------------------
+chk_fix_dot:
+            plo     r9
+            mov     rf, chk_fx_off
+            glo     r9
+            str     rf
+            mov     rf, chk_fix
+            ldn     rf
+            lbz     cfd_done
+            call    chk_locate_entry    ; RF = the raw entry
+            lbdf    cfd_done
+            mov     r7, rf
+            call    chk_get_frame       ; R8 = frame (RF, D changed)
+            mov     rf, chk_fx_off
+            ldn     rf
+            str     r2
+            glo     r8
+            add
+            plo     r8
+            ghi     r8
+            adci    0
+            phi     r8
+            lda     r8
+            phi     r9
+            ldn     r8
+            plo     r9                  ; R9 = the right cluster
+            add16   r7, DE_CLUSTER
+            glo     r9
+            str     r7                  ; little-endian on disk
+            inc     r7
+            ghi     r9
+            str     r7
+            call    chk_write_dir_sector
+            lbdf    cfd_done
+            call    K_INMSG
+            db      "   Corrected.",13,10,0
+cfd_done:
+            rtn
+
+;------------------------------------------------------------------
+; chk_raw_begin: start a raw, sector-by-sector walk of a directory.
+; Args:    RD = the directory's first cluster (0 = root)
+; Modifies: everything
+;------------------------------------------------------------------
+chk_raw_begin:
+            mov     rf, chk_dpb_entry_idx
+            ldi     16                  ; chk_raw_next: no sector yet
+            str     rf
+
+            ghi     rd
+            lbnz    crb_subdir
+            glo     rd
+            lbnz    crb_subdir
+
+            ; ---- root ----
+            mov     rf, chk_dpb_is_root
+            ldi     1
+            str     rf
+
+            mov     rf, chk_dpb_root_sector_idx
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+
+            mov     rf, chk_root_ents
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = root_ents
+            shr16   r9
+            shr16   r9
+            shr16   r9
+            shr16   r9                  ; 16 entries per sector
+            mov     rf, chk_dpb_root_sectors
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+
+            mov     r7, chk_root_lba
+            mov     r8, chk_dpb_lba
+            lda     r7
+            str     r8
+            inc     r8
+            lda     r7
+            str     r8
+            inc     r8
+            ldn     r7
+            str     r8
+            rtn
+
+crb_subdir:
+            mov     rf, chk_dpb_is_root
+            ldi     0
+            str     rf
+
+            mov     rf, chk_dpb_cluster
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     rf, chk_dpb_sector_in_cluster
+            ldi     0
+            str     rf
+
+            call    chk_cluster_to_lba ; RD still = first cluster
+            mov     rf, chk_dpb_lba
+            glo     r8
+            str     rf
+            inc     rf
+            ghi     r7
+            str     rf
+            inc     rf
+            glo     r7
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; chk_raw_next: the next in-use short entry of the directory begun with
+; chk_raw_begin. Skips exactly what the kernel's dir_read skips --
+; deleted entries, LFN entries, volume labels -- so the Nth entry here
+; is the Nth entry K_DIR_READ returns.
+; Returns: DF = 0, RF = the entry (in chk_dpb_secbuf; also kept in
+;          chk_dpb_entry_ptr); DF = 1 at the end of the directory
+; Modifies: everything
+;------------------------------------------------------------------
+chk_raw_next:
+            mov     rf, chk_dpb_entry_idx
+            ldn     rf
+            xri     16
+            lbnz    crn_have
+            call    chk_read_next_dir_sector
+            lbdf    crn_end
+            mov     rf, chk_dpb_entry_idx
+            ldi     0
+            str     rf
+crn_have:
+            mov     rf, chk_dpb_entry_idx
+            ldn     rf
+            plo     r9
+            adi     1
+            str     rf
+            ldi     0
+            phi     r9
+            shl16   r9
+            shl16   r9
+            shl16   r9
+            shl16   r9
+            shl16   r9                  ; R9 = index * 32
+            mov     rf, chk_dpb_secbuf
+            add16   rf, r9
+            mov     r8, chk_dpb_entry_ptr
+            ghi     rf
+            str     r8
+            inc     r8
+            glo     rf
+            str     r8
+
+            ldn     rf
+            lbz     crn_end             ; $00: end of directory
+            xri     $E5
+            lbz     chk_raw_next        ; deleted
+            add16   rf, DE_ATTR
+            ldn     rf
+            xri     ATTR_LFN
+            lbz     chk_raw_next
+            ldn     rf
+            ani     ATTR_VOLID
+            lbnz    chk_raw_next
+            call    chk_get_entry_ptr
+            clc
+            rtn
+crn_end:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; chk_write_dir_sector: write chk_dpb_secbuf back where chk_read_next_
+; dir_sector read it from. That routine steps chk_dpb_lba past each
+; sector it reads, so the sector in the buffer is at chk_dpb_lba - 1.
+; Returns: DF = 0 written; DF = 1 on a write error (repairs then off)
+; Modifies: everything
+;------------------------------------------------------------------
+chk_write_dir_sector:
+            mov     rf, chk_dpb_lba
+            lda     rf
+            plo     r8
+            lda     rf
+            phi     r7
+            ldn     rf
+            plo     r7
+            glo     r7
+            smi     1
+            plo     r7
+            ghi     r7
+            smbi    0
+            phi     r7
+            glo     r8
+            smbi    0
+            plo     r8
+            mov     rf, chk_unit
+            ldn     rf
+            phi     r8
+            mov     rf, chk_dpb_secbuf
+            call    K_SECWRITE
+            lbdf    chk_write_failed
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; chk_locate_entry: find on disk the entry K_DIR_READ returned last at
+; the current level (the one in chk_dirent). K_DIR_READ gives no
+; location, so this counts: the frame's CHK_FRAME_ORD_OFF is how many
+; entries K_DIR_READ has returned, and chk_raw_next applies the same
+; skip rules. The raw entry's cluster must equal chk_dirent's before it
+; is accepted, so a miscount can never patch the wrong entry.
+;
+; Returns: DF = 0, RF = the entry, its sector in chk_dpb_secbuf ready
+;          for chk_write_dir_sector; DF = 1 (message printed) if not
+; Modifies: everything
+;------------------------------------------------------------------
+chk_locate_entry:
+            call    chk_get_frame
+            mov     rf, r8
+            add16   rf, CHK_FRAME_ORD_OFF
+            mov     r7, chk_loc_left
+            lda     rf
+            str     r7
+            inc     r7
+            ldn     rf
+            str     r7
+
+            call    chk_get_frame
+            mov     rf, r8
+            add16   rf, CHK_FRAME_CLUSTER_OFF
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_raw_begin
+cle_loop:
+            call    chk_raw_next
+            lbdf    cle_fail
+            mov     rf, chk_loc_left
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            dec     r9
+            dec     rf
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+            ghi     r9
+            lbnz    cle_loop
+            glo     r9
+            lbnz    cle_loop
+
+            call    chk_get_entry_ptr
+            add16   rf, DE_CLUSTER      ; little-endian on disk
+            mov     r8, chk_dirent
+            add16   r8, DIRENT_CLUST    ; big-endian in the dirent
+            inc     r8
+            lda     rf
+            str     r2
+            ldn     r8
+            xor
+            lbnz    cle_fail
+            dec     r8
+            ldn     rf
+            str     r2
+            ldn     r8
+            xor
+            lbnz    cle_fail
+            call    chk_get_entry_ptr
+            clc
+            rtn
+cle_fail:
+            call    K_INMSG
+            db      "   Cannot find the directory entry again; not corrected.",13,10,0
+            stc
             rtn
 
 ;------------------------------------------------------------------
@@ -2228,78 +3426,7 @@ chk_scan_dir_raw:
             ldi     0
             str     rf
 
-            ghi     rd
-            lbnz    csdr_subdir_init
-            glo     rd
-            lbnz    csdr_subdir_init
-
-            ; ---- root init ----
-            mov     rf, chk_dpb_is_root
-            ldi     1
-            str     rf
-
-            mov     rf, chk_dpb_root_sector_idx
-            ldi     0
-            str     rf
-            inc     rf
-            str     rf
-
-            mov     rf, chk_root_ents
-            lda     rf
-            phi     r9
-            ldn     rf
-            plo     r9                  ; R9 = root_ents
-            shr16   r9
-            shr16   r9
-            shr16   r9
-            shr16   r9                  ; R9 = root_ents >> 4 (16
-                                        ; entries/sector)
-            mov     rf, chk_dpb_root_sectors
-            ghi     r9
-            str     rf
-            inc     rf
-            glo     r9
-            str     rf
-
-            mov     r7, chk_root_lba
-            mov     r8, chk_dpb_lba
-            lda     r7
-            str     r8
-            inc     r8
-            lda     r7
-            str     r8
-            inc     r8
-            ldn     r7
-            str     r8
-
-            lbr     csdr_loop
-
-csdr_subdir_init:
-            mov     rf, chk_dpb_is_root
-            ldi     0
-            str     rf
-
-            mov     rf, chk_dpb_cluster
-            ghi     rd
-            str     rf
-            inc     rf
-            glo     rd
-            str     rf
-
-            mov     rf, chk_dpb_sector_in_cluster
-            ldi     0
-            str     rf
-
-            call    chk_cluster_to_lba ; RD already = starting cluster
-            mov     rf, chk_dpb_lba
-            glo     r8
-            str     rf
-            inc     rf
-            ghi     r7
-            str     rf
-            inc     rf
-            glo     r7
-            str     rf
+            call    chk_raw_begin       ; RD = this directory's cluster
 
 csdr_loop:
             call    chk_read_next_dir_sector
@@ -2572,7 +3699,11 @@ cbis_shiftloop:
             lbr     cbis_shiftloop
 cbis_shiftdone:
 
-            mov     rf, chk_bitmap
+            mov     rd, chk_bm_base
+            lda     rd
+            phi     rf
+            ldn     rd
+            plo     rf
             add16   rf, r8
             ldn     rf
             str     r2
@@ -2589,8 +3720,9 @@ cbis_notset:
 ; chk_fat_scan_lost: sequential scan of the whole FAT table (reusing
 ; chk_dpb_lba/chk_lba_inc/chk_fr_secbuf -- all idle by this point,
 ; the tree walk having already finished), tallying free clusters and
-; reporting any ALLOCATED cluster (nonzero FAT entry) whose bit in
+; counting any ALLOCATED cluster (nonzero FAT entry) whose bit in
 ; the "seen" bitmap was never set by the tree walk -- a lost cluster.
+; chk_lost_chains reports them and, with -f, deals with them.
 ;
 ; Args:    none
 ; Returns: nothing
@@ -2683,16 +3815,6 @@ cfsl12_not_bad:
             call    chk_bit_is_set
             lbdf    cfsl12_next         ; referenced -- not lost
 
-            call    K_INMSG
-            db      "Lost cluster: ",0
-            mov     rf, chk_fscan_cluster
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            call    chk_print_uint
-            call    K_INMSG
-            db      13,10,0
             mov     rf, chk_tally_lost
             call    chk_inc16
 
@@ -2714,6 +3836,16 @@ cfsl12_done:
             rtn
 
 cfsl_fat16:
+            ; This scan reads FAT sectors into chk_fr_secbuf itself, so
+            ; chk_fat_read's cached sector goes: written out if it was
+            ; changed, then forgotten.
+            call    chk_fat_flush
+            mov     rf, chk_fc_sec
+            ldi     $FF
+            str     rf
+            inc     rf
+            str     rf
+
             mov     rf, chk_fscan_cluster
             ldi     0
             str     rf
@@ -2857,16 +3989,6 @@ cfsl_not_bad:
             call    chk_bit_is_set
             lbdf    cfsl_entry_done     ; referenced -- not lost
 
-            call    K_INMSG
-            db      "Lost cluster: ",0
-            mov     rf, chk_fscan_cluster
-            lda     rf
-            phi     rd
-            ldn     rf
-            plo     rd
-            call    chk_print_uint
-            call    K_INMSG
-            db      13,10,0
             mov     rf, chk_tally_lost
             call    chk_inc16
 
@@ -2924,6 +4046,714 @@ cfsl_sector_advance:
             lbr     cfsl_sector_loop
 
 cfsl_done:
+            rtn
+
+;------------------------------------------------------------------
+; chk_valid_cluster: is RD a usable cluster number, 2..max_clust?
+; Returns: DF = 1 yes, DF = 0 no. RD unchanged.
+; Modifies: R8, RF (and D)
+;------------------------------------------------------------------
+chk_valid_cluster:
+            ghi     rd
+            lbnz    cvc_hi
+            glo     rd
+            smi     2
+            lbnf    cvc_no              ; 0 or 1
+cvc_hi:
+            mov     rf, chk_max_clust
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            sub16   r8, rd              ; DF = 1 if max_clust >= RD
+            rtn
+cvc_no:
+            clc
+            rtn
+
+;------------------------------------------------------------------
+; chk_bm_use2 / chk_bm_use1: point chk_mark_cluster and chk_bit_is_set
+; at chk_lost_chains' second bitmap, or back at the "seen" bitmap.
+; Both leave RD and DF alone.
+; Modifies: R9, RF (and D)
+;------------------------------------------------------------------
+chk_bm_use2:
+            mov     r9, chk_bm2_base
+            mov     rf, chk_bm_base
+            lda     r9
+            str     rf
+            inc     rf
+            ldn     r9
+            str     rf
+            rtn
+chk_bm_use1:
+            mov     r9, chk_bm1_base
+            mov     rf, chk_bm_base
+            lda     r9
+            str     rf
+            inc     rf
+            ldn     r9
+            str     rf
+            rtn
+
+;------------------------------------------------------------------
+; chk_bit2_test: is RD's bit set in the second bitmap?
+; Returns: DF = 1 set, DF = 0 not
+; Modifies: R8, R9, RB, RD, RF (and D)
+;------------------------------------------------------------------
+chk_bit2_test:
+            call    chk_bm_use2
+            call    chk_bit_is_set
+            lbr     chk_bm_use1         ; keeps DF
+
+;------------------------------------------------------------------
+; chk_ls_begin / chk_ls_next: step through the lost clusters in
+; ascending order. A cluster is lost while its FAT entry is neither
+; free nor the bad mark and its "seen" bit is clear -- so freeing one,
+; or marking it seen, takes it out of later passes.
+; chk_ls_next returns: DF = 0, RD = chk_ls_cluster = the next lost
+;          cluster, chk_ls_value = its FAT entry; DF = 1 when there are
+;          no more (or the FAT could not be read)
+; Modifies: everything
+;------------------------------------------------------------------
+chk_ls_begin:
+            mov     rf, chk_ls_cluster
+            ldi     0
+            str     rf
+            inc     rf
+            ldi     1
+            str     rf                  ; chk_ls_next steps before it looks
+            rtn
+
+chk_ls_next:
+            mov     rf, chk_ls_cluster
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = the cluster done last
+            mov     rf, chk_max_clust
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            mov     r7, r9
+            sub16   r7, r8              ; DF = 1 if it was the last one
+            lbdf    cln_end
+            inc     r9
+            mov     rf, chk_ls_cluster
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+
+            mov     rd, r9
+            call    chk_fat_read
+            lbdf    cln_end
+            mov     rf, chk_ls_value
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+            ghi     rd
+            lbnz    cln_nz
+            glo     rd
+            lbz     chk_ls_next         ; free
+cln_nz:
+            ghi     rd
+            xri     high FAT_BAD
+            lbnz    cln_seen
+            glo     rd
+            xri     low FAT_BAD
+            lbz     chk_ls_next         ; marked bad
+cln_seen:
+            mov     rf, chk_ls_cluster
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_bit_is_set
+            lbdf    chk_ls_next         ; belongs to something
+            mov     rf, chk_ls_cluster
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            clc
+            rtn
+cln_end:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; chk_ask_yn: read one key as the answer to a yes/no question, echo it.
+; The end of redirected input reads as 0, which is a no.
+; Returns: DF = 1 for Y or y, DF = 0 for anything else
+; Modifies: everything
+;------------------------------------------------------------------
+chk_ask_yn:
+            call    K_READ
+            plo     r9
+            mov     rf, chk_key
+            glo     r9
+            str     rf
+            smi     32
+            lbnf    cay_nl              ; nothing printable to echo
+            ldn     rf
+            call    K_TYPE
+cay_nl:
+            call    K_INMSG
+            db      13,10,0
+            mov     rf, chk_key
+            ldn     rf
+            ani     $DF
+            xri     'Y'
+            lbz     cay_yes
+            clc
+            rtn
+cay_yes:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; chk_lost_bytes: chk_ck_size = chk_tally_lost clusters, in bytes, then
+; print it.
+; Modifies: everything
+;------------------------------------------------------------------
+chk_lost_bytes:
+            mov     rf, chk_tally_lost
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, chk_spc
+            ldn     rf
+            plo     rc
+            call    chk_mul16x8
+            mov     rf, chk_ck_size
+            call    chk_scale_mul_result_x512
+            mov     rf, chk_ck_size
+            lbr     chk_print_size32_field
+
+;------------------------------------------------------------------
+; chk_lost_chains: report the lost clusters chk_fat_scan_lost counted
+; and, with -f, ask what MS-DOS asked: turn each lost chain into a file
+; in the root (FILE0000.CHK, FILE0001.CHK ...) or free the clusters.
+;
+; A chain's first cluster is a lost cluster no other lost cluster links
+; to. Finding those takes a second bitmap, "a lost cluster links to
+; this one". It needs no memory of its own: by now the duplicate-name
+; table is idle and, on FAT16, so is the FAT12 buffer declared right
+; before it -- together 8,960 bytes, more than the 8,192 the largest
+; FAT16 needs. A FAT12 volume needs at most 511 bytes and uses the
+; duplicate-name table alone.
+;
+; Modifies: everything
+;------------------------------------------------------------------
+chk_lost_chains:
+            mov     rf, chk_tally_lost
+            lda     rf
+            lbnz    clc_some
+            ldn     rf
+            lbnz    clc_some
+            rtn
+clc_some:
+            call    chk_fat_flush
+
+            mov     rf, chk_fat12
+            ldn     rf
+            lbnz    clc_b12
+            mov     r9, chk_fat12_buf
+            lbr     clc_bset
+clc_b12:
+            mov     r9, chk_dup_names
+clc_bset:
+            mov     rf, chk_bm2_base
+            ghi     r9
+            str     rf
+            inc     rf
+            glo     r9
+            str     rf
+
+            mov     rf, chk_bitmap_needed
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8                  ; R8 = bytes to clear at R9
+clc_z:
+            ghi     r8
+            lbnz    clc_zb
+            glo     r8
+            lbz     clc_zd
+clc_zb:
+            ldi     0
+            str     r9
+            inc     r9
+            dec     r8
+            lbr     clc_z
+clc_zd:
+
+            ; pass 1: note every cluster some lost cluster links to
+            call    chk_ls_begin
+clc_p1:
+            call    chk_ls_next
+            lbdf    clc_p1d
+            mov     rf, chk_ls_value
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_valid_cluster
+            lbnf    clc_p1
+            call    chk_bm_use2
+            call    chk_mark_cluster
+            call    chk_bm_use1
+            lbr     clc_p1
+clc_p1d:
+
+            ; pass 2: count the lost clusters nothing links to
+            mov     rf, chk_lost_nchains
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            call    chk_ls_begin
+clc_p2:
+            call    chk_ls_next
+            lbdf    clc_p2d
+            call    chk_bit2_test
+            lbdf    clc_p2
+            mov     rf, chk_lost_nchains
+            call    chk_inc16
+            lbr     clc_p2
+clc_p2d:
+
+            mov     rf, chk_tally_lost
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_print_uint
+            call    K_INMSG
+            db      " lost cluster(s) found in ",0
+            mov     rf, chk_lost_nchains
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_print_uint
+            call    K_INMSG
+            db      " chain(s).",13,10,0
+
+            mov     rf, chk_fix
+            ldn     rf
+            lbnz    clc_ask
+            call    chk_lost_bytes
+            call    K_INMSG
+            db      " bytes of disk space would be freed.",13,10,0
+            rtn
+
+clc_ask:
+            call    K_INMSG
+            db      "Convert lost chains to files (Y/N)? ",0
+            call    chk_ask_yn
+            lbdf    clc_convert
+
+            ; ---- free them ----
+            call    chk_ls_begin
+clc_f:
+            call    chk_ls_next         ; RD = a lost cluster
+            lbdf    clc_fd
+            ldi     0
+            phi     rb
+            plo     rb
+            call    chk_fat_write
+            lbdf    clc_ret
+            lbr     clc_f
+clc_fd:
+            call    chk_fat_flush
+            lbdf    clc_ret
+            mov     rf, chk_fix         ; off: a write failed on the way
+            ldn     rf
+            lbz     clc_ret
+            call    chk_lost_bytes
+            call    K_INMSG
+            db      " bytes of disk space freed.",13,10,0
+
+            ; the summary's free space now includes them
+            mov     rf, chk_tally_lost
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            mov     rf, chk_tally_free
+            lda     rf
+            phi     r8
+            ldn     rf
+            plo     r8
+            add16   r8, r9
+            mov     rf, chk_tally_free
+            ghi     r8
+            str     rf
+            inc     rf
+            glo     r8
+            str     rf
+clc_ret:
+            rtn
+
+            ; ---- turn them into files ----
+clc_convert:
+            mov     rf, chk_ck_num
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+            call    chk_ls_begin
+clc_c1:
+            call    chk_ls_next
+            lbdf    clc_c1d
+            call    chk_bit2_test
+            lbdf    clc_c1              ; not the start of a chain
+            call    chk_recover_chain
+            lbdf    clc_ret
+            lbr     clc_c1
+clc_c1d:
+            ; Whatever is still lost belongs to a chain that loops back
+            ; on itself, which has no first cluster. Each recovery marks
+            ; its clusters seen, so starting anywhere takes the lot.
+            call    chk_ls_begin
+clc_c2:
+            call    chk_ls_next
+            lbdf    clc_ret
+            call    chk_recover_chain
+            lbdf    clc_ret
+            lbr     clc_c2
+
+;------------------------------------------------------------------
+; chk_recover_chain: make a file of the lost chain starting at
+; chk_ls_cluster. Walks the chain marking each cluster seen, and ends
+; it (FAT entry = end of chain) at the first link that is invalid or
+; leads to a cluster something else already owns, so a recovered file
+; is never cross-linked. Then creates the next unused /FILEnnnn.CHK
+; through the kernel, empty, and writes the chain's first cluster and
+; its length in bytes into the new entry.
+;
+; Returns: DF = 0 recovered; DF = 1 stop (message printed)
+; Modifies: everything
+;------------------------------------------------------------------
+chk_recover_chain:
+            mov     rf, chk_ls_cluster
+            mov     r8, chk_rc_cur
+            lda     rf
+            str     r8
+            inc     r8
+            ldn     rf
+            str     r8
+            mov     rf, chk_rc_count
+            ldi     0
+            str     rf
+            inc     rf
+            str     rf
+crc_loop:
+            mov     rf, chk_rc_cur
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_mark_cluster
+            mov     rf, chk_rc_count
+            call    chk_inc16
+
+            mov     rf, chk_rc_cur
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            call    chk_fat_read        ; RD = the link
+            lbdf    crc_readerr
+            mov     rf, chk_rc_next
+            ghi     rd
+            str     rf
+            inc     rf
+            glo     rd
+            str     rf
+
+            mov     r9, rd
+            sub16   r9, FAT_EOC         ; DF = 1: a proper end of chain
+            lbdf    crc_end
+            call    chk_valid_cluster   ; RD kept
+            lbnf    crc_cut
+            call    chk_bit_is_set
+            lbdf    crc_cut             ; owned by something else
+
+            mov     rf, chk_rc_next
+            mov     r8, chk_rc_cur
+            lda     rf
+            str     r8
+            inc     r8
+            ldn     rf
+            str     r8
+            lbr     crc_loop
+
+crc_cut:
+            mov     rf, chk_rc_cur
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            ldi     $FF
+            phi     rb
+            plo     rb
+            call    chk_fat_write
+            lbdf    crc_fail
+crc_end:
+            call    chk_fat_flush
+            lbdf    crc_fail
+
+            ; size = clusters * sectors per cluster * 512
+            mov     rf, chk_rc_count
+            lda     rf
+            phi     rd
+            ldn     rf
+            plo     rd
+            mov     rf, chk_spc
+            ldn     rf
+            plo     rc
+            call    chk_mul16x8
+            mov     rf, chk_ck_size
+            call    chk_scale_mul_result_x512
+
+crc_name:
+            call    chk_ck_build
+            mov     rf, chk_ck_path
+            mov     rd, chk_dirent
+            call    K_STAT
+            lbdf    crc_create          ; no such file: the name is free
+            mov     rf, chk_ck_num
+            call    chk_inc16
+            mov     rf, chk_ck_num
+            lda     rf
+            xri     high 10000
+            lbnz    crc_name
+            ldn     rf
+            xri     low 10000
+            lbnz    crc_name
+            call    K_INMSG
+            db      "No FILEnnnn.CHK name is left.",13,10,0
+            lbr     crc_fail
+
+crc_create:
+            mov     rf, chk_ck_path
+            mov     rd, chk_ck_fcb
+            mov     ra, chk_dpb_secbuf  ; idle; used as the I/O buffer
+            ldi     1
+            call    K_FILE_OPEN
+            lbdf    crc_rootfull
+            mov     rd, chk_ck_fcb
+            call    K_FILE_CLOSE
+
+            ; the kernel has been at this disk: drop the FAT16 sector
+            ; held here rather than assume it is still current
+            mov     rf, chk_fc_sec
+            ldi     $FF
+            str     rf
+            inc     rf
+            str     rf
+
+            ; find the new entry in the root by its 11-byte name
+            ldi     0
+            phi     rd
+            plo     rd
+            call    chk_raw_begin
+crc_find:
+            call    chk_raw_next        ; RF = entry
+            lbdf    crc_noentry
+            mov     rd, chk_ck_name11
+            call    chk_names_equal
+            lbnf    crc_find
+
+            call    chk_get_entry_ptr
+            add16   rf, DE_CLUSTER      ; little-endian on disk
+            mov     r8, chk_ls_cluster
+            inc     r8
+            ldn     r8
+            str     rf
+            inc     rf
+            dec     r8
+            ldn     r8
+            str     rf
+            inc     rf                  ; -> DE_SIZE
+            mov     r8, chk_ck_size
+            add16   r8, 3
+            ldn     r8
+            str     rf
+            inc     rf
+            dec     r8
+            ldn     r8
+            str     rf
+            inc     rf
+            dec     r8
+            ldn     r8
+            str     rf
+            inc     rf
+            dec     r8
+            ldn     r8
+            str     rf
+            call    chk_write_dir_sector
+            lbdf    crc_fail
+
+            call    K_INMSG
+            db      "   Recovered ",0
+            mov     rf, chk_ck_path
+            add16   rf, 3               ; past "X:/"
+            call    K_MSG
+            call    K_INMSG
+            db      13,10,0
+            mov     rf, chk_ck_num
+            call    chk_inc16
+            clc
+            rtn
+
+crc_readerr:
+            call    K_INMSG
+            db      "Disk read error while following a lost chain.",13,10,0
+            lbr     crc_fail
+crc_noentry:
+            call    K_INMSG
+            db      "Cannot find the new file's directory entry.",13,10,0
+            lbr     crc_fail
+crc_rootfull:
+            call    K_INMSG
+            db      "No room in the root directory. Delete files there and run CHKDSK -f again.",13,10,0
+crc_fail:
+            stc
+            rtn
+
+;------------------------------------------------------------------
+; chk_ck_build: put the drive letter and chk_ck_num (0..9999, as four
+; digits) into chk_ck_path ("X:/FILEnnnn.CHK") and chk_ck_name11
+; ("FILEnnnnCHK", the form the name takes on disk).
+; Modifies: R7, R8, R9, RB, RD, RF (and D). Makes no kernel calls.
+;------------------------------------------------------------------
+chk_ck_build:
+            mov     rf, chk_ck_num
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9                  ; R9 = what is left of the number
+            mov     r8, chk_ck_digits
+            mov     r7, 1000
+            call    ckb_digit
+            mov     r7, 100
+            call    ckb_digit
+            mov     r7, 10
+            call    ckb_digit
+            glo     r9
+            adi     '0'
+            str     r8
+
+            mov     rf, chk_drive_letter
+            ldn     rf
+            plo     r9
+            mov     rf, chk_ck_path
+            glo     r9
+            str     rf
+            add16   rf, 7               ; -> the digits in the path
+            mov     r8, chk_ck_digits
+            mov     r7, chk_ck_name11
+            add16   r7, 4               ; -> the digits in the name
+            ldi     4
+            plo     r9
+ckb_cp:
+            lda     r8
+            str     rf
+            str     r7
+            inc     rf
+            inc     r7
+            dec     r9
+            glo     r9
+            lbnz    ckb_cp
+            rtn
+
+            ; one digit: how many times R7 comes out of R9, stored at R8
+ckb_digit:
+            ldi     '0'
+            plo     rb
+ckb_dl:
+            mov     rd, r9
+            sub16   rd, r7              ; DF = 1 if R9 >= R7
+            lbnf    ckb_dd
+            mov     r9, rd
+            glo     rb
+            adi     1
+            plo     rb
+            lbr     ckb_dl
+ckb_dd:
+            glo     rb
+            str     r8
+            inc     r8
+            rtn
+
+;------------------------------------------------------------------
+; chk_print_verdict: after the summary, say what the user should know
+; about the problems found: that nothing was changed (no -f), or what
+; -f does not repair.
+; Modifies: everything
+;------------------------------------------------------------------
+chk_print_verdict:
+            mov     rf, chk_fix_req
+            ldn     rf
+            lbnz    cpv_fixed
+
+            ; no -f: any problem at all?
+            mov     rf, chk_tally_crosslink
+            lda     rf
+            lbnz    cpv_errors
+            ldn     rf
+            lbnz    cpv_errors
+            mov     rf, chk_tally_badsector
+            lda     rf
+            lbnz    cpv_errors
+            ldn     rf
+            lbnz    cpv_errors
+            mov     rf, chk_tally_mismatch
+            lda     rf
+            lbnz    cpv_errors
+            ldn     rf
+            lbnz    cpv_errors
+            mov     rf, chk_tally_lost
+            lda     rf
+            lbnz    cpv_errors
+            ldn     rf
+            lbnz    cpv_errors
+            mov     rf, chk_tally_structural
+            lda     rf
+            lbnz    cpv_errors
+            ldn     rf
+            lbnz    cpv_errors
+            mov     rf, chk_tally_chain
+            lda     rf
+            lbnz    cpv_errors
+            ldn     rf
+            lbnz    cpv_errors
+            rtn
+cpv_errors:
+            call    K_INMSG
+            db      13,10,"Errors found; -f not given, so nothing was changed.",13,10,0
+            rtn
+
+cpv_fixed:
+            mov     rf, chk_tally_crosslink
+            lda     rf
+            lbnz    cpv_xlink
+            ldn     rf
+            lbz     cpv_done
+cpv_xlink:
+            call    K_INMSG
+            db      13,10,"Cross-linked files are not repaired. Copy each one, then delete",13,10
+            db      "the originals.",13,10,0
+cpv_done:
             rtn
 
 ;------------------------------------------------------------------
@@ -3328,6 +5158,22 @@ cps_show_badsector:
             db      " bad-sector cluster reference(s) found",13,10,0
 cps_after_badsector:
 
+            mov     rf, chk_tally_chain
+            lda     rf
+            phi     r9
+            ldn     rf
+            plo     r9
+            ghi     r9
+            lbnz    cps_show_chain
+            glo     r9
+            lbz     cps_after_chain
+cps_show_chain:
+            mov     rd, r9
+            call    chk_print_uint
+            call    K_INMSG
+            db      " damaged cluster chain(s) found",13,10,0
+cps_after_chain:
+
             mov     rf, chk_tally_structural
             lda     rf
             phi     r9
@@ -3368,7 +5214,6 @@ chk_num_buf:        ds      8           ; f_uintout scratch (max 5
                                         ; digits + NUL, some headroom)
 
 chk_bitmap_needed:  ds      2           ; (max_clust+8)>>3, cached
-chk_bitmap:         ds      CHK_BITMAP_LEN
 
 chk_wc_hops:        ds      2
 chk_wc_capacity:    ds      4           ; big-endian
@@ -3399,7 +5244,6 @@ chk_total_bytes:        ds  4
 chk_unit:               db  0       ; block-device unit of the checked drive
 chk_fat12:              db  0       ; 1 = this volume is FAT12
 chk_lf_idx:             db  0       ; chk_load_fat12's sector counter
-chk_fat12_buf:          ds  CHK_FAT12_BUF_LEN
 chk_free_bytes:         ds  4
 chk_used_bytes:         ds  4
 chk_overflow_flag:      ds  1
@@ -3430,7 +5274,14 @@ chk_dpb_entry_ptr:          ds  2
 chk_pb_pending_lfn:         ds  1
 chk_pb_pending_chksum:      ds  1
 
+; chk_fat12_buf and chk_dup_names MUST stay adjacent, in this order:
+; chk_lost_chains uses the two together as one 8,192-byte bitmap on a
+; FAT16 volume.
+chk_fat12_buf:              ds  CHK_FAT12_BUF_LEN
 chk_dup_names:              ds  CHK_DUPNAME_CAP*11
+#if (CHK_FAT12_BUF_LEN + CHK_DUPNAME_CAP*11) < CHK_BITMAP_LEN
+#error chk_fat12_buf + chk_dup_names is smaller than the second bitmap
+#endif
 chk_dup_next_offset:        ds  2
 chk_dup_search_offset:      ds  2
 chk_dup_capped_reported:    ds  1
@@ -3441,3 +5292,48 @@ chk_fscan_entry_idx:        ds  2
 chk_tally_free:             ds  2
 chk_tally_badfree:          ds  2   ; unreferenced $FFF7 clusters
 chk_bad_bytes:              ds  4
+
+; ---- -f ----
+chk_fix:                    db  0       ; 1 = repairs are being written
+chk_fix_req:                db  0       ; 1 = -f was given
+chk_drive_slot:             db  0       ; for K_DRIVE_INVALIDATE
+chk_num_fats:               db  1
+chk_fc_sec:                 ds  2       ; FAT sector in chk_fr_secbuf,
+                                        ; $FFFF = none
+chk_fc_dirty:               db  0       ; that sector was changed
+chk_f12_dirty:              db  0       ; the FAT12 copy was changed
+chk_fw_value:               ds  2
+chk_fw_copy:                db  0
+chk_bm1_base:               ds  2       ; the "seen" bitmap (mem_base)
+chk_bm_base:                ds  2       ; bitmap chk_mark_cluster uses
+chk_bm2_base:               ds  2       ; chk_lost_chains' second one
+chk_wc_prev:                ds  2
+chk_wc_start:               ds  2
+chk_lp_cur:                 ds  2
+chk_lp_left:                ds  2
+chk_tally_chain:            ds  2       ; chains ended by something invalid
+chk_fx_off:                 db  0
+chk_loc_left:               ds  2
+chk_key:                    db  0
+chk_ls_cluster:             ds  2
+chk_ls_value:               ds  2
+chk_lost_nchains:           ds  2
+chk_rc_cur:                 ds  2
+chk_rc_next:                ds  2
+chk_rc_count:               ds  2
+chk_ck_num:                 ds  2
+chk_ck_size:                ds  4       ; big-endian
+chk_ck_digits:              ds  4
+chk_ck_path:                db  "X:/FILE0000.CHK",0
+chk_ck_name11:              db  "FILE0000CHK"
+
+.align  32                  ; an FCB must not straddle a page
+chk_ck_fcb:                 ds  FCB_LEN
+#if (chk_ck_fcb & $FF) > (256 - FCB_LEN)
+#error chk_ck_fcb crosses a page boundary
+#endif
+
+; Keep this LAST. Link/02 places the libraries after the last byte this
+; file emits, and a `ds` emits none: without an emitted byte here they
+; would be linked on top of chk_ck_fcb.
+chk_data_end:               db  0

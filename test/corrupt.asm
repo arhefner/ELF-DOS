@@ -52,16 +52,12 @@
 ;       Same walk as TRUNC, but marks the target cluster's own FAT
 ;       entry as a bad-sector marker ($FFF7) instead of end-of-chain.
 ;
-; IMPORTANT -- reboot before running CHKDSK (or fsck) after using this
-; tool. The kernel keeps an in-RAM FAT-sector cache (kernel/fat.asm's
-; fat_csec) that this tool's own raw K_SECREAD/K_SECWRITE writes
-; bypass entirely -- if a later, unrelated file operation in the SAME
-; boot session happens to flush a stale cached copy of the exact
-; sector this tool just corrupted, it could silently overwrite the
-; injected corruption with the original, correct value before CHKDSK
-; (or anything else) ever sees it. This is the identical reboot-first
-; caution CHKDSK's own deferred -f fix mode already documents needing,
-; for the same reason.
+; No reboot is needed before running CHKDSK afterward. The kernel keeps
+; one FAT sector cached between calls, which raw K_SECWRITE writes go
+; around; this program calls K_DRIVE_INVALIDATE for the current drive
+; before it starts and again when it is done, so the kernel writes out
+; anything pending first and holds no stale copy afterward. (Checking
+; the result from a host with fsck still means moving the card.)
 ;
 ; DANGEROUS BY DESIGN -- this tool intentionally corrupts real on-disk
 ; structures via K_SECREAD/K_SECWRITE (see kernel_api.inc's own
@@ -114,6 +110,51 @@ FAT_BAD:        equ     $FFF7
             db      0                   ; reserved
 
 start:
+            ; K_DRIVE_INVALIDATE before the raw writes and after (see the
+            ; header). The real program is crp_main; RA/RC, its argv and
+            ; argc, are kept in memory across the first call.
+            mov     rf, crp_sv_args
+            ghi     ra
+            str     rf
+            inc     rf
+            glo     ra
+            str     rf
+            inc     rf
+            ghi     rc
+            str     rf
+            inc     rf
+            glo     rc
+            str     rf
+
+            call    K_GETCURDIR         ; D = current drive's slot
+            plo     r9
+            mov     rf, crp_drive
+            glo     r9
+            str     rf
+            call    K_DRIVE_INVALIDATE
+
+            mov     rf, crp_sv_args
+            lda     rf
+            phi     ra
+            lda     rf
+            plo     ra
+            lda     rf
+            phi     rc
+            ldn     rf
+            plo     rc
+            call    crp_main            ; D = exit code
+            plo     r9
+            mov     rf, crp_exit
+            glo     r9
+            str     rf
+            mov     rf, crp_drive
+            ldn     rf
+            call    K_DRIVE_INVALIDATE
+            mov     rf, crp_exit
+            ldn     rf
+            rtn
+
+crp_main:
             ; argc must be >= 2 (mode word present) for anything below
             ; to be worth reading at all
             ghi     rc
@@ -198,8 +239,7 @@ usage:
             db      "  XLINK <nameA> <nameB>",13,10
             db      "  DUPNAME <nameA> <nameB>",13,10
             db      "  TRUNC <name> <hops>",13,10
-            db      "  BADSECTOR <name> <hops>",13,10
-            db      "Reboot before running CHKDSK/fsck afterward.",13,10,0
+            db      "  BADSECTOR <name> <hops>",13,10,0
             ldi     1
             rtn
 
@@ -2153,6 +2193,9 @@ crp_mode_trunc:     db      "TRUNC",0
 crp_mode_badsector: db      "BADSECTOR",0
 
 crp_parent:             ds  2
+crp_sv_args:            ds  4       ; RA, RC across the first invalidate
+crp_drive:              db  0       ; current drive's slot
+crp_exit:               db  0       ; crp_main's exit code
 crp_mode_ptr:           ds  2       ; argv[1] (mode string) pointer, stashed
                                     ; here (not a register) across the
                                     ; crp_read_bpb/K_GETCURDIR calls below --

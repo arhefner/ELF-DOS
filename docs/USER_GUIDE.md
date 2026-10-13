@@ -443,7 +443,7 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | `UMOUNT` | `UMOUNT <letter:>` | Detaches a drive letter. The boot drive cannot be detached. |
 | `FDISK` | `FDISK [unit]` | Creates, deletes and lists the partitions on block device `unit` (0-7, default: the unit the system booted from), from a menu. See "Partitioning a Disk" above. |
 | `FORMAT` | `FORMAT <letter:> [-S] [-V:label]` | Erases a mounted drive and writes a new, empty FAT16 file system on it. `-S` first reads every sector and sets aside any that fail (slow); `-V:label` sets the volume label without asking. See "Formatting a Drive" above. |
-| `CHKDSK` | `CHKDSK [X:]` | Checks a drive for file system problems - lost clusters, files whose size does not match their data, and damaged directory entries - and prints a summary. This is a check only; it does not repair anything. |
+| `CHKDSK` | `CHKDSK [X:] [-f]` | Checks a drive for file system problems - lost clusters, damaged cluster chains, files whose size does not match their data, and damaged directory entries - and prints a summary. Without `-f` nothing is changed. With `-f` it repairs them as MS-DOS `CHKDSK /F` did: it asks `Convert lost chains to files (Y/N)?` and either saves each lost chain as `FILE0000.CHK`, `FILE0001.CHK`, ... in the root directory (names are upper case) or frees the space; ends a damaged chain at its last good cluster; sets a file's size to what its chain holds; and corrects wrong `.` and `..` entries. Cross-linked files are reported but not repaired - copy each one, then delete the originals. Do not redirect the output of `CHKDSK -f`. |
 
 ### Working with files
 

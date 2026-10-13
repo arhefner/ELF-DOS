@@ -1325,4 +1325,10 @@ cmp_iobuf2:     ds      FCB_IOBUF_LEN
 cmp_buf1:       ds      CMP_CHUNK
 cmp_buf2:       ds      CMP_CHUNK
 
+; Keep this LAST. Asm/02 before v1.14 does not tell the linker about the
+; bytes a .align skips, so with nothing but ds after the .align above the
+; libraries were linked over the end of the last buffer. An emitted byte
+; here carries its own address and puts them after it.
+cmp_data_end:   db      0
+
             end     start

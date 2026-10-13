@@ -1062,4 +1062,10 @@ yr_iobuf:       ds      FCB_IOBUF_LEN
 yr_statbuf:     ds      DIRENT_LEN
 yr_block_buf:   ds      1024
 
+; Keep this LAST. Asm/02 before v1.14 does not tell the linker about the
+; bytes a .align skips, so with nothing but ds after the .align above the
+; libraries were linked over the end of the last buffer. An emitted byte
+; here carries its own address and puts them after it.
+yr_data_end:   db      0
+
             end     start

@@ -44,7 +44,9 @@ modules summarized here.
   `STAT` as an `MM/DD/YYYY HH:MM` column.
 - `CHKDSK` for filesystem consistency checking (lost/cross-linked/
   invalid clusters, size/chain-length mismatches, duplicate short names,
-  orphaned LFN entries) - check-only for now, no automatic repair yet.
+  orphaned LFN entries); `CHKDSK -f` repairs what MS-DOS `CHKDSK /F`
+  did - lost chains become `FILEnnnn.CHK` files or are freed, damaged
+  chains are ended, sizes are made to match.
 
 ### Shell
 
@@ -118,7 +120,7 @@ modules summarized here.
 | `TOUCH <file...>` | Update a file's last-write time to now |
 | `ATTRIB [+R\|-R] [+H\|-H] <path...>` | Show or set the read-only and hidden attributes |
 | `LABEL [drive:] [text\|-d]` | Show, set, or clear a volume label |
-| `CHKDSK [drive:]` | Check a volume for filesystem consistency errors |
+| `CHKDSK [drive:] [-f]` | Check a volume for filesystem consistency errors; `-f` repairs them |
 | `EDLIN <file>` | `edlin`-style line editor (list/insert/delete/search/replace/move/copy) |
 | `DATE [MM/DD/YYYY]` | Show or set the system date |
 | `TIME [HH:MM[:SS]]` | Show or set the system time |
@@ -147,7 +149,6 @@ into `test/bin/` via `make test`, kept separate from the real `/bin` set.
 
 ### Not yet supported
 
-- `CHKDSK -f` (automatic repair) - check-only for now.
 - Nested batch scripts (a `.bat` calling another `.bat`).
 - The system and archive attributes (`ATTRIB` handles read-only and
   hidden).
