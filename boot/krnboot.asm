@@ -1397,6 +1397,17 @@ boot_io_done:
             glo         r9
             str         rf
 
+            ; IO_NBREAD_TARGET: what _redir_teardown restores K_NBREAD's
+            ; slot to. There is nothing to detect as there is for
+            ; K_READ: the slot is linked as "LBR f_nbread" already, and
+            ; this records the same address.
+            mov         rf, IO_NBREAD_TARGET
+            ldi         high f_nbread
+            str         rf
+            inc         rf
+            ldi         low f_nbread
+            str         rf
+
             ; Phase 2: self-modify K_TYPE's/K_READ's own jump-table slots
             ; (kernel/kernel.asm, $011E/$0157) to a bare "LBR <real
             ; routine>", using the SAME value just computed into

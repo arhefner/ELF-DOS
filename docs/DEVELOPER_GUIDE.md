@@ -454,6 +454,29 @@ for a real keystroke.
   end-of-file signal, should use `read_line_ex` from the `lineedit.asm`
   library module instead (see "Library Modules" below).
 
+**`K_NBREAD`**
+Reads a single character from the console, giving up after a timeout
+instead of blocking forever. A direct passthrough to the BIOS's
+`f_nbread`.
+- **Args:** `RC` = the timeout, as a count of BIOS polling loops (0
+  means 65536). How long one loop takes depends on the BIOS and the
+  clock speed; on EDOS-mbios it is 12 machine cycles, which is 24
+  microseconds at 4 MHz. The timeout only covers the wait for a
+  character to start arriving.
+- **Returns:** `DF` = 0 with the character in `D` and what was left of
+  the count in `RC`, or `DF` = 1 on timeout with `RC` = 0.
+
+On timeout, do not rely on what is left in `RC`.
+
+Like `K_READ`, this follows input redirection. Reading from a
+redirected file returns each byte at once, leaving `RC` alone, and the
+end of the file - or input redirected from the null device - is reported
+as a timeout. So unlike `K_READ`, the end of the input can be told apart
+from a null byte.
+
+`f_nbread` is a BIOS extension - on a BIOS that does not provide it,
+this call may never return when reading the console.
+
 **`K_TTY`**
 A direct passthrough to the console's own single-character output
 routine, bypassing any output redirection. Rarely needed; `K_TYPE` is
@@ -484,6 +507,7 @@ big-endian address:
 | `K_MSG` | `$0121` | `$0122`-`$0123` |
 | `K_INMSG` | `$0124` | `$0125`-`$0126` |
 | `K_READ` | `$0151` | `$0152`-`$0153` |
+| `K_NBREAD` | `$0193` | `$0194`-`$0195` |
 
 Writing the two address bytes is the whole mechanism - leave the opcode
 byte alone:
@@ -527,6 +551,12 @@ Read those two words as "the console output and input routines as they
 are now", not "as the BIOS supplied them". Replacing the console means
 replacing what they name. Keep the original contents if the hook is ever
 to be removed.
+
+**`K_NBREAD` works the same way as `K_READ`,** with `IO_NBREAD_TARGET`
+as its word. A replacement console that takes over `K_READ` should take
+over `K_NBREAD` too, or timed reads will still go to the BIOS. Its
+routine must return `DF` = 0 with the character in `D`, or `DF` = 1 once
+the count in `RC` runs out.
 
 **A hook must preserve the registers the stock routine preserves.**
 `K_INMSG` saves and restores `RF`, `RC`, `R9`, `RA` and `RD`, and
@@ -635,6 +665,7 @@ Reads back the exit code of the last command that ran.
 | `DIR_STATE_LEN` | 9 | Size of the snapshot buffer `K_DIR_SAVE_STATE`/`K_DIR_RESTORE_STATE` use. |
 | `IO_TYPE_TARGET` | `PROG_BASE - 114` | Word naming the current console output routine. The kernel restores `K_TYPE` from it after every command, so a console hook must update it too; comparing it against `K_TYPE`'s address field also tells a hook whether output is redirected. |
 | `IO_READ_TARGET` | `PROG_BASE - 112` | The same, for console input and `K_READ`. |
+| `IO_NBREAD_TARGET` | `PROG_BASE - 117` | The same, for timed console input and `K_NBREAD`. |
 | `TERM_ROWS` | `$0191` | Byte: the console terminal's height in rows, 0 if unknown. Kept by the kernel, set by `TERMSIZE`. To lay out output, call `term_size` (`term.asm`), which falls back to `ROWS` and then 24; read the byte directly only where opening the environment file is too slow. |
 | `TERM_COLS` | `$0192` | Byte: the terminal's width in columns, 0 if unknown (assume 80). `read_line_ex` wraps long lines by it. Values over 255 are stored as 255. |
 | `BOOT_UNIT` | `PROG_BASE - 115` | Byte: the block device unit the system booted from, where C:-F: live. Set at boot. |

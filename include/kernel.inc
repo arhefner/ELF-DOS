@@ -353,8 +353,14 @@ IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: current console type
 
 ; BOOT_UNIT: the block device unit the system booted from, written by
 ; boot/krnboot.asm (restated from kernel_api.inc, where programs get it).
-; Now the lowest relay address, so the relay floor is PROG_BASE-115.
 BOOT_UNIT:          equ     PROG_BASE-115   ; byte: boot block device unit
+
+; IO_NBREAD_TARGET: the console's timed read routine, which is what
+; _redir_teardown restores K_NBREAD's slot to, the same way it restores
+; K_READ's from IO_READ_TARGET. Written by boot/krnboot.asm as f_nbread;
+; a console hook may change it along with the slot. Now the lowest relay
+; address, so the relay floor is PROG_BASE-117.
+IO_NBREAD_TARGET:   equ     PROG_BASE-117   ; word: current console timed read
 
 ; K_TYPE/K_READ: the jump-table addresses (kernel/kernel.asm), restated
 ; here (matching kernel_api.inc's own identical constants -- "restated,
@@ -377,6 +383,7 @@ BOOT_UNIT:          equ     PROG_BASE-115   ; byte: boot block device unit
 ; pre-release-only exception, not a precedent for future changes.
 K_TYPE:             equ     $011E
 K_READ:             equ     $0151
+K_NBREAD:           equ     $0193
 
 ; BATCH_ARGS_*: layout of the dynamic himem reservation K_BATCH_ARGS_RESERVE
 ; makes for %0-%9 batch-argument substitution (kernel/batch.asm) -- NOT

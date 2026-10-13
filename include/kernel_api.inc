@@ -145,6 +145,13 @@ IO_TYPE_TARGET:     equ     PROG_BASE-114   ; word: real f_utype/f_btype
 ; that act on the boot device (SYS, KSAVE) use it as their default unit.
 BOOT_UNIT:          equ     PROG_BASE-115   ; byte: boot block device unit
 
+; IO_NBREAD_TARGET: the console's timed read routine, restated from
+; kernel.inc for boot/krnboot.asm, which writes f_nbread here at boot.
+; The kernel restores K_NBREAD's slot from it after every command, so a
+; console hook that replaces K_NBREAD must update it too, as with
+; IO_READ_TARGET and K_READ.
+IO_NBREAD_TARGET:   equ     PROG_BASE-117   ; word: current console timed read
+
 ; K_GET_ERRORLEVEL: read the last command's exit code. A real jump-table
 ; call rather than a direct RUN_ERRORLEVEL read, unlike the shell's own
 ; internal access -- an ordinary program shouldn't bake a kernel/shell-
@@ -816,6 +823,31 @@ K_DRIVE_INVALIDATE: equ     $018E       ; -> kernel_drive_invalidate
 TERM_ROWS:          equ     $0191       ; byte: terminal rows, 0=unknown
 TERM_COLS:          equ     $0192       ; byte: terminal columns, 0=unknown
 
+; K_NBREAD: read a single character from the console, giving up after a
+; timeout instead of blocking forever the way K_READ does. On the
+; console this goes straight to the BIOS's f_nbread, so call it, never
+; jump to it.
+;   Args:    RC = timeout, as a count of BIOS polling loops (0 = 65536).
+;            The length of one loop is up to the BIOS and the clock
+;            speed; on EDOS-mbios it is 12 machine cycles, so 24 us at
+;            4 MHz. The timeout only covers the wait for a character to
+;            start arriving.
+;   Returns: DF = 0, D = the character, RC = what was left of the count
+;            DF = 1 on timeout; do not rely on RC
+; Echoes the character if the BIOS's echo flag is set, same as f_read.
+;
+; Follows input redirection the same way K_READ does: kernel/redir.asm
+; repatches this slot per command and restores it from IO_NBREAD_TARGET
+; afterward. While input comes from a file each call returns the next
+; byte at once, with RC untouched, and the end of the file (or the NUL
+; device) is a timeout -- so unlike K_READ, the end of the input can be
+; told apart from a zero byte.
+;
+; f_nbread is an extension that not every Elf/OS-compatible BIOS has. On
+; one without it, this call may never return or may return garbage, and
+; there is no way to detect that from here.
+K_NBREAD:           equ     $0193       ; -> f_nbread
+
 ; GLOB_BUF_LEN REMOVED along with K_GLOB_RESERVE above (dead code,
 ; 2026-08-26) -- its only use was sizing that reservation.
 
@@ -887,7 +919,7 @@ PT_ENTRY_LEN:   equ     16          ; bytes between successive MBR
                                     ; PT_OFFSET + i*PT_ENTRY_LEN
 PT_LBA_OFF:     equ     8           ; LBA start within entry (4 bytes, LE)
 
-; next free jump-table slot address: $0193 (after the TERM_ROWS/TERM_COLS data bytes)
+; next free jump-table slot address: $0196 (after K_NBREAD)
 ;
 ; This comment has been stale in BOTH directions before ($0179 until
 ; 2026-07-27, then $0197 until 2026-09-09) while kernel.asm was right

@@ -341,7 +341,15 @@ k_drive_invalidate: lbr kernel_drive_invalidate ; $018E
 ; See kernel_api.inc's own TERM_ROWS comment.
 term_rows:      db      0                   ; $0191: TERM_ROWS
 term_cols:      db      0                   ; $0192: TERM_COLS
-                ; next free jump-table address: $0193
+
+; K_NBREAD: read a console character, giving up after a timeout -- see
+; kernel_api.inc's own K_NBREAD comment for the contract. Goes to the
+; BIOS here, but like K_READ's slot the operand is rewritten at runtime:
+; kernel/redir.asm points it at its file-reading routine while input is
+; redirected and restores it from IO_NBREAD_TARGET afterward.
+k_nbread:       lbr     f_nbread            ; $0193 -- repatched by
+                                            ; kernel/redir.asm
+                ; next free jump-table address: $0196
 
 ;------------------------------------------------------------------
 ; kernel_init: the original boot sequence (formerly "kernel_main"

@@ -32,6 +32,10 @@ f_setbd:    equ     $FF2D       ; detect/set the console baud rate
 f_type:     equ     $FF03       ; print the character in D
 f_tty:      equ     $FF4E       ; print the character in D
 f_read:     equ     $FF06       ; wait for a key; D = character
+f_nbread:   equ     $FF84       ; wait for a key until the count in RC
+                                ;  runs out; DF = 0 and D = character,
+                                ;  or DF = 1 on timeout. An extension:
+                                ;  a BIOS without it may not return
 f_msg:      equ     $FF09       ; print the NUL-ended string at RF
 f_inmsg:    equ     $FF66       ; print the NUL-ended string that
                                 ;  follows the CALL in the code

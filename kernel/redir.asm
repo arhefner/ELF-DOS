@@ -105,6 +105,7 @@ REDIR_RESERVE_LEN: equ  FCB_LEN + SECTOR_SIZE
             extrn   _is_nul_device
             extrn   _redir_close_out_if_open
             extrn   _patch_io_vector
+            extrn   _patch_read_vectors
             extrn   _type_to_file
             extrn   _type_discard
             extrn   _read_from_file
@@ -498,6 +499,33 @@ rcoo_clear:
             endp
 
 ; ----------------------------------------------------------------
+; _patch_read_vectors: point both of the console input slots, K_READ and
+; K_NBREAD, at the same new target. _redir_setup uses this because one
+; routine serves both while input is redirected: _read_from_file and
+; _read_eof_immediate return the byte in D for K_READ and also DF = 0/1
+; for K_NBREAD. _redir_teardown does not, since the two slots go back to
+; different console routines.
+; Args:    RB = new target address
+; Returns: nothing
+; Modifies: RF, D
+; ----------------------------------------------------------------
+            proc    _patch_read_vectors
+
+            ldi     high (K_NBREAD+1)
+            phi     rf
+            ldi     low (K_NBREAD+1)
+            plo     rf                  ; RF = &K_NBREAD's slot operand
+            call    _patch_io_vector
+
+            ldi     high (K_READ+1)
+            phi     rf
+            ldi     low (K_READ+1)
+            plo     rf                  ; RF = &K_READ's slot operand
+            lbr     _patch_io_vector    ; tail call
+
+            endp
+
+; ----------------------------------------------------------------
 ; _redir_setup: open whichever of RUN_REDIR_OUT/RUN_REDIR_IN the
 ; shell's tokenizer set, right before run_loop runs the resolved
 ; command. A no-op (DF=0) if neither is set -- the common case, only
@@ -676,15 +704,11 @@ rs_in_single:
             ; _read_from_file -- from here on, every "call K_READ"
             ; reads straight from this redirect file, no runtime
             ; flag-check.
-            ldi     high (K_READ+1)
-            phi     rf
-            ldi     low (K_READ+1)
-            plo     rf                  ; RF = &K_READ's slot operand
             ldi     high _read_from_file
             phi     rb
             ldi     low _read_from_file
             plo     rb                  ; RB = new target
-            call    _patch_io_vector
+            call    _patch_read_vectors ; K_READ and K_NBREAD both
             lbr     rs_ok
 
 rs_in_dual:
@@ -759,15 +783,11 @@ rs_in_dual:
             str     rf
 
             ; PHASE 2: same K_READ slot repatch as rs_in_single above
-            ldi     high (K_READ+1)
-            phi     rf
-            ldi     low (K_READ+1)
-            plo     rf
             ldi     high _read_from_file
             phi     rb
             ldi     low _read_from_file
             plo     rb
-            call    _patch_io_vector
+            call    _patch_read_vectors
             lbr     rs_ok
 
 rs_in_isnull:
@@ -779,15 +799,11 @@ rs_in_isnull:
             str     rf
 
             ; PHASE 2: repatch K_READ's slot to _read_eof_immediate
-            ldi     high (K_READ+1)
-            phi     rf
-            ldi     low (K_READ+1)
-            plo     rf
             ldi     high _read_eof_immediate
             phi     rb
             ldi     low _read_eof_immediate
             plo     rb
-            call    _patch_io_vector
+            call    _patch_read_vectors
             lbr     rs_ok
 
 rs_err_undo_reserve:
@@ -906,6 +922,17 @@ rt_release_done:
             ldi     high (K_TYPE+1)
             phi     rf
             ldi     low (K_TYPE+1)
+            plo     rf
+            call    _patch_io_vector
+
+            mov     rf, IO_NBREAD_TARGET
+            lda     rf
+            phi     rb
+            ldn     rf
+            plo     rb                  ; RB = the real NBREAD routine
+            ldi     high (K_NBREAD+1)
+            phi     rf
+            ldi     low (K_NBREAD+1)
             plo     rf
             call    _patch_io_vector
 
@@ -1175,9 +1202,16 @@ kim_done:
 ; bug caution as _type_to_file above and the old _redir_read this
 ; replaces.
 ;
+; Also K_NBREAD's target while input is redirected, which is why DF is
+; returned: clear with a byte, set at EOF or on an error, which K_NBREAD
+; callers see as a timeout. K_READ callers ignore DF, as f_read gives it
+; no meaning. RC is preserved, so the K_NBREAD timeout count is ignored
+; and comes back untouched.
+;
 ; Args:    none
 ; Returns: D = the character read (0 at EOF/error), matching K_READ's
 ;          existing, unchanged "D = char in" contract
+;          DF = 0 with a character, 1 at EOF/error
 ; ----------------------------------------------------------------
             proc    _read_from_file
 
@@ -1207,6 +1241,9 @@ kim_done:
             lbr     rff_popret
 
 rff_eof:
+            smi     0                   ; DF = 1: K_NBREAD's timeout (the
+                                        ; 0-byte path arrives with it
+                                        ; clear); nothing below changes it
             ldi     0
             plo     r7                  ; stash "0" the same way the
                                         ; success path stashes its real
@@ -1227,13 +1264,15 @@ rff_popret:
 ; convention). Reached ONLY via K_READ's own self-modified slot while
 ; input is redirected to the NUL device -- matches MS-DOS's own
 ; "reading from NUL returns EOF immediately" convention. Zero scratch
-; use -- trivially safe, no register protection needed.
+; use -- trivially safe, no register protection needed. Also K_NBREAD's
+; target for the NUL device, so DF is returned set, as its timeout.
 ; Args:    none
-; Returns: D = 0
+; Returns: D = 0, DF = 1
 ; ----------------------------------------------------------------
             proc    _read_eof_immediate
 
             ldi     0
+            smi     0                   ; DF = 1, D still 0
             rtn
 
             endp
