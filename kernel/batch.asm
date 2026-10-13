@@ -92,6 +92,8 @@
             extrn   batch_mod_reserve_size
             extrn   batch_args_reserved
             extrn   batch_args_empty
+            extrn   bst_path
+            extrn   bg_label_arg
 
 ; same-file cross-proc CODE references (required even within the same
 ; file -- see CLAUDE.md gotcha #6)
@@ -199,8 +201,7 @@ bst_reject:                             ; D = the code already
             stc                         ; SMI 0: DF=1, D unchanged
             rtn
 
-bst_path:      dw      0           ; local to this proc only -- see
-                                    ; header comment above
+; bst_path is in kernel/batch_data.asm: this code may be in ROM.
 
             endp
 
@@ -411,7 +412,7 @@ bg_disp_inactive:
             stc
             rtn
 
-bg_label_arg:  dw      0           ; local to this proc only
+; bg_label_arg is in kernel/batch_data.asm: this code may be in ROM.
 
             endp
 

@@ -182,6 +182,11 @@
             extrn   fsk_off_lo
             extrn   fsk_fcb
             extrn   fsk_target
+            extrn   idd_name
+            extrn   sdn_parent
+            extrn   fst_buf
+            extrn   fsa_setmask
+            extrn   fsa_clearmask
 ; _shared_scratch (declared in a tiny standalone proc below, right
 ; before file_init -- storage placement in the final binary is
 ; determined by link order across all files, not by source position,
@@ -4041,7 +4046,7 @@ fch_err:
 idd_yes:    stc                         ; DF = 1, is "." or ".."
             rtn
 
-idd_name:   dw      0
+; (this routine's variable is in kernel/file_data.asm: the code may be in ROM)
 idd_dot:    db      ".",0
 idd_dotdot: db      "..",0
             endp
@@ -4131,7 +4136,7 @@ sdn_notfound:
             stc                         ; DF = 1, not found
             rtn
 
-sdn_parent: dw      0
+; (this routine's variable is in kernel/file_data.asm: the code may be in ROM)
 
             endp
 
@@ -5039,7 +5044,7 @@ fst_err:
             stc                         ; DF = 1, error
             rtn
 
-fst_buf:        dw      0
+; (this routine's variable is in kernel/file_data.asm: the code may be in ROM)
 
 ; ----------------------------------------------------------------
 ; file_setattr: change an existing directory entry's attribute byte --
@@ -5150,8 +5155,7 @@ fsa_err:
             stc                         ; DF = 1, error
             rtn
 
-fsa_setmask:    db      0
-fsa_clearmask:  db      0
+; (this routine's variable is in kernel/file_data.asm: the code may be in ROM)
 
 ; ----------------------------------------------------------------
 ; file_touch: update an existing directory entry's last-write date/time

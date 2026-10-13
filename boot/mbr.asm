@@ -106,8 +106,13 @@ mbr_main:   mov         rf,mbr_unit     ; save boot unit (mov clobbers D,
             ani         $1F
             str         rf
 
-            call        f_freemem       ; RF = address of highest RAM byte
-            mov         r2,rf           ; move stack pointer to top of RAM
+            ; Stack just below the bootstrap. Not at the BIOS's top of RAM
+            ; (f_freemem): if the BIOS has that wrong and it is in ROM,
+            ; the first call from here would never return. Memory from
+            ; the end of the volatile kernel up to KERN_LOAD is unused
+            ; until a program loads, and it must be RAM for the bootstrap
+            ; to load at all. krnboot moves the stack to its final place.
+            mov         r2,KERN_LOAD-1
 
             call        f_idereset      ; reset IDE/SD card subsystem
 

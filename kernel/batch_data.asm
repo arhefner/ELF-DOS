@@ -74,6 +74,13 @@ batch_args_empty:    db 0          ; a fixed, always-valid empty-string
                                     ; (but still in-batch) index, never
                                     ; at an unpopulated BATCH_ARGV slot
 
+; Variables of batch_start and batch_goto. Here rather than beside the
+; code because the code may be in ROM.
+bst_path:            dw 0          ; batch_start: caller's path pointer
+bg_label_arg:        dw 0          ; batch_goto: caller's label pointer
+
+                public  bst_path
+                public  bg_label_arg
                 public  batch_args_reserved
                 public  batch_args_empty
 

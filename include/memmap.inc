@@ -20,10 +20,14 @@
 ;
 ;   NVK_BASE .. NVK_TOP       NON-VOLATILE -- may be ROM
 ;       All executable kernel code. Never written after load, so it can
-;       be burned into ROM. On a ROM machine krnboot finds the signature
-;       already present and skips loading it; on a RAM-only machine the
-;       signature is absent and krnboot loads it from disk to the very
-;       same address.
+;       be burned into ROM. krnboot tests whether NVK_BASE can be
+;       written: if not (ROM) it requires the signature there and skips
+;       the load; if so (RAM) it loads the region from disk to the very
+;       same address, whatever was there. Nothing in this region may be
+;       written by the kernel itself -- a routine's variables belong in
+;       the volatile *_data.asm files, never beside its code. (Nine
+;       variables were found beside the code the first time a ROM
+;       kernel was tried, 2026-10-13.)
 ;
 ; Cross-references between the regions resolve normally because both
 ; are produced by a SINGLE link -- the volatile objects are listed

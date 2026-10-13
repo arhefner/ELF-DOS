@@ -61,6 +61,8 @@
             extrn   dir_lfn_ok
             extrn   dir_cur_lba
             extrn   dir_last_off
+            extrn   fmt83_base_fold
+            extrn   fmt83_ext_fold
             extrn   _dir_next_sector
             extrn   _cluster_to_lba
             extrn   _dir_fmt83
@@ -1131,11 +1133,8 @@ fmt83_null:
             str     rd                  ; null terminator
             rtn
 
-fmt83_base_fold:    db  0   ; local to this proc only -- $00 or $20,
-                            ; the base-name lowercase-fold mask (see
-                            ; this proc's own header comment)
-fmt83_ext_fold:     db  0   ; local to this proc only -- same, for the
-                            ; 3-character extension
+; fmt83_base_fold / fmt83_ext_fold are in kernel/dir_data.asm: this
+; code may be in ROM, so nothing it writes can live beside it.
 
 ;==================================================================
 ; _dir_proc_lfn: accumulate one LFN entry into dir_lfn buffer

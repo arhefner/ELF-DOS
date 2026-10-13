@@ -42,6 +42,14 @@ dir_lfn_ok:     db      0           ; non-zero if a valid LFN is ready
 dir_cur_lba:    ds      LBA_SIZE
 dir_last_off:   dw      0
 
+; _dir_fmt83's lowercase-fold masks ($00 or $20), one for the base
+; name and one for the extension. Here rather than beside that code
+; because the code may be in ROM.
+fmt83_base_fold: db     0
+fmt83_ext_fold:  db     0
+
+                public  fmt83_base_fold
+                public  fmt83_ext_fold
                 public  dir_clust
                 public  dir_sect
                 public  dir_eptr

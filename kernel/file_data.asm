@@ -214,4 +214,18 @@ fsk_target:         dw      0,0             ; 4 bytes, big-endian
                 public  fsk_fcb
                 public  fsk_target
 
+; Variables of single routines in kernel/file.asm. They are here rather
+; than beside the code because the code may be in ROM.
+idd_name:       dw      0           ; _is_dot_or_dotdot: name pointer
+sdn_parent:     dw      0           ; parent cluster stash
+fst_buf:        dw      0           ; file_stat: caller's buffer pointer
+fsa_setmask:    db      0           ; file_setattr: bits to set
+fsa_clearmask:  db      0           ; file_setattr: bits to clear
+
+                public  idd_name
+                public  sdn_parent
+                public  fst_buf
+                public  fsa_setmask
+                public  fsa_clearmask
+
             endp

@@ -133,6 +133,17 @@ boot_main:
             ani         $1F
             str         rf
 
+            ; The BIOS's last RAM address, taken now, before R7/R8 hold
+            ; anything, and kept in memory: it decides where the stack
+            ; goes once the volatile image is loaded (see below).
+            call        f_freemem
+            mov         rd,boot_ramtop
+            ghi         rf
+            str         rd
+            inc         rd
+            glo         rf
+            str         rd
+
             ; read kernel sector count from our own header
             ldi         CNT_ADDR.1
             phi         rf
@@ -165,118 +176,115 @@ boot_go:    ldi         6
                                         ; non-volatile image below
 
 ;--------------------------------------------------------------
-; Find the top of usable RAM and move the stack there.
+; Where does RAM end, and is the non-volatile kernel in ROM?
 ;
-; Done BEFORE loading the non-volatile image, deliberately. The MBR
-; leaves the stack at f_freemem's top of RAM, which on a RAM-only
-; machine can sit INSIDE the region we are about to load the
-; non-volatile kernel into -- loading it would then overwrite the very
-; stack the load loop's own call/return is using. Searching first and
-; moving the stack below NVK_BASE removes that overlap entirely.
+; NOTHING HERE MAY WRITE TO AN ADDRESS THAT COULD BE ROM, except the
+; single test of NVK_BASE below. The ROM may be an EEPROM, and an
+; EEPROM starts a write cycle on ANY write attempt, software-protected
+; or not; until that cycle ends (up to 10 ms) every read of the chip
+; returns status, not data. The BIOS is in the same chip, so the next
+; SCRT call or return would execute garbage and hang with no output.
+; (An earlier version searched for the top of RAM by writing to every
+; address down from NVK_BASE-1. On a 32K RAM + 32K EEPROM machine that
+; was 15,000 writes into the EEPROM, then a call.)
 ;
-; The highest RAM byte a program may use is the first RAM byte BELOW
-; NVK_BASE (the non-volatile kernel is ROM on a 32K/32K machine, or
-; loaded RAM on a RAM-only one -- either way it is off limits), so walk
-; down from there testing each address until one reads back what we
-; wrote. Two complementary patterns, because a single pattern can be
-; matched by chance by a ROM byte that happens to equal it. Every byte
-; tested is restored, so this is non-destructive.
+; So the top of RAM is whatever the BIOS reports (boot_ramtop, from
+; f_freemem at entry), and the one write test that remains is followed
+; by a delay, with no call in between.
+;
+; The test of NVK_BASE stays because a signature there proves nothing
+; while the region is RAM: RAM survives a reset (and, on some boards, a
+; power cycle), so the previous build's image would still be there with
+; a valid 'NVK', and running it under a freshly loaded jump table is a
+; wild jump. If NVK_BASE is writable it is loaded from disk, always.
+; Only a region that cannot be written is believed, and then only with
+; the right signature.
+;
+; RB = the BIOS's top of RAM throughout; no call is made until the
+; stack has been moved.
 ;--------------------------------------------------------------
-            mov         rf,NVK_BASE
-            dec         rf              ; first candidate, just below it
-
-boot_ram_try:
+            mov         rf,boot_ramtop
+            lda         rf
+            phi         rb
             ldn         rf
-            plo         r9              ; save the original byte
+            plo         rb              ; RB = BIOS's last RAM byte
+
+            mov         rf,NVK_BASE
+            ldn         rf
+            plo         r9              ; save whatever is there
             ldi         $A5
             str         rf
             ldn         rf
             xri         $A5
-            lbnz        boot_ram_next
-            ldi         $5A
-            str         rf
-            ldn         rf
-            xri         $5A
-            lbnz        boot_ram_next
-            glo         r9
-            str         rf              ; RAM: put the original byte back
-            lbr         boot_ram_found
-
-boot_ram_next:
-            glo         r9
-            str         rf              ; restore whatever was there
-            dec         rf
-            ; Refuse to search down into the kernel itself. Reaching
-            ; here means there is no usable RAM below NVK_BASE at all --
-            ; hang loudly rather than boot with a nonsense memory map.
-            ghi         rf
-            smi         high PROG_BASE
-            lbnf        ram_err
-            lbr         boot_ram_try
-
-boot_ram_found:
-            ; RF = highest usable RAM byte. Setting the stack here is
-            ; ALSO how that value reaches the kernel: kernel_init reads
-            ; R2 and derives mem_top from it (R2 - STACK_RESERVE_LEN),
-            ; so no fixed handoff address is needed. Switching stacks is
-            ; safe at this exact point -- boot_main was reached by a
-            ; branch, not a call, so no return address is pending on the
-            ; old stack, and SCRT balances every call made after this.
-            mov         r2,rf
-
-;--------------------------------------------------------------
-; Non-volatile kernel: already resident, or load it?
-;
-; On a ROM machine the signature is burned in at NVK_BASE and there is
-; nothing to do. On a RAM-only machine it is absent, and we load the
-; same image to the same address from disk -- so one disk image boots
-; both. R7 already points at the first non-volatile sector.
-;--------------------------------------------------------------
-            ; Is NVK_BASE writable? That, not the signature, is the
-            ; question that matters.
-            ;
-            ; A signature only proves SOME non-volatile kernel is here,
-            ; never that it is THIS one. RAM survives a warm reset, so
-            ; after any reset the previous build's image is still sitting
-            ; at NVK_BASE with a perfectly valid 'NVK' and version --
-            ; and krnboot would skip the disk load and run it, while the
-            ; VOLATILE half (jump table included) had just been reloaded
-            ; fresh from disk. New table, old code, different layout:
-            ; the first jump through the table lands in the middle of
-            ; some unrelated routine. That is a wild jump, and on this
-            ; hardware a wild jump writes to arbitrary LBAs and destroys
-            ; the disk. It cost three cards before Tony spotted it.
-            ;
-            ; So: if the region is RAM its contents cannot be trusted,
-            ; whatever they say, and we always load from disk. Only a
-            ; genuinely unwritable region (ROM) can vouch for itself,
-            ; and there the signature is meaningful. Two complementary
-            ; patterns, since one could match a ROM byte by chance; the
-            ; original byte is restored either way.
-            mov         rf,NVK_BASE
-            ldn         rf
-            plo         r9                  ; save whatever is there
-            ldi         $A5
-            str         rf
-            ldn         rf
-            xri         $A5
-            lbnz        boot_nv_is_rom      ; write did not take -> ROM
+            lbnz        boot_nv_is_rom  ; write did not take -> ROM
             ldi         $5A
             str         rf
             ldn         rf
             xri         $5A
             lbnz        boot_nv_is_rom
             glo         r9
-            str         rf                  ; RAM: put the byte back and
-            lbr         boot_load_nv        ; load unconditionally
+            str         rf              ; RAM: put the byte back
+
+            ; NVK_BASE is RAM. The stack goes at the BIOS's top of RAM,
+            ; or just below NVK_BASE if that is lower: the image about to
+            ; be loaded must not land on the stack the load is using.
+            ; kernel_init takes mem_top from R2, so this is also how the
+            ; top of program memory reaches the kernel. Moving the stack
+            ; is safe here: boot_main was reached by a branch, so no
+            ; return address is pending on the old one.
+            glo         rb
+            smi         low NVK_BASE
+            ghi         rb
+            smbi        high NVK_BASE
+            lbnf        boot_ram_set    ; BIOS's top is below NVK_BASE
+            mov         rb,NVK_BASE-1
+boot_ram_set:
+            ghi         rb
+            smi         high PROG_BASE
+            lbnf        ram_err         ; no room for anything
+            mov         r2,rb
+            lbr         boot_load_nv
 
 boot_nv_is_rom:
             glo         r9
-            str         rf                  ; harmless on ROM; correct if
-                                            ; the first pattern did take
+            str         rf              ; no effect on ROM; restores the
+                                        ; byte if the first pattern took
+
+            ; The BIOS's top of RAM must be below the ROM. If it is not,
+            ; the BIOS measured RAM with a different memory map than the
+            ; one now in effect, and a stack placed there would be in
+            ; ROM. Use the load buffer as a stack for the message.
+            glo         rb
+            smi         low NVK_BASE
+            ghi         rb
+            smbi        high NVK_BASE
+            lbnf        boot_rom_ok
+            mov         rb,boot_scratch+511
+            ldi         1
+            lskp
+boot_rom_ok:
+            ldi         0
+            plo         r9              ; R9.0 = 1: BIOS's RAM top is wrong
+            mov         r2,rb
+
+            ; Wait out the write cycle the test may have started, before
+            ; anything is fetched from the BIOS: about 27,000 machine
+            ; cycles, 54 ms at 4 MHz and 27 ms at 8 MHz.
+            ldi         $10
+            phi         rc
+boot_wc_wait:
+            dec         rc
+            ghi         rc
+            lbnz        boot_wc_wait
+
+            glo         r9
+            lbnz        rom_ram_err
+            ghi         r2
+            smi         high PROG_BASE
+            lbnf        ram_err
             call        check_nvk_sig
-            lbz         boot_init0          ; genuine ROM copy, right version
-            lbr         load_err            ; ROM present but not ours
+            lbz         boot_init0      ; genuine ROM copy, right version
+            lbr         rom_sig_err     ; ROM there, but not this kernel
 
 boot_load_nv:
             mov         rf,NV_CNT_ADDR
@@ -399,6 +407,16 @@ ls_done:    rtn
 ;--------------------------------------------------------------
 ram_err:    call        f_inmsg
             db          "No RAM below the non-volatile kernel",13,10,0
+            lbr         load_halt
+
+rom_ram_err:
+            call        f_inmsg
+            db          "The kernel is in ROM, but the BIOS reports RAM at its address",13,10,0
+            lbr         load_halt
+
+rom_sig_err:
+            call        f_inmsg
+            db          "The ROM does not hold this kernel",13,10,0
             lbr         load_halt
 
 nv_err:     call        f_inmsg
@@ -1530,6 +1548,7 @@ boot_ver_buf:       ds      6           ; decimal scratch (max "65535"+null)
 ; reused for both the type and read fallback checks.
 boot_re_shifted:    db      0
 boot_unit:          db      0           ; unit booted from (R8.1 at entry)
+boot_ramtop:        dw      0           ; f_freemem at entry: last RAM byte
 
 boot_scratch:       ds      512
 

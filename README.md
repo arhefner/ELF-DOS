@@ -297,6 +297,22 @@ alone. Putting the image in ROM is what frees the RAM it would otherwise
 occupy. The address moves whenever `NVK_BASE` is re-tuned, which is why it
 is reported from the build rather than written down here.
 
+Two things must hold on a machine that runs the kernel from ROM:
+
+- The ROM and the card must be the same build. `krnboot` checks only the
+  `NVK` signature, and the jump table loaded from the card points into the
+  ROM by address, so after any kernel rebuild burn the new `kernel-rom` too.
+- The BIOS's top of RAM (`f_freemem`) must be below the ROM. `krnboot` puts
+  the stack there. If the BIOS measured RAM under a different memory map
+  (for example before a RAM overlay was switched off), correct its value
+  first; otherwise the boot stops with "The kernel is in ROM, but the BIOS
+  reports RAM at its address".
+
+`krnboot` makes one test write to `NVK_BASE` to tell RAM from ROM. On an
+EEPROM that starts a write cycle even when the chip is write-protected, so
+`krnboot` waits about 50 ms afterwards. Keep the EEPROM software
+write-protected, so the test cannot change it.
+
 `bin/` (built via `make progs`) isn't installed by the Makefile - copy its
 whole contents onto the FAT16 partition's `/bin` yourself (e.g. with
 `mtools`'s `mcopy`). Every file in `bin/` is already bare-named (no
