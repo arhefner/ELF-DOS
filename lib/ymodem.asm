@@ -498,21 +498,23 @@ ypb_bitbang:
             endp
 
 ;------------------------------------------------------------------
-; ym_getbyte_timeout: wait for one byte, giving up after RD poll
-; iterations if none arrives -- UART mode only; see this file's own
-; header comment and the project session notes for why bit-bang mode
-; has no non-blocking "is a byte waiting" primitive at all (f_btest
-; is a BREAK-condition detector, not a data-ready test), and CONSOLE
-; mode has no timeout primitive at all either (K_READ is a plain
-; blocking read, whatever device it's currently routed to). In both of
-; those modes this just blocks unconditionally, same as ym_getbyte --
-; not a regression versus mr.asm/ms.asm, which have never had timeout
-; protection in any mode.
-; Args:    RD = poll budget (iterations, UART mode only -- ignored in
-;          the other two modes)
-; Returns: DF = 0 with D = byte on success; DF = 1 if the poll budget
-;          was exhausted with nothing received (UART mode only -- the
-;          other two modes always return DF = 0 eventually)
+; ym_getbyte_timeout: wait for one byte, giving up if none arrives.
+;
+; UART mode polls f_utest RD times. CONSOLE mode calls K_NBREAD with
+; its longest timeout (RC = 0, 65536 BIOS polling loops -- about 1.6
+; seconds on EDOS-mbios at 4 MHz, 3.5 at 1.79 MHz) and ignores RD, so
+; the callers' retry loops run in that mode too: YR repeats its 'C'
+; until the sender starts instead of sending one and blocking forever.
+; K_NBREAD needs the BIOS's f_nbread, an extension; on a BIOS without
+; it console mode may hang here, and -u is the way round that.
+;
+; Bit-bang mode (-b) still blocks: it has no "is a byte waiting" test
+; (f_btest detects BREAK, not data), and f_nbread reads the CONSOLE
+; device, which need not be the bit-banged port.
+;
+; Args:    RD = poll budget (iterations, UART mode only)
+; Returns: DF = 0 with D = byte on success; DF = 1 on timeout (never in
+;          bit-bang mode)
 ; Modifies: RD (and D, DF)
 ;------------------------------------------------------------------
             proc    ym_getbyte_timeout
@@ -524,8 +526,17 @@ ypb_bitbang:
             xri     YM_IO_UART
             lbz     ygbt_uart
 
-            call    K_READ
-            clc
+            push    rc                  ; callers do not expect RC to
+                                        ; change here
+            ldi     0
+            phi     rc
+            plo     rc                  ; RC = 0: the longest timeout
+            call    K_NBREAD            ; DF = 0, D = byte / DF = 1
+            plo     rd                  ; keep the byte: pop ends in a
+                                        ; load, which replaces D but
+                                        ; leaves DF alone
+            pop     rc
+            glo     rd
             rtn
 
 ygbt_uart:

@@ -29,10 +29,10 @@ YM_C:       equ     $43     ; 'C' -- CRC-mode probe, sent by the receiver
 YM_BLKLEN_128:  equ     128
 YM_BLKLEN_1024: equ     1024
 
-; Retry/timeout policy -- see lib/ymodem.asm's own header comment for
-; why these can only be real, polled timeouts in UART (-u) mode; bit-
-; bang (-b) mode has no non-blocking "byte waiting" primitive at all,
-; so ym_getbyte_timeout just blocks there regardless of these budgets.
+; Retry/timeout policy. YM_POLL_BUDGET applies in UART (-u) mode only.
+; Console mode (no flag) waits one K_NBREAD maximum per attempt instead,
+; and bit-bang (-b) mode has no timeout at all -- see ym_getbyte_timeout
+; in lib/ymodem.asm.
 ; YM_POLL_BUDGET is an iteration count, not a calibrated wall-clock
 ; time.
 ;
