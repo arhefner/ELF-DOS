@@ -179,8 +179,12 @@ either case.
 of the drive that describe the file system. **`FORMAT W: -S`** (surface
 scan) first reads every sector of the drive, showing its progress as a
 percentage, and sets aside any part that cannot be read (reported as
-`bytes in bad sectors`). That can take hours on a large partition, and is
-rarely worth it on flash cards, which seldom report a read error. This is
+`bytes in bad sectors`). It is slow: about 8 seconds per megabyte on an
+SD card with a 4 MHz clock, so roughly 4 minutes for 32 MB, over an hour
+for 512 MB, and about 9 hours for the largest partition (4,095 MB). A
+slower clock takes longer in proportion - more than twice as long at
+1.79 MHz. It is rarely worth it on flash cards, which seldom report a
+read error. This is
 the reverse of MS-DOS, where the scan was the default and `/Q` skipped
 it. `-Q` is still accepted, and does nothing unless it comes after `-S`.
 
@@ -442,7 +446,7 @@ In the tables below, an argument in `<angle brackets>` is required; one in
 | `MOUNT` | `MOUNT [unit partition letter:]` | With no arguments, lists the drives in use. Otherwise attaches a partition of block device `unit` (0-7, always required) to a drive letter. Partition `0` means "the whole device, no partition table," for floppies. See "Drives" above. |
 | `UMOUNT` | `UMOUNT <letter:>` | Detaches a drive letter. The boot drive cannot be detached. |
 | `FDISK` | `FDISK [unit]` | Creates, deletes and lists the partitions on block device `unit` (0-7, default: the unit the system booted from), from a menu. See "Partitioning a Disk" above. |
-| `FORMAT` | `FORMAT <letter:> [-S] [-V:label]` | Erases a mounted drive and writes a new, empty FAT16 file system on it. `-S` first reads every sector and sets aside any that fail (slow); `-V:label` sets the volume label without asking. See "Formatting a Drive" above. |
+| `FORMAT` | `FORMAT <letter:> [-S] [-V:label]` | Erases a mounted drive and writes a new, empty FAT16 file system on it. `-S` first reads every sector and sets aside any that fail (slow: about 8 seconds per megabyte at 4 MHz); `-V:label` sets the volume label without asking. See "Formatting a Drive" above. |
 | `CHKDSK` | `CHKDSK [X:] [-f]` | Checks a drive for file system problems - lost clusters, damaged cluster chains, files whose size does not match their data, and damaged directory entries - and prints a summary. Without `-f` nothing is changed. With `-f` it repairs them as MS-DOS `CHKDSK /F` did: it asks `Convert lost chains to files (Y/N)?` and either saves each lost chain as `FILE0000.CHK`, `FILE0001.CHK`, ... in the root directory (names are upper case) or frees the space; ends a damaged chain at its last good cluster; sets a file's size to what its chain holds; and corrects wrong `.` and `..` entries. Cross-linked files are reported but not repaired - copy each one, then delete the originals. Do not redirect the output of `CHKDSK -f`. |
 
 ### Working with files
