@@ -275,7 +275,8 @@ kernel needs, and read back everything they write.
 The kernel links as two regions (see `include/memmap.inc`): a small volatile
 piece that must be RAM, and a larger non-volatile piece that is all executable
 code and is never written after load - so it can be burned into ROM. Every
-build writes that piece out on its own as `kernel-rom.bin`, and:
+build writes that piece out on its own as `kernel-rom.bin`, and as
+`kernel-rom.hex` (Intel HEX, already addressed at `NVK_BASE`), and:
 
 ```
 make rom                           # where to burn it, and headroom left

@@ -514,8 +514,13 @@ $(KERNEL_BIN): $(KOBJ)
 # reports the address to burn it at.
 KVOL_BIN    = kvol.bin
 ROM_BIN     = kernel-rom.bin
+# Written by split_kernel.py next to ROM_BIN: the same bytes as Intel HEX,
+# addressed at NVK_BASE.
+ROM_HEX     = kernel-rom.hex
 
-$(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
+# The tool is a prerequisite so that a change to what it writes (such as
+# the hex file) takes effect without a clean build.
+$(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN) tools/split_kernel.py
 	python3 tools/split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(ROM_BIN) \
 		$(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
 
@@ -679,7 +684,7 @@ sdk:
 #   elfdos-<ver>-windows.zip      Format-ElfDosDisk.ps1,
 #                                 Install-ElfDos.ps1, elfdos-sdk-<ver>.zip
 #
-#   both: kernel-full.bin, kernel-rom.bin, mbr.bin, bin/ (everything
+#   both: kernel-full.bin, kernel-rom.bin, kernel-rom.hex, mbr.bin, bin/ (everything
 #         that goes in the card's /bin), docs/ (User's and Developer's
 #         Guides, .md and .pdf), LICENSE, MANIFEST.txt, and that
 #         platform's installation guide (docs/INSTALL-linux.md or
@@ -711,7 +716,7 @@ release: all mbr progs
 	mkdir -p $(REL_ROOT)/docs $(REL_STAGE)/sdk
 	tar -xzf $(SDK_TGZ) -C $(REL_STAGE)/sdk
 	python3 -c "import shutil; shutil.make_archive('$(basename $(SDK_ZIP))', 'zip', '$(REL_STAGE)/sdk', '$(SDK_NAME)')"
-	cp $(FULL_BIN) $(ROM_BIN) $(MBR_BIN) LICENSE $(REL_ROOT)/
+	cp $(FULL_BIN) $(ROM_BIN) $(ROM_HEX) $(MBR_BIN) LICENSE $(REL_ROOT)/
 	cp -r bin $(REL_ROOT)/
 	cp $(REL_DOCS) $(REL_ROOT)/docs/
 	@echo "ELF-DOS $(ELFDOS_VER) release"                             >  $(REL_ROOT)/MANIFEST.txt
@@ -722,6 +727,7 @@ release: all mbr progs
 	@echo "kernel-full.bin  bootstrap + kernel, written to the card from LBA 1" >> $(REL_ROOT)/MANIFEST.txt
 	@echo "mbr.bin          boot code for sector 0"                  >> $(REL_ROOT)/MANIFEST.txt
 	@echo "kernel-rom.bin   the ROM-able half of the kernel (optional)" >> $(REL_ROOT)/MANIFEST.txt
+	@echo "kernel-rom.hex   the same, as Intel HEX with its address"  >> $(REL_ROOT)/MANIFEST.txt
 	@echo "bin/             copy its contents to /bin on the card"   >> $(REL_ROOT)/MANIFEST.txt
 	@echo "docs/            User's Guide and Developer's Guide"      >> $(REL_ROOT)/MANIFEST.txt
 	@echo "INSTALL.md       how to put ELF-DOS on a card -- start here" >> $(REL_ROOT)/MANIFEST.txt
@@ -745,7 +751,7 @@ clean:
 	      test/*.prg test/*.lst test/*.build test/*.lkb \
 	      lib/*.prg lib/*.lst \
 	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN) \
-	      $(KVOL_BIN) $(ROM_BIN) ksym.sym \
+	      $(KVOL_BIN) $(ROM_BIN) $(ROM_HEX) ksym.sym \
 	      $(SDK_OUT)
 	rm -rf test/bin
 	rm -rf bin

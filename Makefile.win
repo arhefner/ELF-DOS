@@ -642,8 +642,13 @@ $(KERNEL_BIN): $(KOBJ)
 # Makefile.win rom" reports the address to burn it at.
 KVOL_BIN    = kvol.bin
 ROM_BIN     = kernel-rom.bin
+# Written by split_kernel.py next to ROM_BIN: the same bytes as Intel HEX,
+# addressed at NVK_BASE.
+ROM_HEX     = kernel-rom.hex
 
-$(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN)
+# The tool is a prerequisite so that a change to what it writes (such as
+# the hex file) takes effect without a clean build.
+$(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN) tools\split_kernel.py
 	py tools\split_kernel.py $(KERNEL_BIN) $(KVOL_BIN) $(ROM_BIN) $(KRNBOOT_BIN) $(FULL_BIN) $(KOBJ)
 
 #------------------------------------------------------------------
@@ -724,7 +729,7 @@ clean:
 	-del /F /Q test\*.prg test\*.lst test\*.build test\*.lkb
 	-del /F /Q lib\*.prg lib\*.lst
 	-del /F /Q $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN)
-	-del /F /Q $(KVOL_BIN) $(ROM_BIN) ksym.sym
+	-del /F /Q $(KVOL_BIN) $(ROM_BIN) $(ROM_HEX) ksym.sym
 	-if exist dist rmdir /S /Q dist
 	-if exist bin rmdir /S /Q bin
 	-if exist test\bin rmdir /S /Q test\bin

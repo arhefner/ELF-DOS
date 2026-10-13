@@ -21,7 +21,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from split_kernel import eval_equ, read_equs, repo_root, sectors  # noqa: E402
+from split_kernel import eval_equ, hex_name, read_equs, repo_root, sectors  # noqa: E402
 
 
 def main():
@@ -51,6 +51,8 @@ def main():
     print()
     print("ROM image (optional -- the same code is on the card too)")
     print(f"  file      : {rom_path}")
+    print(f"  hex file  : {hex_name(rom_path)}  (Intel HEX, the same bytes "
+          f"with the address built in)")
     print(f"  BURN AT   : ${nvk_base:04X}")
     print(f"  occupies  : ${nvk_base:04X} - ${end:04X}"
           f"  ({len(rom)} bytes, {sectors(len(rom))} sectors)")

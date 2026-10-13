@@ -19,6 +19,7 @@ There are three steps:
 | `kernel-full.bin` | The kernel and its bootstrap |
 | `bin/` | Every ELF-DOS command, including the shell |
 | `kernel-rom.bin` | The part of the kernel that can go in ROM (optional) |
+| `kernel-rom.hex` | The same, as an Intel HEX file with its address built in |
 | `docs/` | The User's Guide and the Developer's Guide |
 | `elfdos-sdk-*.zip` | Headers and libraries for writing your own programs |
 | `MANIFEST.txt` | Version, and the address for `kernel-rom.bin` |
@@ -150,6 +151,10 @@ runs. If you burn it into ROM at the address given in `MANIFEST.txt`,
 ELF-DOS finds it there and does not load it from the card, which leaves
 that much more RAM free. The card is prepared the same way in either
 case, and a computer without the ROM boots normally.
+
+`kernel-rom.hex` holds the same bytes as an Intel HEX file. Its records
+already carry that address, so use it if your programmer or monitor takes
+hex files.
 
 The ROM must match the kernel on the card. Burn a new one whenever you
 install a new kernel.

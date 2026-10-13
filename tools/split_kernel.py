@@ -14,6 +14,9 @@ gap between them. This tool writes the two halves out separately:
 
     kvol.bin   the volatile image
     knv.bin    the non-volatile image
+    knv.hex    the non-volatile image again, as Intel HEX addressed at
+               NVK_BASE (same name as knv.bin with a .hex extension),
+               for ROM programmers and monitors that take a hex file
 
 Why a marker symbol instead of trimming zeros: the volatile region can
 legitimately END in zero bytes (a field initialized to zero, or a "ds"
@@ -89,6 +92,22 @@ def link_symbols(objs):
         return syms
 
 
+def intel_hex(data, base, per_line=16):
+    """Return data as Intel HEX text, its first byte at address base."""
+    def rec(addr, rtype, payload):
+        body = bytes([len(payload), (addr >> 8) & 0xFF, addr & 0xFF, rtype])
+        body += payload
+        return ":" + (body + bytes([-sum(body) & 0xFF])).hex().upper()
+    lines = [rec(base + i, 0, data[i:i + per_line])
+             for i in range(0, len(data), per_line)]
+    lines.append(rec(0, 1, b""))
+    return "\n".join(lines) + "\n"
+
+
+def hex_name(bin_path):
+    return os.path.splitext(bin_path)[0] + ".hex"
+
+
 def sectors(n):
     return (n + SECTOR_SIZE - 1) // SECTOR_SIZE
 
@@ -153,11 +172,18 @@ def main():
 
     open(vol_out, "wb").write(vol)
     open(nv_out, "wb").write(nv)
+    # The same bytes as Intel HEX. The binary carries no address, so
+    # whoever burns it has to supply NVK_BASE by hand; the hex file
+    # carries it in every record.
+    nv_hex = hex_name(nv_out)
+    open(nv_hex, "w", newline="\n").write(intel_hex(nv, nvk_base))
 
     print(f"split_kernel: volatile {base:04x}-{vol_end:04x} "
           f"{len(vol):>6} bytes ({sectors(len(vol)):>2} sectors) -> {vol_out}")
     print(f"split_kernel: non-vol  {nvk_base:04x}-{nv_end:04x} "
           f"{len(nv):>6} bytes ({sectors(len(nv)):>2} sectors) -> {nv_out}")
+    print(f"split_kernel: non-vol  as Intel HEX at {nvk_base:04x}"
+          f"{'':>21} -> {nv_hex}")
     print(f"split_kernel: gap between regions: "
           f"{nvk_base - vol_end - 1} bytes (not written to either image)")
 
