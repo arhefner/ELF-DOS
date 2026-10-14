@@ -286,8 +286,8 @@ reports the address (`install`/`update` print the same thing afterwards):
 
 ```
   BURN AT   : $BC40
-  occupies  : $BC40 - $EF97  (13144 bytes, 26 sectors)
-  headroom  : 104 bytes free below NVK_TOP ($EFFF)
+  occupies  : $BC40 - $EF2A  (13035 bytes, 26 sectors)
+  headroom  : 213 bytes free below NVK_TOP ($EFFF)
 ```
 
 Burning is optional. The same bytes are also inside `kernel-full.bin`, and
@@ -312,6 +312,90 @@ Two things must hold on a machine that runs the kernel from ROM:
 EEPROM that starts a write cycle even when the chip is write-protected, so
 `krnboot` waits about 50 ms afterwards. Keep the EEPROM software
 write-protected, so the test cannot change it.
+
+### Building the kernel for another address
+
+Where the non-volatile kernel goes is set by two lines near the end of
+`include/memmap.inc`, and nowhere else:
+
+```
+NVK_BASE:       equ     $BC40       ; start of the non-volatile kernel
+NVK_TOP:        equ     $EFFF       ; ceiling; build fails if exceeded
+```
+
+`NVK_BASE` is where the image starts. `NVK_TOP` is the last address it may
+use; it places nothing, it only makes the build fail if the image would pass
+it. The defaults suit a machine with RAM up to `$EFFF` and something else
+(a monitor, the BIOS) from `$F000`.
+
+To move the kernel, edit those two lines and run `make everything`. The
+build reports where the image landed and how much room is left:
+
+```
+check_kernel_margin: OK -- non-volatile image c500-f7e9 (13034 bytes, ...), 22 bytes below NVK_TOP (f7ff).
+```
+
+or stops with
+
+```
+error: non-volatile image ends at f8e9, past NVK_TOP (f7ff). Lower NVK_BASE.
+```
+
+Then install the new `kernel-full.bin` (and burn the new `kernel-rom` if
+the kernel is in ROM). Only the kernel changes. `mbr.bin` and every program
+in `bin/` come out byte for byte the same, because programs reach the kernel
+through the table at `$0106` in RAM and never by its ROM address, so nothing
+already on a card needs rebuilding.
+
+**Example: at the start of ROM.** For a 32K RAM + 32K ROM machine with the
+kernel first in the ROM:
+
+```
+NVK_BASE:       equ     $8000
+NVK_TOP:        equ     $EFFF       ; or the byte before whatever follows it
+```
+
+The image then occupies `$8000`-`$B2E9`. Set `NVK_TOP` to the last ROM
+address the kernel may have, so the build catches it if the kernel ever
+grows into what comes after.
+
+**Example: as high as possible under `$F800`.** For a machine without the
+monitor, where the space up to `$F7FF` is free:
+
+```
+NVK_BASE:       equ     $C500
+NVK_TOP:        equ     $F7FF
+```
+
+Here `NVK_BASE` has to be found by trying, because the starting address is
+what you set and the size is only known after a build. Start from
+`NVK_TOP + 1 - size` using the size the last build reported
+(`$F800 - 13035 = $C515`), round down a little, build, and read the
+headroom. The size is not quite constant: the linker shortens a branch only
+when both ends fall in the same 256-byte page, so moving the base changes
+the size by a few bytes either way (`$C505` gave 13,031 bytes, `$C500` and
+`$C510` gave 13,034). Trust the figure the build prints, and leave a few
+dozen bytes of headroom unless you want to re-tune after every kernel
+change.
+
+What moving it buys depends on whether the region is RAM or ROM:
+
+- **Kernel loaded into RAM** (no ROM copy): programs get everything from
+  `PROG_BASE` up to just below `NVK_BASE`, so every byte the base goes up is
+  a byte more for programs. With the `$C500` example a machine with RAM to
+  `$F7FF` has 46,975 bytes for programs, against 44,735 at `$BC40`. The
+  region must be RAM all the way to the end of the image.
+- **Kernel in ROM**: programs get all RAM up to the BIOS's top of RAM, and
+  the kernel's position within the ROM makes no difference to that. Choose
+  it to fit around whatever else the ROM holds.
+
+A kernel built for one address does not run at another, and `krnboot`
+looks for the ROM copy only at the `NVK_BASE` it was built with. So the card
+and the ROM must be built from the same `memmap.inc`. If a card built for
+`$8000` goes into a machine whose ROM holds the kernel somewhere else,
+`krnboot` finds ROM at `$8000` without the kernel's signature and stops with
+"The ROM does not hold this kernel". If `$8000` is RAM on that machine, it
+loads its own copy there and runs from RAM, ignoring the ROM.
 
 `bin/` (built via `make progs`) isn't installed by the Makefile - copy its
 whole contents onto the FAT16 partition's `/bin` yourself (e.g. with
