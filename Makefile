@@ -4,6 +4,7 @@
 # Targets:
 #   all        build kernel-full.bin (default)
 #   mbr        build mbr.bin only
+#   bootchk    build bootchk.bin/.hex, a monitor-run test of the Elf/OS BIOS boot check
 #   rom        report where to burn kernel-rom.bin (ROM-able kernel half)
 #   install    build everything and write to disk (MBR + kernel)
 #   update     build and write kernel only (MBR already installed)
@@ -135,7 +136,7 @@ PROG_EXES = $(patsubst progs/%.asm,bin/%,$(PROG_SRCS))
 TEST_SRCS = $(wildcard test/*.asm)
 TEST_EXES = $(patsubst test/%.asm,test/bin/%,$(TEST_SRCS))
 
-.PHONY: all everything mbr rom install update progs test sdk release clean
+.PHONY: all everything mbr bootchk rom install update progs test sdk release clean
 
 all: $(FULL_BIN)
 
@@ -148,6 +149,9 @@ all: $(FULL_BIN)
 
 boot/mbr.prg: boot/mbr.asm include/bios.inc include/opcodes.def
 	cd boot && $(ASM) $(ASMFLAGS) mbr.asm
+
+boot/bootchk.prg: boot/bootchk.asm include/bios.inc include/opcodes.def
+	cd boot && $(ASM) $(ASMFLAGS) bootchk.asm
 
 boot/krnboot.prg: boot/krnboot.asm $(INCS)
 	cd boot && $(ASM) $(ASMFLAGS) krnboot.asm
@@ -482,6 +486,16 @@ bin/ms: progs/ms.prg lib/fmt32.prg lib/file_glob.prg | bin
 $(MBR_BIN): boot/mbr.prg
 	$(LINK) $(LFLAGS) -o $(MBR_BIN) boot/mbr.prg
 
+# Boot-check test program, loaded and run from the monitor at $2000
+# (see boot/bootchk.asm). Built only by "make bootchk".
+bootchk.bin: boot/bootchk.prg
+	$(LINK) -b -be -o bootchk.bin boot/bootchk.prg
+	rm -f bootchk.lkb
+
+bootchk.hex: boot/bootchk.prg
+	$(LINK) -i -be -o bootchk.hex boot/bootchk.prg
+	rm -f bootchk.lkb
+
 $(KRNBOOT_BIN): boot/krnboot.prg
 	$(LINK) $(LFLAGS) -o $(KRNBOOT_BIN) boot/krnboot.prg
 
@@ -529,6 +543,8 @@ $(FULL_BIN): $(KRNBOOT_BIN) $(KERNEL_BIN) tools/split_kernel.py
 #------------------------------------------------------------------
 
 mbr: $(MBR_BIN)
+
+bootchk: bootchk.bin bootchk.hex
 
 # Where to burn the ROM image, and how much room is left under NVK_TOP.
 rom: $(FULL_BIN)
@@ -750,7 +766,7 @@ clean:
 	      progs/*.prg progs/*.lst progs/*.build progs/*.lkb \
 	      test/*.prg test/*.lst test/*.build test/*.lkb \
 	      lib/*.prg lib/*.lst \
-	      $(MBR_BIN) $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN) \
+	      $(MBR_BIN) bootchk.bin bootchk.hex $(KRNBOOT_BIN) $(KERNEL_BIN) $(FULL_BIN) \
 	      $(KVOL_BIN) $(ROM_BIN) $(ROM_HEX) ksym.sym \
 	      $(SDK_OUT)
 	rm -rf test/bin

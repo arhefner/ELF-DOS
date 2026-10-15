@@ -46,6 +46,7 @@ f_inputl:   equ     $FF69       ; read a line into the buffer at RF,
 ; DF = 1 on return means the operation failed)
 f_idereset: equ     $FF36       ; reset the disk interface
 f_ideread:  equ     $FF3C       ; read one sector
+f_initcall: equ     $FF3F       ; R4/R5 = SCRT, then SEP R3 with R3 = R6
 f_idewrite: equ     $FF39       ; write one sector
 
 ; Strings

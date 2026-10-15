@@ -92,7 +92,25 @@ mbr_unit:   db          0               ; boot unit, saved at entry
             db          0,0             ; reserved, pad to 6 bytes
 
 ;--------------------------------------------------------------
-; MBR entry point - $0106
+; $0106: entry. Jumps over the block below.
+;
+; Mike Riley's Elf/OS BIOS (Elf-BIOS, bios.asm "btcheck") refuses to
+; boot a sector unless a checksum over its bytes $0100-$0140 equals
+; $60. Per byte, with D starting at 0:  D = (D + byte) * 2  (mod 256);
+; its shl/shr/shlc sequence comes to exactly that. Each byte is doubled
+; once more for every byte after it, so only the last 7 ($013A-$0140)
+; can affect the result: $013A-$013F are zeros and $0140 is $30, giving
+; (0 + $30) * 2 = $60. The block is at a fixed address (6-byte header +
+; 3-byte LBR = $0109), so code changes elsewhere cannot disturb it.
+; Mini/DOS's SYS meets the same check by patching a byte at $0140.
+;--------------------------------------------------------------
+            lbr         mbr_main        ; $0106-$0108
+            ds          $013A-$0109     ; unused
+            db          0,0,0,0,0,0     ; $013A-$013F
+            db          $30             ; $0140, btcheck value
+
+;--------------------------------------------------------------
+; MBR main, reached from the LBR at $0106
 ; On entry: SCRT initialized by ROM, small stack at $00FF, and R8.1 =
 ; the unit this sector was read from. BIOSes that support more than one
 ; unit pass it there (with drive/head bits above it, such as $E0, which
